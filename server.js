@@ -30,6 +30,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('/api/state', (req, res) => {
   res.json({
     signals: state.lastDisplay,
+    prices: state.livePrices || {},
     history: (state.signalHistory || []).slice(-50).reverse(),
     autoTune: {
       threshold: state.autoConfidenceThreshold,
