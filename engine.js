@@ -2022,7 +2022,21 @@ function checkSpreadAnomaly(symbol, quote) {
 
 
 // ---- Stubs de UI (no aplica en backend, no hay DOM) ----
-function updatePriceUI() {}
+function updatePriceUI(symbol, quote, asset) {
+  state.livePrices = state.livePrices || {};
+  state.livePrices[symbol] = {
+    name: asset.name,
+    decimals: asset.decimals,
+    last: quote.last,
+    change: pctDiff(quote.last, quote.open),
+    bid: quote.bid || null,
+    ask: quote.ask || null,
+    spread: quote.spread !== undefined ? quote.spread : null,
+    estimatedSpread: !!quote.estimatedSpread,
+    timestamp: quote.timestamp,
+    source: quote.source
+  };
+}
 function renderTradingHoursBar() {}
 function assetFeedSkeleton() { return ''; }
 function renderAssetsFeedSkeleton() {}
