@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PulseTrade PRO — Panel</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0a0f1a">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0a0f1a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;padding:16px 16px 60px}
+  h1{font-size:1.2rem;margin-bottom:4px}
+  .sub{color:#64748b;font-size:0.8rem;margin-bottom:16px}
+  .btn{display:block;width:100%;padding:14px;border-radius:12px;border:none;background:linear-gradient(135deg,#06b6d4,#0891b2);color:#fff;font-weight:700;font-size:0.95rem;margin-bottom:16px;cursor:pointer}
+  .btn.on{background:#166534}
+  .btn:disabled{opacity:0.5}
+  .card{background:#1a2332;border:1px solid #2d3a4f;border-radius:14px;padding:14px 16px;margin-bottom:10px}
+  .card.long{border-color:rgba(34,197,94,0.4)}
+  .card.short{border-color:rgba(239,68,68,0.4)}
+  .sym{font-weight:700;font-size:0.95rem}
+  .action{font-size:1.4rem;font-weight:800}
+  .action.long{color:#4ade80}
+  .action.short{color:#f87171}
+  .muted{color:#64748b;font-size:0.8rem}
+  .levels{display:flex;gap:8px;margin-top:8px;font-size:0.8rem;font-family:monospace}
+  .levels div{flex:1;background:#0d1321;border-radius:8px;padding:8px;text-align:center}
+  .section-title{font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:#64748b;margin:20px 0 8px;font-weight:700}
+  .hist-row{display:flex;justify-content:space-between;font-size:0.8rem;padding:8px 0;border-bottom:1px solid #1a2332}
+  .status{font-size:0.75rem;color:#64748b;text-align:center;margin-top:10px}
+</style>
+</head>
+<body>
+  <h1>⚡ PulseTrade PRO</h1>
+  <div class="sub">El motor corre en el servidor las 24 horas. No necesitas tener esta pantalla abierta.</div>
+  <button class="btn" id="subBtn">Activar notificaciones</button>
+
+  <div class="section-title">Señales activas</div>
+  <div id="signals"></div>
+
+  <div class="section-title">Historial reciente</div>
+  <div id="history"></div>
+
+  <div class="status" id="status">Cargando...</div>
+
+<script>
+async function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+
+async function setupPush() {
+  const btn = document.getElementById('subBtn');
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    btn.textContent = 'Notificaciones no soportadas en este navegador';
+    btn.disabled = true;
+    return;
+  }
+  const reg = await navigator.serviceWorker.register('/service-worker.js');
+  const existing = await reg.pushManager.getSubscription();
+  if (existing) { btn.textContent = '✓ Notificaciones activadas'; btn.classList.add('on'); }
+
+  btn.addEventListener('click', async () => {
+    if (btn.classList.contains('on')) return;
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { btn.textContent = 'Permiso denegado — actívalo en Ajustes del navegador'; return; }
+    const { key } = await fetch('/api/vapid-public-key').then(r => r.json());
+    if (!key) { btn.textContent = 'Servidor sin configurar (faltan claves VAPID)'; return; }
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: await urlBase64ToUint8Array(key) });
+    await fetch('/api/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sub) });
+    btn.textContent = '✓ Notificaciones activadas';
+    btn.classList.add('on');
+  });
+}
+
+function renderSignals(signals) {
+  const el = document.getElementById('signals');
+  const entries = Object.entries(signals || {});
+  if (!entries.length) { el.innerHTML = '<div class="muted">Sin señales activas por ahora.</div>'; return; }
+  el.innerHTML = entries.map(([symbol, d]) => {
+    if (!d || !d.frozen) return `<div class="card"><div class="sym">${symbol}</div><div class="muted">Sin señal / esperando confirmación</div></div>`;
+    const f = d.frozen;
+    return `<div class="card ${f.type}">
+      <div class="sym">${symbol} <span class="muted">· confianza ${f.confidence}%</span></div>
+      <div class="action ${f.type}">${f.type === 'long' ? 'LONG' : 'SHORT'}</div>
+      <div class="levels">
+        <div>Entrada<br>${f.entry?.toFixed(f.decimals)}</div>
+        <div>SL<br>${f.sl?.toFixed(f.decimals)}</div>
+        <div>TP1<br>${f.tp1?.toFixed(f.decimals)}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderHistory(history) {
+  const el = document.getElementById('history');
+  if (!history || !history.length) { el.innerHTML = '<div class="muted">Todavía no hay historial.</div>'; return; }
+  el.innerHTML = history.slice(0, 15).map(h => `
+    <div class="hist-row">
+      <span>${h.symbol} <b style="color:${h.type==='long'?'#4ade80':'#f87171'}">${h.type?.toUpperCase()}</b></span>
+      <span class="muted">${new Date(h.timestamp).toLocaleString('es-AR')}</span>
+    </div>`).join('');
+}
+
+async function refresh() {
+  try {
+    const data = await fetch('/api/state').then(r => r.json());
+    renderSignals(data.signals);
+    renderHistory(data.history);
+    document.getElementById('status').textContent = `Actualizado ${new Date(data.updatedAt).toLocaleTimeString('es-AR')} · ${data.subscriberCount} dispositivo(s) recibiendo notificaciones`;
+  } catch (e) {
+    document.getElementById('status').textContent = 'No se pudo conectar con el servidor.';
+  }
+}
+
+setupPush();
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>
