@@ -2366,7 +2366,14 @@ async function refreshAllData(forceRefresh = false) {
   renderTradingHoursBar();
   if (forceRefresh) setLoading(true, 'Consultando proveedores de datos...');
   try {
-    await Promise.allSettled(Object.keys(ASSETS).map(symbol => refreshAsset(symbol, forceRefresh)));
+    // Antes se pedían los 4 activos en paralelo. El plan gratuito de Twelve Data permite
+    // solo 8 llamadas por minuto, y cada activo hace 2 (precio + velas) — en paralelo se
+    // superaba el límite al instante y todo fallaba con 429. Ahora se piden de a uno,
+    // con una pausa entre cada uno, para quedar dentro de la cuota gratuita.
+    for (const symbol of Object.keys(ASSETS)) {
+      await refreshAsset(symbol, forceRefresh);
+      await new Promise(r => setTimeout(r, 4000));
+    }
   } finally {
     if (forceRefresh) setLoading(false);
   }

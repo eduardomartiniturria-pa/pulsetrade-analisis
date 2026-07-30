@@ -79,9 +79,11 @@ async function runCycle() {
   }
 }
 
-// Arranque: primer chequeo inmediato + backtest de calibración (solo si no corrió en 24h).
+// Arranque: primer chequeo inmediato. El backtest de calibración se corre 2 minutos después,
+// para no pedirle datos a Twelve Data al mismo tiempo que el primer chequeo (juntos superaban
+// el límite gratuito de 8 pedidos/minuto y todo fallaba).
 runCycle();
-BacktestEngine.runAll(false);
+setTimeout(() => BacktestEngine.runAll(false), 2 * 60 * 1000);
 
 // Cada 5 minutos (ajustable con CRON_SCHEDULE en .env). Con notificaciones push no hace falta
 // el refresco cada 30s del navegador: 5 min es de sobra para timeframes de 15m/1h.
