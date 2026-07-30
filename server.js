@@ -17,7 +17,11 @@ state.apiKeys = {
   twelveData: process.env.TWELVEDATA_API_KEY || null,
   finnhub: process.env.FINNHUB_API_KEY || null,
   alphaVantage: process.env.ALPHAVANTAGE_API_KEY || null,
-  fmp: process.env.FMP_API_KEY || null
+  fmp: process.env.FMP_API_KEY || null,
+  // CryptoCompare (ahora CCData) dejó de aceptar pedidos sin API key — antes andaba gratis
+  // sin registrarse, por eso el código viejo no la pedía. Es gratis igual, solo hay que
+  // registrarse. Sin esta key, CryptoCompare devuelve HTTP 401 siempre.
+  cryptocompare: process.env.CRYPTOCOMPARE_API_KEY || null
 };
 state.lastDisplay = state.lastDisplay || {};
 
