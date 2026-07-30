@@ -117,14 +117,17 @@ const ASSETS = {
     symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', cryptocompare: 'BTC' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['binanceSpot', 'binanceFutures', 'cryptocompare', 'twelveData', 'finnhub', 'alphaVantage']
+    // Binance bloquea con HTTP 451 las IPs de datacenter (Render, Railway, AWS, etc.) sin
+    // importar la región configurada — no es un problema de cuenta ni de reintentos, así que
+    // se prueba último en vez de primero para no perder tiempo/timeout en cada ciclo.
+    providerPriority: ['cryptocompare', 'twelveData', 'finnhub', 'alphaVantage', 'binanceSpot', 'binanceFutures']
   },
   ETHUSD: {
     name: 'ETH/USD', market: 'crypto', type: 'crypto',
     symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', cryptocompare: 'ETH' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['binanceSpot', 'binanceFutures', 'cryptocompare', 'twelveData', 'finnhub', 'alphaVantage']
+    providerPriority: ['cryptocompare', 'twelveData', 'finnhub', 'alphaVantage', 'binanceSpot', 'binanceFutures']
   },
   EURUSD: {
     // Forex no usa openHour/closeHour/openDays: su horario real (Dom 22:00 UTC a Vie 22:00 UTC,
@@ -550,7 +553,13 @@ const ProviderAdapters = {
       const cached = ResponseCache.get(cacheKey);
       if (cached) return cached;
 
-      const res = await fetchWithTimeout(`${CONFIG.ENDPOINTS.CRYPTOCOMPARE}/pricemultifull?fsyms=${fsym}&tsyms=USD`);
+      const ccHeaders = state.apiKeys.cryptocompare ? { authorization: `Apikey ${state.apiKeys.cryptocompare}` } : {};
+      const res = await fetchWithTimeout(
+        `${CONFIG.ENDPOINTS.CRYPTOCOMPARE}/pricemultifull?fsyms=${fsym}&tsyms=USD`,
+        CONFIG.REQUEST_TIMEOUT,
+        { headers: ccHeaders },
+        'cryptocompare'
+      );
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       const d = data.RAW[fsym].USD;
@@ -574,8 +583,12 @@ const ProviderAdapters = {
       if (cached) return cached;
 
       const tfMap = { '5m': '5', '15m': '15', '1h': '60' };
+      const ccHeaders = state.apiKeys.cryptocompare ? { authorization: `Apikey ${state.apiKeys.cryptocompare}` } : {};
       const res = await fetchWithTimeout(
-        `${CONFIG.ENDPOINTS.CRYPTOCOMPARE}/v2/histominute?fsym=${fsym}&tsym=USD&limit=${limit}&aggregate=${tfMap[interval]||'15'}`
+        `${CONFIG.ENDPOINTS.CRYPTOCOMPARE}/v2/histominute?fsym=${fsym}&tsym=USD&limit=${limit}&aggregate=${tfMap[interval]||'15'}`,
+        CONFIG.REQUEST_TIMEOUT,
+        { headers: ccHeaders },
+        'cryptocompare'
       );
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
