@@ -435,6 +435,7 @@ function markProviderCooldown(providerName, errorMessage) {
   if (!ms) return;
   state.providerCooldownUntil = state.providerCooldownUntil || {};
   state.providerCooldownUntil[providerName] = Date.now() + ms;
+  console.log(`[cooldown] ${providerName} bloqueado ${Math.round(ms/1000)}s por: ${errorMessage}`);
 }
 
 function isProviderInCooldown(providerName) {
@@ -926,6 +927,12 @@ const MarketDataProvider = {
     // se prueba con todos igual como último recurso, por si el cooldown ya venció en la práctica.
     const readyProviders = eligible.filter(p => !isProviderInCooldown(p));
     const providersToTry = readyProviders.length > 0 ? readyProviders : eligible;
+    eligible.filter(p => isProviderInCooldown(p) && providersToTry !== eligible).forEach(p => {
+      const until = state.providerCooldownUntil[p];
+      const msg = `SALTEADO (cooldown ${Math.ceil((until - Date.now())/1000)}s)`;
+      addLog(ProviderAdapters[p]?.name || p, msg, symbol);
+      console.log(`[cooldown] ${p} ${msg} para ${symbol}`);
+    });
 
     const attempts = providersToTry.map(providerName => {
       const adapter = ProviderAdapters[providerName];
@@ -986,6 +993,12 @@ const MarketDataProvider = {
     if (eligible.length > 0) {
       const readyProviders = eligible.filter(p => !isProviderInCooldown(p));
       const providersToTry = readyProviders.length > 0 ? readyProviders : eligible;
+      eligible.filter(p => isProviderInCooldown(p) && providersToTry !== eligible).forEach(p => {
+        const until = state.providerCooldownUntil[p];
+        const msg = `OHLCV SALTEADO (cooldown ${Math.ceil((until - Date.now())/1000)}s)`;
+        addLog(ProviderAdapters[p]?.name || p, msg, symbol);
+        console.log(`[cooldown] ${p} ${msg} para ${symbol}`);
+      });
 
       const attempts = providersToTry.map(providerName =>
         ProviderAdapters[providerName].fetchOHLCV(symbol, tf, limit)
