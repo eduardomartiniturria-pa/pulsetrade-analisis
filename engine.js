@@ -632,7 +632,7 @@ const ProviderAdapters = {
       if (cached) return cached;
 
       const headers = new Headers();
-      headers.append('apikey', state.apiKeys.twelveData);
+      headers.append('Authorization', `apikey ${state.apiKeys.twelveData}`);
       const res = await fetchWithTimeout(
         `${CONFIG.ENDPOINTS.TWELVEDATA}/quote?symbol=${asset.symbols.twelveData}`,
         CONFIG.REQUEST_TIMEOUT,
@@ -663,7 +663,7 @@ const ProviderAdapters = {
 
       const tfMap = { '5m': '5min', '15m': '15min', '1h': '1h' };
       const headers = new Headers();
-      headers.append('apikey', state.apiKeys.twelveData);
+      headers.append('Authorization', `apikey ${state.apiKeys.twelveData}`);
       const res = await fetchWithTimeout(
         `${CONFIG.ENDPOINTS.TWELVEDATA}/time_series?symbol=${asset.symbols.twelveData}&interval=${tfMap[interval]||'15min'}&outputsize=${limit}`,
         CONFIG.REQUEST_TIMEOUT,
