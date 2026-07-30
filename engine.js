@@ -419,6 +419,29 @@ function addLog(provider, action, symbol) {
   if (state.logs.length > 20) state.logs.pop();
 }
 
+// Cooldown por proveedor: si un proveedor falla por rate limit (429 / "rate limit") o
+// geobloqueo (451), no tiene sentido volver a pedirle datos en el próximo ciclo (5 min después
+// seguiría bloqueado) — eso solo suma peticiones que profundizan el rate limit y ensucia el log.
+// Se lo saltea durante el cooldown y se prueba directo con el siguiente proveedor de la lista.
+function getProviderCooldownMs(errorMessage) {
+  const msg = (errorMessage || '').toLowerCase();
+  if (msg.includes('429') || msg.includes('rate limit')) return 5 * 60 * 1000; // 5 min
+  if (msg.includes('451')) return 30 * 60 * 1000; // geobloqueo no se resuelve reintentando
+  return null;
+}
+
+function markProviderCooldown(providerName, errorMessage) {
+  const ms = getProviderCooldownMs(errorMessage);
+  if (!ms) return;
+  state.providerCooldownUntil = state.providerCooldownUntil || {};
+  state.providerCooldownUntil[providerName] = Date.now() + ms;
+}
+
+function isProviderInCooldown(providerName) {
+  const until = state.providerCooldownUntil && state.providerCooldownUntil[providerName];
+  return !!until && Date.now() < until;
+}
+
 const ResponseCache = {
   data: {},
   get(key) {
@@ -562,7 +585,13 @@ const ProviderAdapters = {
       );
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
-      const d = data.RAW[fsym].USD;
+      // CryptoCompare a veces responde 200 OK con un cuerpo sin RAW (rate limit, o el símbolo
+      // no es reconocido por este endpoint de precios cripto). Antes esto explotaba con
+      // "Cannot read properties of undefined (reading '<fsym>')"; ahora se convierte en un
+      // error entendible y el activo cae al siguiente proveedor de la lista, como corresponde.
+      const raw = data && data.RAW && data.RAW[fsym] && data.RAW[fsym].USD;
+      if (!raw) throw new Error(data && data.Message ? data.Message : `CryptoCompare no devolvió datos para ${fsym}`);
+      const d = raw;
       const marketData = new MarketData({
         bid: d.BID, ask: d.ASK, last: d.PRICE,
         open: d.OPEN24HOUR || d.PRICE, high: d.HIGH24HOUR, low: d.LOW24HOUR,
@@ -627,10 +656,11 @@ const ProviderAdapters = {
       });
       ResponseCache.set(cacheKey, marketData);
       return marketData;
-    },
-    async fetchOHLCV(symbol, interval, limit = 100) {
-      throw new Error('ExchangeRate-API no soporta datos históricos');
     }
+    // Sin fetchOHLCV a propósito: ExchangeRate-API solo da la tasa actual, no velas históricas.
+    // Al no definir el método, MarketDataProvider.getOHLCV lo excluye automáticamente de la
+    // lista de proveedores elegibles para velas, en vez de intentarlo y loguear un fallo
+    // esperado en cada ciclo.
   },
 
   twelveData: {
@@ -891,7 +921,13 @@ const MarketDataProvider = {
 
     if (eligible.length === 0) throw new Error(`Datos de mercado temporalmente no disponibles para ${symbol}.`);
 
-    const attempts = eligible.map(providerName => {
+    // Si hay proveedores elegibles que NO están en cooldown, se prueba solo con esos (evita
+    // seguir golpeando a uno que ya sabemos que está bloqueado). Si todos están en cooldown,
+    // se prueba con todos igual como último recurso, por si el cooldown ya venció en la práctica.
+    const readyProviders = eligible.filter(p => !isProviderInCooldown(p));
+    const providersToTry = readyProviders.length > 0 ? readyProviders : eligible;
+
+    const attempts = providersToTry.map(providerName => {
       const adapter = ProviderAdapters[providerName];
       addLog(adapter.name, 'INTENTO', symbol);
       return adapter.fetchQuote(symbol)
@@ -913,6 +949,7 @@ const MarketDataProvider = {
             errorCount: (state.providerStats[providerName]?.errorCount || 0) + 1,
             lastErrorMsg: error.message
           };
+          markProviderCooldown(providerName, error.message);
           addLog(adapter.name, 'FALLO: ' + error.message, symbol);
           console.warn(`Provider ${providerName} falló para ${symbol}:`, error.message);
           throw error;
@@ -927,7 +964,7 @@ const MarketDataProvider = {
     } catch (aggregateError) {
       const errors = aggregateError.errors || [];
       const detailMessages = errors.map((e, i) => {
-        const name = eligible[i] || 'desconocido';
+        const name = providersToTry[i] || 'desconocido';
         return `${name}: ${e.message}`;
       }).join('; ');
       throw new Error(`Todos los proveedores fallaron: ${detailMessages}`);
@@ -947,13 +984,17 @@ const MarketDataProvider = {
     });
 
     if (eligible.length > 0) {
-      const attempts = eligible.map(providerName =>
+      const readyProviders = eligible.filter(p => !isProviderInCooldown(p));
+      const providersToTry = readyProviders.length > 0 ? readyProviders : eligible;
+
+      const attempts = providersToTry.map(providerName =>
         ProviderAdapters[providerName].fetchOHLCV(symbol, tf, limit)
           .then(data => {
             if (!data.isValid) throw new Error('Datos insuficientes');
             return data;
           })
           .catch(error => {
+            markProviderCooldown(providerName, error.message);
             console.warn(`OHLCV ${providerName} falló:`, error.message);
             throw error;
           })
