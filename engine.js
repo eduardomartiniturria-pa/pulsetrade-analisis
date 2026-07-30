@@ -686,14 +686,20 @@ const ProviderAdapters = {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const d = await res.json();
       if (d.status === 'error') throw new Error(d.message || 'Error de Twelve Data');
+      // El endpoint /quote de TwelveData no devuelve "price" (ni "bid"/"ask" en el plan free);
+      // el precio actual viene en "close". Antes se leía d.price (undefined -> NaN), por lo que
+      // MarketData.validate() rechazaba SIEMPRE la respuesta como "Datos inválidos", aunque
+      // TwelveData hubiera contestado bien.
+      const lastPrice = parseFloat(d.close);
+      const bid = parseFloat(d.bid) || lastPrice, ask = parseFloat(d.ask) || lastPrice;
       const data = new MarketData({
-        bid: parseFloat(d.bid), ask: parseFloat(d.ask), last: parseFloat(d.price),
+        bid, ask, last: lastPrice,
         open: parseFloat(d.open), high: parseFloat(d.high), low: parseFloat(d.low),
         close: parseFloat(d.previous_close), volume: parseFloat(d.volume),
         timestamp: Date.now(), timeframe: '1d', marketStatus: d.is_market_open ? 'open' : 'closed',
-        spread: calculateSpread(parseFloat(d.bid), parseFloat(d.ask), asset.pipSize),
+        spread: calculateSpread(bid, ask, asset.pipSize),
         source: 'Twelve Data', symbol,
-        estimatedSpread: false
+        estimatedSpread: !d.bid || !d.ask
       });
       ResponseCache.set(cacheKey, data);
       return data;
