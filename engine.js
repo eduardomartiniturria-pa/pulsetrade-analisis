@@ -72,7 +72,7 @@ const CONFIG = {
     TWELVEDATA: 'https://api.twelvedata.com',
     FINNHUB: 'https://finnhub.io/api/v1',
     ALPHAVANTAGE: 'https://www.alphavantage.co/query',
-    FMP: 'https://financialmodelingprep.com/api/v3'
+    FMP: 'https://financialmodelingprep.com/stable'
   }
 };
 
@@ -435,7 +435,6 @@ function markProviderCooldown(providerName, errorMessage) {
   if (!ms) return;
   state.providerCooldownUntil = state.providerCooldownUntil || {};
   state.providerCooldownUntil[providerName] = Date.now() + ms;
-  console.log(`[cooldown] ${providerName} bloqueado ${Math.round(ms/1000)}s por: ${errorMessage}`);
 }
 
 function isProviderInCooldown(providerName) {
@@ -686,20 +685,14 @@ const ProviderAdapters = {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const d = await res.json();
       if (d.status === 'error') throw new Error(d.message || 'Error de Twelve Data');
-      // El endpoint /quote de TwelveData no devuelve "price" (ni "bid"/"ask" en el plan free);
-      // el precio actual viene en "close". Antes se leía d.price (undefined -> NaN), por lo que
-      // MarketData.validate() rechazaba SIEMPRE la respuesta como "Datos inválidos", aunque
-      // TwelveData hubiera contestado bien.
-      const lastPrice = parseFloat(d.close);
-      const bid = parseFloat(d.bid) || lastPrice, ask = parseFloat(d.ask) || lastPrice;
       const data = new MarketData({
-        bid, ask, last: lastPrice,
+        bid: parseFloat(d.bid), ask: parseFloat(d.ask), last: parseFloat(d.price),
         open: parseFloat(d.open), high: parseFloat(d.high), low: parseFloat(d.low),
         close: parseFloat(d.previous_close), volume: parseFloat(d.volume),
         timestamp: Date.now(), timeframe: '1d', marketStatus: d.is_market_open ? 'open' : 'closed',
-        spread: calculateSpread(bid, ask, asset.pipSize),
+        spread: calculateSpread(parseFloat(d.bid), parseFloat(d.ask), asset.pipSize),
         source: 'Twelve Data', symbol,
-        estimatedSpread: !d.bid || !d.ask
+        estimatedSpread: false
       });
       ResponseCache.set(cacheKey, data);
       return data;
@@ -865,7 +858,7 @@ const ProviderAdapters = {
       if (cached) return cached;
 
       const res = await fetchWithTimeout(
-        `${CONFIG.ENDPOINTS.FMP}/quote/${asset.symbols.fmp}?apikey=${state.apiKeys.fmp}`,
+        `${CONFIG.ENDPOINTS.FMP}/quote?symbol=${asset.symbols.fmp}&apikey=${state.apiKeys.fmp}`,
         CONFIG.REQUEST_TIMEOUT, {}, 'fmp'
       );
       if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -896,7 +889,7 @@ const ProviderAdapters = {
       if (cached) return cached;
 
       const res = await fetchWithTimeout(
-        `${CONFIG.ENDPOINTS.FMP}/historical-chart/${interval === '5m' ? '5min' : interval === '15m' ? '15min' : '1hour'}/${asset.symbols.fmp}?apikey=${state.apiKeys.fmp}`,
+        `${CONFIG.ENDPOINTS.FMP}/historical-chart/${interval === '5m' ? '5min' : interval === '15m' ? '15min' : '1hour'}?symbol=${asset.symbols.fmp}&apikey=${state.apiKeys.fmp}`,
         CONFIG.REQUEST_TIMEOUT, {}, 'fmp'
       );
       if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -933,12 +926,6 @@ const MarketDataProvider = {
     // se prueba con todos igual como último recurso, por si el cooldown ya venció en la práctica.
     const readyProviders = eligible.filter(p => !isProviderInCooldown(p));
     const providersToTry = readyProviders.length > 0 ? readyProviders : eligible;
-    eligible.filter(p => isProviderInCooldown(p) && providersToTry !== eligible).forEach(p => {
-      const until = state.providerCooldownUntil[p];
-      const msg = `SALTEADO (cooldown ${Math.ceil((until - Date.now())/1000)}s)`;
-      addLog(ProviderAdapters[p]?.name || p, msg, symbol);
-      console.log(`[cooldown] ${p} ${msg} para ${symbol}`);
-    });
 
     const attempts = providersToTry.map(providerName => {
       const adapter = ProviderAdapters[providerName];
@@ -999,12 +986,6 @@ const MarketDataProvider = {
     if (eligible.length > 0) {
       const readyProviders = eligible.filter(p => !isProviderInCooldown(p));
       const providersToTry = readyProviders.length > 0 ? readyProviders : eligible;
-      eligible.filter(p => isProviderInCooldown(p) && providersToTry !== eligible).forEach(p => {
-        const until = state.providerCooldownUntil[p];
-        const msg = `OHLCV SALTEADO (cooldown ${Math.ceil((until - Date.now())/1000)}s)`;
-        addLog(ProviderAdapters[p]?.name || p, msg, symbol);
-        console.log(`[cooldown] ${p} ${msg} para ${symbol}`);
-      });
 
       const attempts = providersToTry.map(providerName =>
         ProviderAdapters[providerName].fetchOHLCV(symbol, tf, limit)
