@@ -47,7 +47,7 @@ const CONFIG = {
     SEED_CAP: 40,
     YIELD_EVERY: 40
   },
-  PROVIDER_PRIORITY: ['binanceSpot', 'exchangerate', 'twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare', 'binanceFutures'],
+  PROVIDER_PRIORITY: ['exchangerate', 'twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare', 'binanceSpot', 'binanceFutures'],
   ENDPOINTS: {
     BINANCE_SPOT: 'https://api.binance.com/api/v3',
     BINANCE_FUTURES: 'https://fapi.binance.com/fapi/v1',
@@ -86,14 +86,14 @@ const ASSETS = {
     symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', cryptocompare: 'BTC' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['binanceSpot', 'twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare', 'binanceFutures']
+    providerPriority: ['twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare', 'binanceSpot', 'binanceFutures']
   },
   ETHUSD: {
     name: 'ETH/USD', market: 'crypto', type: 'crypto',
     symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', cryptocompare: 'ETH' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['binanceSpot', 'twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare', 'binanceFutures']
+    providerPriority: ['twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare', 'binanceSpot', 'binanceFutures']
   },
   EURUSD: {
     name: 'EUR/USD', market: 'forex', type: 'forex',
@@ -440,11 +440,17 @@ const ProviderAdapters = {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const d = await res.json();
       if (d.status === 'error') throw new Error(d.message || 'Error de Twelve Data');
+      // El endpoint /quote de TwelveData no devuelve "price" (ni "bid"/"ask" en el plan free);
+      // el precio actual viene en "close". Con d.price (undefined) el "last" quedaba en NaN y
+      // MarketData.validate() rechazaba SIEMPRE la respuesta como "Datos inválidos", aunque
+      // TwelveData hubiera contestado bien.
+      const lastPrice = parseFloat(d.close);
+      const bid = parseFloat(d.bid) || lastPrice, ask = parseFloat(d.ask) || lastPrice;
       const data = new MarketData({
-        bid: parseFloat(d.bid), ask: parseFloat(d.ask), last: parseFloat(d.price), open: parseFloat(d.open), high: parseFloat(d.high),
+        bid, ask, last: lastPrice, open: parseFloat(d.open), high: parseFloat(d.high),
         low: parseFloat(d.low), close: parseFloat(d.previous_close), volume: parseFloat(d.volume), timestamp: Date.now(),
         timeframe: '1d', marketStatus: d.is_market_open ? 'open' : 'closed',
-        spread: calculateSpread(parseFloat(d.bid), parseFloat(d.ask), asset.pipSize), source: 'Twelve Data', symbol, estimatedSpread: false
+        spread: calculateSpread(bid, ask, asset.pipSize), source: 'Twelve Data', symbol, estimatedSpread: !d.bid || !d.ask
       });
       ResponseCache.set(cacheKey, data); return data;
     },
