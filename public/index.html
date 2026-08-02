@@ -123,6 +123,10 @@ let lastState = null;
 
 function fmt(n, d) { return (n === null || n === undefined || isNaN(n)) ? '--' : Number(n).toFixed(d); }
 function fmtPips(p) { return (p === null || p === undefined) ? '' : Math.abs(p).toFixed(1) + ' pips'; }
+// Redondea porcentajes de confianza a un entero — antes se mostraban con hasta 14 decimales
+// (ej. "69.84615384615384%") porque el motor calcula la confianza como fracción de patrones
+// detectados y nunca se redondeaba antes de mostrarla.
+function fmtPct(p) { return (p === null || p === undefined || isNaN(p)) ? '0' : Math.round(p); }
 
 async function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - base64String.length % 4) % 4);
@@ -196,11 +200,11 @@ function renderSignalCard(symbol) {
   }
   if (d.type === 'no-signal') {
     const a = d.analysis;
-    const conf = a ? a.confidence : 0;
+    const conf = fmtPct(a ? a.confidence : 0);
     return `<div class="signal-card no-signal">
       <div class="signal-title">⏸️ Sin señal clara</div>
       <div class="signal-badges-row"><span class="badge-offline">Confianza ${conf}%</span></div>
-      <div class="signal-reason">El motor SMC no encontró un patrón por encima del umbral actual (${a ? a.confidenceThreshold : 75}%).</div>
+      <div class="signal-reason">El motor SMC no encontró un patrón por encima del umbral actual (${a ? fmtPct(a.confidenceThreshold) : 75}%).</div>
     </div>`;
   }
 
@@ -227,7 +231,7 @@ function renderSignalCard(symbol) {
     <div class="signal-title">⚡ Señal SMC</div>
     <div class="signal-badges-row">
       <span class="badge-trend ${s.trend === 'bullish' ? 'bullish' : 'bearish'}">${s.trend === 'bullish' ? '📈 Tendencia alcista' : '📉 Tendencia bajista'}</span>
-      <span class="badge-active">Confianza ${s.confidence}%</span>
+      <span class="badge-active">Confianza ${fmtPct(s.confidence)}%</span>
       ${s.isConfluence ? `<span class="badge-smc">🔗 Confluencia (${s.strategyLabels.length})</span>` : '<span class="badge-smc">🎯 Individual</span>'}
       ${s.killZone ? '<span class="badge-smc">🕐 Kill Zone</span>' : ''}
       ${resolvedBadge}
@@ -257,7 +261,7 @@ function renderAutoTune() {
   if (!lastState.autoTune || !lastState.autoTune.threshold) return '';
   const t = lastState.autoTune.threshold[currentSymbol];
   if (t === undefined) return '';
-  return `<div class="autotune-bar"><span class="autotune-label">🧪 Auto-tune</span><span class="autotune-detail">Umbral de confianza actual para ${currentSymbol}: ${t}%</span></div>`;
+  return `<div class="autotune-bar"><span class="autotune-label">🧪 Auto-tune</span><span class="autotune-detail">Umbral de confianza actual para ${currentSymbol}: ${fmtPct(t)}%</span></div>`;
 }
 
 function renderHistory() {
