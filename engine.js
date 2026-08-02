@@ -618,7 +618,8 @@ const MarketDataProvider = {
         state.providers[providerName] = 'ok';
         state.providerStats[providerName] = { lastSuccess: Date.now(), successCount: (state.providerStats[providerName]?.successCount || 0) + 1 };
         addLog(adapter.name, 'ÉXITO', symbol);
-        return { providerName, data };
+        state.currentProvider = providerName;
+        return data;
       } catch (error) {
         state.providers[providerName] = 'fail';
         state.providerStats[providerName] = {
