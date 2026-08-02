@@ -201,10 +201,22 @@ function renderSignalCard(symbol) {
   if (d.type === 'no-signal') {
     const a = d.analysis;
     const conf = fmtPct(a ? a.confidence : 0);
+    // El motor aplica varios filtros DESPUÉS de calcular la confianza (volumen, vela de
+    // confirmación, mitigación, zona premium/descuento, tendencia de timeframe mayor). Antes
+    // este mensaje siempre decía "no superó el umbral", aunque la confianza ya lo hubiera
+    // superado y el bloqueo real fuera por otro motivo — ahora muestra la razón verdadera.
+    let reason = `El motor SMC no encontró un patrón por encima del umbral actual (${a ? fmtPct(a.confidenceThreshold) : 75}%).`;
+    if (a) {
+      if (a.filteredByVolume) reason = 'Se detectó un patrón, pero el volumen no confirmó el movimiento.';
+      else if (a.filteredByCandle) reason = 'Se detectó un patrón, pero faltó una vela de confirmación en la dirección esperada.';
+      else if (a.filteredByMitigation) reason = 'Se detectó un patrón, pero el nivel todavía no fue mitigado (modo estricto).';
+      else if (a.filteredByPremiumDiscount) reason = 'Se detectó un patrón, pero el precio está en una zona premium/descuento desfavorable.';
+      else if (a.filteredByHTF) reason = 'Se detectó un patrón, pero contradice la tendencia del timeframe mayor.';
+    }
     return `<div class="signal-card no-signal">
       <div class="signal-title">⏸️ Sin señal clara</div>
       <div class="signal-badges-row"><span class="badge-offline">Confianza ${conf}%</span></div>
-      <div class="signal-reason">El motor SMC no encontró un patrón por encima del umbral actual (${a ? fmtPct(a.confidenceThreshold) : 75}%).</div>
+      <div class="signal-reason">${reason}</div>
     </div>`;
   }
 
