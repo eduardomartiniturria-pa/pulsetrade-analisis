@@ -985,6 +985,75 @@ class SMCEngine {
     return (utcHour >= 7 && utcHour < 10) || (utcHour >= 12 && utcHour < 15);
   }
 
+  // Hora local de Nueva York para un timestamp dado, calculada con Intl (respeta el cambio de
+  // horario de verano de EE.UU. automáticamente, a diferencia de usar un offset UTC fijo).
+  static getNYTimeParts(ms) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false
+    }).formatToParts(new Date(ms));
+    return {
+      weekday: parts.find(p => p.type === 'weekday').value,
+      hour: parseInt(parts.find(p => p.type === 'hour').value, 10) % 24,
+      minute: parseInt(parts.find(p => p.type === 'minute').value, 10)
+    };
+  }
+
+  // Ventana específica pedida para la estrategia "Open New York Kill Zone": lunes a viernes,
+  // 9:30 a 13:30 hora de Nueva York. Fuera de esta ventana (incluidos fines de semana) esta
+  // estrategia puntual no aplica — el resto de las estrategias del motor no se ven afectadas.
+  static isNYKillZoneWindow(nowMs = Date.now()) {
+    const { weekday, hour, minute } = this.getNYTimeParts(nowMs);
+    if (weekday === 'Sat' || weekday === 'Sun') return false;
+    const minutesNow = hour * 60 + minute;
+    return minutesNow >= (9 * 60 + 30) && minutesNow < (13 * 60 + 30);
+  }
+
+  // Estrategia "Open New York Kill Zone": la vela de 15m que cubre 9:30-9:45 NY marca el sesgo
+  // (alcista o bajista según su color). Después, dentro de la ventana horaria, se busca que el
+  // precio "barra" el mínimo (o máximo) de esa vela de apertura y aparezca una vela fuerte en la
+  // dirección del sesgo que rompa el máximo/mínimo de la vela anterior — igual que la barrida de
+  // liquidez que ya usa el motor, pero anclada específicamente a la apertura de Nueva York. No
+  // pide velas de 5m nuevas: reutiliza las mismas velas de 15m que ya se piden para todo lo demás,
+  // para no sumar llamadas extra a las APIs. Tampoco opera si el régimen de mercado es lateral.
+  static detectNYKillZoneSweep(candles, regime) {
+    const result = { bullish: false, bearish: false };
+    if (!this.isNYKillZoneWindow()) return result;
+    if (regime === 'ranging') return result;
+    if (!candles || candles.length < 5) return result;
+
+    const last = candles[candles.length - 1];
+    const lastNY = this.getNYTimeParts(last.time);
+    if (lastNY.hour * 60 + lastNY.minute < 9 * 60 + 45) return result; // aún no cerró la vela de apertura
+
+    let openIdx = -1;
+    for (let i = candles.length - 1; i >= 0 && i >= candles.length - 20; i--) {
+      const p = this.getNYTimeParts(candles[i].time);
+      if (p.hour === 9 && p.minute >= 30 && p.minute < 45) { openIdx = i; break; }
+    }
+    if (openIdx === -1 || openIdx >= candles.length - 1) return result;
+
+    const openCandle = candles[openIdx];
+    const sessionCandles = candles.slice(openIdx);
+    if (sessionCandles.length < 2) return result;
+
+    const bias = openCandle.close > openCandle.open ? 'bull' : (openCandle.close < openCandle.open ? 'bear' : null);
+    if (!bias) return result;
+
+    const prior = candles[candles.length - 2];
+    const between = sessionCandles.slice(1, -1);
+
+    if (bias === 'bull') {
+      const sweptLow = between.some(c => c.low < openCandle.low) || last.low < openCandle.low;
+      const strongBull = last.close > last.open && last.close > prior.high;
+      if (sweptLow && strongBull) result.bullish = true;
+    } else {
+      const sweptHigh = between.some(c => c.high > openCandle.high) || last.high > openCandle.high;
+      const strongBear = last.close < last.open && last.close < prior.low;
+      if (sweptHigh && strongBear) result.bearish = true;
+    }
+    return result;
+  }
+
   static checkVolumeConfirmation(candles, lookback = 20, multiplier = 1.2) {
     if (!candles || candles.length < lookback + 1) return { confirmed: true, available: false, score: 0, ratio: null };
     const last = candles[candles.length - 1];
@@ -1052,9 +1121,12 @@ class SMCEngine {
     const premiumDiscount = this.calculatePremiumDiscount(candles);
     const reversal = this.detectReversalBands(candles);
     const vPattern = this.detectVPattern(candles, atr);
+    const regime = detectMarketRegime(candles);
+    const nyKZ = this.detectNYKillZoneSweep(candles, regime);
 
     const STRATEGIES = [
       { key: 'choch', label: 'CHoCH (cambio de carácter)', base: 82, bullish: choch.bullish, bearish: choch.bearish },
+      { key: 'nykz', label: 'Kill Zone NY (apertura + barrida)', base: 80, bullish: nyKZ.bullish, bearish: nyKZ.bearish },
       { key: 'sweep', label: 'Barrida de liquidez', base: 78, bullish: sweep.bullish, bearish: sweep.bearish },
       { key: 'bos', label: 'BOS (ruptura de estructura)', base: 76, bullish: bos.bullish, bearish: bos.bearish },
       { key: 'reversal', label: 'Bandas de Reversión (AlgoAlpha)', base: 75, bullish: reversal.bullish, bearish: reversal.bearish },
@@ -1122,7 +1194,7 @@ class SMCEngine {
 
     return {
       valid: true, direction, confidence, atr, trend, killZone, isConfluence, strategyLabels, strategyKeys,
-      regime: detectMarketRegime(candles), pivotLevel, pivots, filteredByConfidence, filteredByVolume, filteredByCandle,
+      regime, pivotLevel, pivots, filteredByConfidence, filteredByVolume, filteredByCandle,
       filteredByMitigation, filteredByHTF, htfTrendDirection: htfTrend ? htfTrend.direction : null,
       filteredByPremiumDiscount, premiumDiscountZone: premiumDiscount ? premiumDiscount.zone : null,
       volumeRatio: volumeCheck.ratio, volumeAvailable: volumeCheck.available, confidenceThreshold, patternAdj, strictMode,
