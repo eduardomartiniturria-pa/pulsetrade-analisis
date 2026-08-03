@@ -2,14 +2,15 @@ require('dotenv').config();
 require('./localStorage'); // debe cargarse ANTES que engine.js, que asume localStorage global
 
 const express = require('express');
-const cron = require('node-cron');
 const path = require('path');
 const { addSubscription, removeSubscription, getCount } = require('./subscriptions');
 
 // engine.js declara ASSETS, CONFIG, state, refreshAllData, BacktestEngine, etc. como globales
 // de módulo (era un <script> de navegador). Lo cargamos aquí y usamos esas mismas funciones,
 // sin haber tocado su lógica de señales/aprendizaje.
-const { state, ASSETS, CONFIG, refreshAllData, BacktestEngine } = require('./engine.js');
+// startAutoRefreshLoop reemplaza al cron fijo de 5 min: corre solo, y decide internamente
+// cada cuánto refrescar (15 min normal, 1 min dentro de la ventana Kill Zone NY 10:30-13:30 ARG).
+const { state, ASSETS, CONFIG, refreshAllData, BacktestEngine, startAutoRefreshLoop } = require('./engine.js');
 
 // El motor original leía las API keys desde localStorage (las cargaba el usuario a mano en el
 // navegador). Aquí vienen del .env del servidor, una sola vez para todos.
@@ -61,7 +62,7 @@ app.post('/api/unsubscribe', (req, res) => {
   res.json({ ok: true });
 });
 
-// Disparo manual (por si quieres forzar un chequeo desde el panel, no depende del cron).
+// Disparo manual (por si quieres forzar un chequeo desde el panel, no depende del scheduler).
 app.post('/api/check-now', async (req, res) => {
   refreshAllData(true).catch(e => console.error('Error en check-now:', e.message));
   res.json({ ok: true, started: true });
@@ -75,21 +76,13 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`PulseTrade backend escuchando en :${PORT}`));
 
 // ---- Motor en segundo plano: corre solo, sin depender de ningún celular abierto ----
-async function runCycle() {
-  try {
-    await refreshAllData(false);
-  } catch (e) {
-    console.error('Error en el ciclo de señales:', e.message);
-  }
-}
-
-// Arranque: primer chequeo inmediato. El backtest de calibración se corre 2 minutos después,
-// para no pedirle datos a Twelve Data al mismo tiempo que el primer chequeo (juntos superaban
-// el límite gratuito de 8 pedidos/minuto y todo fallaba).
-runCycle();
+// El backtest de calibración se corre 2 minutos después del arranque, para no pedirle datos
+// a Twelve Data al mismo tiempo que el primer chequeo (juntos superaban el límite gratuito
+// de 8 pedidos/minuto y todo fallaba).
 setTimeout(() => BacktestEngine.runAll(false), 2 * 60 * 1000);
 
-// Cada 5 minutos (ajustable con CRON_SCHEDULE en .env). Con notificaciones push no hace falta
-// el refresco cada 30s del navegador: 5 min es de sobra para timeframes de 15m/1h.
-const schedule = process.env.CRON_SCHEDULE || '*/5 * * * *';
-cron.schedule(schedule, runCycle);
+// Arranca el scheduler autoajustable de engine.js: hace el primer chequeo inmediato y a partir
+// de ahí decide solo cada cuánto volver a refrescar (15 min normal / 1 min en Kill Zone NY).
+// Reemplaza al viejo cron.schedule('*/5 * * * *', runCycle) — NO agregar un cron aparte acá,
+// se duplicarían los requests contra los proveedores y empeoraría el rate limit.
+startAutoRefreshLoop();
