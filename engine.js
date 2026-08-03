@@ -31,6 +31,13 @@ const CONFIG = {
   CACHE_TTL: 30000,
   CONFIDENCE_THRESHOLD: 70,
   SIGNAL_COOLDOWN_MS: 15 * 60 * 1000,
+  // Refresco dinámico: cada 15 min en horario normal (para no saturar rate limits),
+  // pero cada 1 min dentro de la ventana Kill Zone NY (10:30-13:30 hora Argentina),
+  // para no perderse el detalle de la vela de apertura ni la Bala de Plata.
+  DYNAMIC_REFRESH: {
+    normalIntervalMs: 15 * 60 * 1000,
+    killZoneIntervalMs: 60 * 1000
+  },
   HTF_MAP: { '5m': '1h', '15m': '1h' },
   SPREAD_ANOMALY_MULTIPLIER: 2.5,
   AUTO_TUNE: {
@@ -151,6 +158,25 @@ let state = {
 };
 
 function getNow() { return new Date(); }
+
+// Ventana Kill Zone NY en hora Argentina (10:30-13:30), usada solo para decidir
+// la frecuencia de refresco del scheduler. Es independiente del cálculo que hace
+// CustomStrategies.detectKillZoneNY() sobre las velas (ese sigue intacto).
+function isArgKillZoneWindow(nowMs = Date.now()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Argentina/Buenos_Aires', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false
+  }).formatToParts(new Date(nowMs));
+  const weekday = parts.find(p => p.type === 'weekday').value;
+  if (weekday === 'Sat' || weekday === 'Sun') return false;
+  const hour = parseInt(parts.find(p => p.type === 'hour').value, 10) % 24;
+  const minute = parseInt(parts.find(p => p.type === 'minute').value, 10);
+  const minutesNow = hour * 60 + minute;
+  return minutesNow >= (10 * 60 + 30) && minutesNow < (13 * 60 + 30);
+}
+
+function getDynamicRefreshIntervalMs() {
+  return isArgKillZoneWindow() ? CONFIG.DYNAMIC_REFRESH.killZoneIntervalMs : CONFIG.DYNAMIC_REFRESH.normalIntervalMs;
+}
 
 function getThresholdForSymbol(symbol, regime = null) {
   const cfg = CONFIG.AUTO_TUNE;
@@ -1750,4 +1776,37 @@ async function refreshAllData(forceRefresh = false) {
 
 async function requestWakeLock() {}
 
-module.exports = { state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine };
+// ---------------------------------------------------------
+// Scheduler autoajustable: reemplaza al setInterval fijo de server.js.
+// Corre refreshAllData() y programa la siguiente pasada según la hora:
+// cada 15 min normalmente, cada 1 min dentro de la ventana Kill Zone NY.
+// Llamar UNA sola vez desde server.js con: engine.startAutoRefreshLoop();
+// (y sacar de ahí cualquier setInterval(refreshAllData, ...) que hubiera).
+// ---------------------------------------------------------
+let autoRefreshTimer = null;
+
+async function autoRefreshTick() {
+  try {
+    await refreshAllData(false);
+  } catch (e) {
+    console.warn('autoRefreshTick: error en refreshAllData', e.message);
+  } finally {
+    const delay = getDynamicRefreshIntervalMs();
+    addLog('scheduler', `Próximo refresco en ${Math.round(delay / 1000)}s (${isArgKillZoneWindow() ? 'Kill Zone NY activa' : 'horario normal'})`, 'ALL');
+    autoRefreshTimer = setTimeout(autoRefreshTick, delay);
+  }
+}
+
+function startAutoRefreshLoop() {
+  if (autoRefreshTimer) return; // ya está corriendo, no duplicar
+  autoRefreshTick();
+}
+
+function stopAutoRefreshLoop() {
+  if (autoRefreshTimer) { clearTimeout(autoRefreshTimer); autoRefreshTimer = null; }
+}
+
+module.exports = {
+  state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
+  startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isArgKillZoneWindow
+};
