@@ -9,8 +9,18 @@
 // - Delays aumentados entre activos (8s) y entre requests (1.5s)
 // - Proveedores de pago/fallidos al final de la lista
 // - Cooldowns extendidos para rate limits (10min) y errores 402/403
+//
+// Cambios v4.1:
+// - Se integran 3 estrategias INDEPENDIENTES (custom-strategies.js):
+//   Zona de Caza (Kill Zone NY), Pivots Breakout & Reversal,
+//   Price Action + RSI + EMA. Corren en paralelo a las estrategias SMC
+//   (CHoCH, BOS, OB, FVG, Sweep, etc), NO pasan por evalSide() ni por
+//   los filtros globales de confluencia/premium-discount/HTF, y emiten
+//   su propia señal con su propio SL/TP cuando cumplen TODAS sus
+//   condiciones.
 
 const { sendPushToAll } = require('./subscriptions');
+const CustomStrategies = require('./custom-strategies');
 
 const CONFIG = {
   REFRESH_INTERVAL: 30000,
@@ -115,6 +125,7 @@ let state = {
   signalHistory: (() => { try { return JSON.parse(localStorage.getItem('pt_v4_signals') || '[]'); } catch (e) { return []; } })(),
   providers: {}, providerStats: {}, currentProvider: null, autoRefresh: null,
   lastFetchTime: null, currentData: null, logs: [], activeSignals: {}, lastSignalAt: {},
+  activeCustomSignals: {}, lastCustomSignalAt: {},
   spreadHistory: (() => { try { return JSON.parse(localStorage.getItem('pt_spread_history') || '{}'); } catch (e) { return {}; } })(),
   autoConfidenceThreshold: (() => {
     try { const v2 = JSON.parse(localStorage.getItem('pt_auto_threshold_v2') || 'null'); if (v2 && typeof v2 === 'object') return v2; } catch (e) {}
@@ -440,10 +451,6 @@ const ProviderAdapters = {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const d = await res.json();
       if (d.status === 'error') throw new Error(d.message || 'Error de Twelve Data');
-      // El endpoint /quote de TwelveData no devuelve "price" (ni "bid"/"ask" en el plan free);
-      // el precio actual viene en "close". Con d.price (undefined) el "last" quedaba en NaN y
-      // MarketData.validate() rechazaba SIEMPRE la respuesta como "Datos inválidos", aunque
-      // TwelveData hubiera contestado bien.
       const lastPrice = parseFloat(d.close);
       const bid = parseFloat(d.bid) || lastPrice, ask = parseFloat(d.ask) || lastPrice;
       const data = new MarketData({
@@ -608,7 +615,6 @@ const MarketDataProvider = {
     const readyProviders = eligible.filter(p => !isProviderInCooldown(p));
     const providersToTry = readyProviders.length > 0 ? readyProviders : eligible;
 
-    // SECUENCIAL con delay entre intentos (no paralelo) para no saturar rate limits
     for (const providerName of providersToTry) {
       const adapter = ProviderAdapters[providerName];
       addLog(adapter.name, 'INTENTO', symbol);
@@ -629,7 +635,7 @@ const MarketDataProvider = {
         markProviderCooldown(providerName, error.message);
         addLog(adapter.name, 'FALLO: ' + error.message, symbol);
         console.warn(`Provider ${providerName} falló para ${symbol}:`, error.message);
-        await sleep(1500); // delay entre intentos
+        await sleep(1500);
       }
     }
 
@@ -985,8 +991,6 @@ class SMCEngine {
     return (utcHour >= 7 && utcHour < 10) || (utcHour >= 12 && utcHour < 15);
   }
 
-  // Hora local de Nueva York para un timestamp dado, calculada con Intl (respeta el cambio de
-  // horario de verano de EE.UU. automáticamente, a diferencia de usar un offset UTC fijo).
   static getNYTimeParts(ms) {
     const parts = new Intl.DateTimeFormat('en-US', {
       timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false
@@ -998,9 +1002,6 @@ class SMCEngine {
     };
   }
 
-  // Ventana específica pedida para la estrategia "Open New York Kill Zone": lunes a viernes,
-  // 9:30 a 13:30 hora de Nueva York. Fuera de esta ventana (incluidos fines de semana) esta
-  // estrategia puntual no aplica — el resto de las estrategias del motor no se ven afectadas.
   static isNYKillZoneWindow(nowMs = Date.now()) {
     const { weekday, hour, minute } = this.getNYTimeParts(nowMs);
     if (weekday === 'Sat' || weekday === 'Sun') return false;
@@ -1008,13 +1009,6 @@ class SMCEngine {
     return minutesNow >= (9 * 60 + 30) && minutesNow < (13 * 60 + 30);
   }
 
-  // Estrategia "Open New York Kill Zone": la vela de 15m que cubre 9:30-9:45 NY marca el sesgo
-  // (alcista o bajista según su color). Después, dentro de la ventana horaria, se busca que el
-  // precio "barra" el mínimo (o máximo) de esa vela de apertura y aparezca una vela fuerte en la
-  // dirección del sesgo que rompa el máximo/mínimo de la vela anterior — igual que la barrida de
-  // liquidez que ya usa el motor, pero anclada específicamente a la apertura de Nueva York. No
-  // pide velas de 5m nuevas: reutiliza las mismas velas de 15m que ya se piden para todo lo demás,
-  // para no sumar llamadas extra a las APIs. Tampoco opera si el régimen de mercado es lateral.
   static detectNYKillZoneSweep(candles, regime) {
     const result = { bullish: false, bearish: false };
     if (!this.isNYKillZoneWindow()) return result;
@@ -1023,7 +1017,7 @@ class SMCEngine {
 
     const last = candles[candles.length - 1];
     const lastNY = this.getNYTimeParts(last.time);
-    if (lastNY.hour * 60 + lastNY.minute < 9 * 60 + 45) return result; // aún no cerró la vela de apertura
+    if (lastNY.hour * 60 + lastNY.minute < 9 * 60 + 45) return result;
 
     let openIdx = -1;
     for (let i = candles.length - 1; i >= 0 && i >= candles.length - 20; i--) {
@@ -1499,7 +1493,8 @@ function pushSignalHistory(signal) {
     entry: signal.entry, sl: signal.sl, tp1: signal.tp1, tp2: signal.tp2,
     slPips: signal.slPips, tp1Pips: signal.tp1Pips, tp2Pips: signal.tp2Pips,
     decimals: signal.decimals, confidence: signal.confidence, result: 'pending', timestamp: signal.timestamp,
-    strategyKeys: signal.strategyKeys || [], rMultiple: null, regime: signal.regime || 'unknown'
+    strategyKeys: signal.strategyKeys || [], rMultiple: null, regime: signal.regime || 'unknown',
+    source: signal.source || 'smc'
   };
   state.signalHistory.unshift(entry);
   if (state.signalHistory.length > CONFIG.HISTORY_LIMIT) state.signalHistory.pop();
@@ -1602,7 +1597,7 @@ function showSignalAlertBanner() {}
 
 function notifyNewSignal(signal) {
   const asset = ASSETS[signal.symbol];
-  const title = `${signal.type === 'long' ? '🟢 LONG' : '🔴 SHORT'} ${asset ? asset.name : signal.symbol}`;
+  const title = `${signal.type === 'long' ? '🟢 LONG' : '🔴 SHORT'} ${asset ? asset.name : signal.symbol}${signal.source && signal.source !== 'smc' ? ' · ' + signal.strategyLabels[0] : ''}`;
   const body = `Entrada ${fmt(signal.entry, signal.decimals)} · SL ${fmt(signal.sl, signal.decimals)} · TP1 ${fmt(signal.tp1, signal.decimals)} · Confianza ${signal.confidence}%`;
   sendPushToAll({ title, body, symbol: signal.symbol, signal }).catch(err => console.error('Error enviando push:', err.message));
 }
@@ -1620,6 +1615,7 @@ function resolveActiveSignal(symbol, quote, analysis) {
   const inCooldown = isNewDirection && cooldownRemainingMs > 0;
   if (isNewDirection && !inCooldown) {
     const frozen = SignalEngine.build(symbol, quote, analysis);
+    frozen.source = 'smc';
     frozen.detectedAt = Date.now();
     state.activeSignals[symbol] = frozen;
     state.lastSignalAt[symbol] = frozen.detectedAt;
@@ -1634,6 +1630,50 @@ function resolveActiveSignal(symbol, quote, analysis) {
   const result = { type: frozen.type, frozen, currentPrice: quote.last, hitTP, hitSL, isNewDirection: isNewDirection && !inCooldown };
   if (hitTP || hitSL) delete state.activeSignals[symbol];
   return result;
+}
+
+// ---------------------------------------------------------
+// Resolución de señales de las 3 estrategias independientes
+// (Kill Zone NY, Pivots Breakout & Reversal, Price Action+RSI+EMA)
+// Cada una tiene su propio cooldown por símbolo+estrategia, y NO
+// pisa ni se mezcla con las señales SMC de resolveActiveSignal().
+// ---------------------------------------------------------
+function resolveCustomSignal(symbol, quote, customSig, asset) {
+  const key = `${symbol}_${customSig.strategy}`;
+  const existing = state.activeCustomSignals[key];
+  const isNewDirection = !existing || existing.type !== customSig.direction;
+  const lastAt = state.lastCustomSignalAt[key] || 0;
+  const cooldownRemainingMs = CONFIG.SIGNAL_COOLDOWN_MS - (Date.now() - lastAt);
+  const inCooldown = isNewDirection && cooldownRemainingMs > 0;
+
+  if (isNewDirection && !inCooldown) {
+    const entry = customSig.entry || quote.last;
+    const sl = customSig.sl;
+    const tp1 = customSig.tp1;
+    const tp2 = customSig.tp2 || customSig.tp1;
+    const slPips = toPips(sl, entry, asset);
+    const tp1Pips = toPips(tp1, entry, asset);
+    const tp2Pips = toPips(tp2, entry, asset);
+    const frozen = {
+      type: customSig.direction, symbol, asset, entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips,
+      rr1: '1:2', rr2: tp2 !== tp1 ? '1:3' : '1:2', confidence: 100,
+      strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
+      details: customSig.details, source: customSig.strategy, regime: 'n/a',
+      timestamp: Date.now(), decimals: asset.decimals, detectedAt: Date.now()
+    };
+    state.activeCustomSignals[key] = frozen;
+    state.lastCustomSignalAt[key] = frozen.detectedAt;
+    pushSignalHistory(frozen);
+    notifyNewSignal(frozen);
+  }
+
+  const frozen = state.activeCustomSignals[key];
+  if (!frozen) return null;
+  const isLong = frozen.type === 'long';
+  const hitTP = isLong ? quote.last >= frozen.tp1 : quote.last <= frozen.tp1;
+  const hitSL = isLong ? quote.last <= frozen.sl : quote.last >= frozen.sl;
+  if (hitTP || hitSL) delete state.activeCustomSignals[key];
+  return { type: frozen.type, frozen, currentPrice: quote.last, hitTP, hitSL };
 }
 
 async function refreshAsset(symbol, forceRefresh = false) {
@@ -1672,6 +1712,20 @@ async function refreshAsset(symbol, forceRefresh = false) {
     if (display.cooldownMinutesLeft) addLog(quote.source, `Cambio de dirección bloqueado por cooldown (${display.cooldownMinutesLeft} min restantes)`, symbol);
     renderSignal(symbol, display);
     checkHistoryOutcomes(symbol, quote.last, ohlcv.candles);
+
+    // --- Estrategias independientes (Kill Zone NY, Pivots B&R, Price Action+RSI+EMA) ---
+    // Corren en paralelo, no pasan por evalSide() ni por los filtros SMC de arriba.
+    try {
+      const customSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset);
+      customSignals.forEach(sig => {
+        const customDisplay = resolveCustomSignal(symbol, quote, sig, asset);
+        if (customDisplay) {
+          addLog(quote.source, `[${sig.label}] señal ${sig.direction === 'long' ? 'LONG' : 'SHORT'} independiente`, symbol);
+        }
+      });
+    } catch (e) {
+      console.warn(`Estrategias independientes fallaron para ${symbol}:`, e.message);
+    }
   } catch (error) {
     if (error.message === 'MERCADO_CERRADO') renderSignal(symbol, { type: 'market-closed' });
     else {
