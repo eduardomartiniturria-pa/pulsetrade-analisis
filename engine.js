@@ -73,7 +73,9 @@ const CONFIG = {
     TWELVEDATA: 'https://api.twelvedata.com',
     FINNHUB: 'https://finnhub.io/api/v1',
     ALPHAVANTAGE: 'https://www.alphavantage.co/query',
-    FMP: 'https://financialmodelingprep.com/stable'
+    FMP: 'https://financialmodelingprep.com/stable',
+    // Región de tu cuenta MetaApi (revisar en el panel: new-york, london, singapore, etc.)
+    METAAPI_MARKET_DATA: 'https://mt-market-data-client-api-v1.new-york.agiliumtrade.ai'
   }
 };
 
@@ -100,29 +102,29 @@ class OHLCVData {
 const ASSETS = {
   BTCUSD: {
     name: 'BTC/USD', market: 'crypto', type: 'crypto',
-    symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', cryptocompare: 'BTC' },
+    symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', cryptocompare: 'BTC', metaapi: 'BTCUSD' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare', 'binanceSpot', 'binanceFutures']
+    providerPriority: ['metaapi', 'twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare', 'binanceSpot', 'binanceFutures']
   },
   ETHUSD: {
     name: 'ETH/USD', market: 'crypto', type: 'crypto',
-    symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', cryptocompare: 'ETH' },
+    symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', cryptocompare: 'ETH', metaapi: 'ETHUSD' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare', 'binanceSpot', 'binanceFutures']
+    providerPriority: ['metaapi', 'twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare', 'binanceSpot', 'binanceFutures']
   },
   EURUSD: {
     name: 'EUR/USD', market: 'forex', type: 'forex',
-    symbols: { twelveData: 'EUR/USD', finnhub: 'OANDA:EUR_USD', alphaVantage: 'EURUSD', fmp: 'EURUSD', cryptocompare: 'EUR', exchangerate: 'EUR' },
+    symbols: { twelveData: 'EUR/USD', finnhub: 'OANDA:EUR_USD', alphaVantage: 'EURUSD', fmp: 'EURUSD', cryptocompare: 'EUR', exchangerate: 'EUR', metaapi: 'EURUSD' },
     decimals: 5, pipSize: 0.0001, is24h: false, timezone: 'UTC',
-    providerPriority: ['exchangerate', 'twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare']
+    providerPriority: ['metaapi', 'exchangerate', 'twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare']
   },
   XAUUSD: {
     name: 'XAU/USD (Oro)', market: 'forex', type: 'commodity',
-    symbols: { twelveData: 'XAU/USD', finnhub: 'OANDA:XAU_USD', alphaVantage: 'XAU', fmp: 'GCUSD', cryptocompare: 'XAU' },
+    symbols: { twelveData: 'XAU/USD', finnhub: 'OANDA:XAU_USD', alphaVantage: 'XAU', fmp: 'GCUSD', cryptocompare: 'XAU', metaapi: 'XAUUSD' },
     decimals: 2, pipSize: 0.1, is24h: false, timezone: 'UTC',
-    providerPriority: ['twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare']
+    providerPriority: ['metaapi', 'twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare']
   }
 };
 
@@ -152,8 +154,10 @@ let state = {
     twelveData: localStorage.getItem('pt_api_twelve') || null,
     finnhub: localStorage.getItem('pt_api_finnhub') || null,
     alphaVantage: localStorage.getItem('pt_api_alpha') || null,
-    fmp: localStorage.getItem('pt_api_fmp') || null
+    fmp: localStorage.getItem('pt_api_fmp') || null,
+    metaapi: localStorage.getItem('pt_api_metaapi') || null
   },
+  metaapiAccountId: localStorage.getItem('pt_metaapi_account_id') || null,
   refreshPaused: false, wakeLock: null
 };
 
@@ -345,6 +349,44 @@ const ResponseCache = {
 };
 
 const ProviderAdapters = {
+  metaapi: {
+    name: 'MetaApi (MT5)', requiresKey: true, supports: ['BTCUSD','ETHUSD','EURUSD','XAUUSD'],
+    async fetchQuote(symbol) {
+      if (!state.apiKeys.metaapi || !state.metaapiAccountId) throw new Error('MetaApi no configurado (falta token o accountId)');
+      const asset = ASSETS[symbol];
+      const cacheKey = `ma_quote_${symbol}`;
+      const cached = ResponseCache.get(cacheKey); if (cached) return cached;
+      const url = `${CONFIG.ENDPOINTS.METAAPI_MARKET_DATA}/users/current/accounts/${state.metaapiAccountId}/symbols/${asset.symbols.metaapi}/current-price`;
+      const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, { headers: { 'auth-token': state.apiKeys.metaapi } }, 'metaapi');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const d = await res.json();
+      // MetaApi devuelve bid/ask reales del broker conectado (a diferencia de la mayoría
+      // de los proveedores gratuitos de arriba, que estiman el spread con ±0.05%).
+      const bid = d.bid, ask = d.ask, last = (bid + ask) / 2;
+      const data = new MarketData({
+        bid, ask, last, open: d.open || last, high: d.high || last, low: d.low || last, close: last,
+        volume: 0, timestamp: Date.now(), timeframe: '1d', marketStatus: 'open',
+        spread: calculateSpread(bid, ask, asset.pipSize), source: 'MetaApi (MT5)', symbol, estimatedSpread: false
+      });
+      ResponseCache.set(cacheKey, data); return data;
+    },
+    async fetchOHLCV(symbol, interval, limit = 100) {
+      if (!state.apiKeys.metaapi || !state.metaapiAccountId) throw new Error('MetaApi no configurado (falta token o accountId)');
+      const asset = ASSETS[symbol];
+      const cacheKey = `ma_ohlcv_${symbol}_${interval}`;
+      const cached = ResponseCache.get(cacheKey); if (cached) return cached;
+      const tfMap = { '5m': '5m', '15m': '15m', '1h': '1h' };
+      const url = `${CONFIG.ENDPOINTS.METAAPI_MARKET_DATA}/users/current/accounts/${state.metaapiAccountId}/historical-market-data/symbols/${asset.symbols.metaapi}/timeframes/${tfMap[interval] || '15m'}/candles?limit=${limit}`;
+      const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, { headers: { 'auth-token': state.apiKeys.metaapi } }, 'metaapi');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const result = new OHLCVData(data.map(k => ({
+        time: new Date(k.time).getTime(), open: k.open, high: k.high, low: k.low, close: k.close, volume: k.tickVolume || 0
+      })));
+      ResponseCache.set(cacheKey, result); return result;
+    }
+  },
+
   binanceSpot: {
     name: 'Binance Spot', requiresKey: false, supports: ['BTCUSD','ETHUSD'],
     async fetchQuote(symbol) {
@@ -1742,7 +1784,7 @@ async function refreshAsset(symbol, forceRefresh = false) {
     // --- Estrategias independientes (Kill Zone NY, Pivots B&R, Price Action+RSI+EMA) ---
     // Corren en paralelo, no pasan por evalSide() ni por los filtros SMC de arriba.
     try {
-      const customSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset);
+      const customSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles);
       customSignals.forEach(sig => {
         const customDisplay = resolveCustomSignal(symbol, quote, sig, asset);
         if (customDisplay) {
@@ -1792,21 +1834,4 @@ async function autoRefreshTick() {
     console.warn('autoRefreshTick: error en refreshAllData', e.message);
   } finally {
     const delay = getDynamicRefreshIntervalMs();
-    addLog('scheduler', `Próximo refresco en ${Math.round(delay / 1000)}s (${isArgKillZoneWindow() ? 'Kill Zone NY activa' : 'horario normal'})`, 'ALL');
-    autoRefreshTimer = setTimeout(autoRefreshTick, delay);
-  }
-}
-
-function startAutoRefreshLoop() {
-  if (autoRefreshTimer) return; // ya está corriendo, no duplicar
-  autoRefreshTick();
-}
-
-function stopAutoRefreshLoop() {
-  if (autoRefreshTimer) { clearTimeout(autoRefreshTimer); autoRefreshTimer = null; }
-}
-
-module.exports = {
-  state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
-  startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isArgKillZoneWindow
-};
+    addLog('schedule
