@@ -438,10 +438,165 @@ function detectPriceActionRsiEma(candles) {
 }
 
 // ---------------------------------------------------------
+// ESTRATEGIA 4: SUPPLY AND DEMAND (Oferta y Demanda)
+// ---------------------------------------------------------
+// Timeframe principal (HTF): H1/H4 -> se usa htfCandles (ya se piden en engine.js).
+// Timeframe de entrada: M15/M5 -> se usa `candles` (el timeframe activo del motor).
+// Zonas: base de una vela/grupo antes de un impulso fuerte (igual concepto que Order
+// Block, pero acá se trackea CUÁNTAS VECES fue tocada la zona después de formada -
+// "fresca" = 0-1 toques). Se descartan zonas ya muy tocadas.
+// Confirmación de entrada: pin bar o engulfing en la zona, a favor de la tendencia mayor
+// (EMA20 vs EMA50 en HTF). SL detrás de la zona, TP en la zona opuesta más cercana.
+
+function findImpulseZones(candles, atr) {
+  // Detecta zonas de oferta/demanda: una vela base (cuerpo chico) seguida de un
+  // movimiento impulsivo (cuerpo grande, >= 1.5x ATR) en la dirección opuesta al lado
+  // de la zona. La zona es el rango de la vela base.
+  const zones = [];
+  if (!candles || candles.length < 10 || !atr) return zones;
+  for (let i = 2; i < candles.length - 1; i++) {
+    const base = candles[i];
+    const impulse = candles[i + 1];
+    const baseBody = Math.abs(base.close - base.open);
+    const impulseBody = Math.abs(impulse.close - impulse.open);
+    if (impulseBody < atr * 1.5) continue; // no hubo impulso real
+    if (baseBody > impulseBody * 0.5) continue; // la "base" no es lo bastante chica
+
+    const zoneLow = Math.min(base.open, base.close, base.low);
+    const zoneHigh = Math.max(base.open, base.close, base.high);
+
+    if (impulse.close > impulse.open) {
+      // impulso alcista -> la base queda como zona de DEMANDA
+      zones.push({ type: 'demand', low: zoneLow, high: zoneHigh, formedAt: i, touches: 0 });
+    } else if (impulse.close < impulse.open) {
+      // impulso bajista -> la base queda como zona de OFERTA
+      zones.push({ type: 'supply', low: zoneLow, high: zoneHigh, formedAt: i, touches: 0 });
+    }
+  }
+
+  // Contar toques posteriores a la formación (cuántas veces el precio volvió a la zona
+  // desde que se formó). "Fresca" = 0 o 1 toque. Más de eso, se descarta.
+  zones.forEach(zone => {
+    for (let j = zone.formedAt + 2; j < candles.length; j++) {
+      const c = candles[j];
+      const touchedZone = c.low <= zone.high && c.high >= zone.low;
+      if (touchedZone) zone.touches++;
+    }
+  });
+
+  return zones.filter(z => z.touches <= 1);
+}
+
+function isPinBar(candle, direction) {
+  const range = candle.high - candle.low;
+  if (range <= 0) return false;
+  const body = Math.abs(candle.close - candle.open);
+  const upperWick = candle.high - Math.max(candle.open, candle.close);
+  const lowerWick = Math.min(candle.open, candle.close) - candle.low;
+  if (direction === 'bull') return lowerWick >= range * 0.55 && body <= range * 0.35;
+  return upperWick >= range * 0.55 && body <= range * 0.35;
+}
+
+function isEngulfing(prev, last, direction) {
+  if (direction === 'bull') {
+    return last.close > last.open && prev.close < prev.open &&
+      last.close >= prev.open && last.open <= prev.close;
+  }
+  return last.close < last.open && prev.close > prev.open &&
+    last.open >= prev.close && last.close <= prev.open;
+}
+
+function detectSupplyDemand(candles, htfCandles) {
+  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null };
+  if (!candles || candles.length < 15) return result;
+
+  // ATR del timeframe de entrada, para dimensionar impulsos y definir zonas
+  const trueRanges = [];
+  for (let i = 1; i < candles.length; i++) {
+    const h = candles[i].high, l = candles[i].low, pc = candles[i - 1].close;
+    trueRanges.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+  }
+  const atr = trueRanges.length ? trueRanges.slice(-14).reduce((a, b) => a + b, 0) / Math.min(14, trueRanges.length) : null;
+  if (!atr) return result;
+
+  // Zonas detectadas en el timeframe HTF si está disponible (más confiables/"reales"),
+  // si no, se cae al timeframe de entrada.
+  const zoneSource = (htfCandles && htfCandles.length >= 15) ? htfCandles : candles;
+  const zones = findImpulseZones(zoneSource, atr);
+  if (!zones.length) return result;
+
+  const last = candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
+
+  // Filtro de tendencia mayor: EMA20 vs EMA50 en HTF (si hay datos suficientes)
+  let htfTrend = 'neutral';
+  if (htfCandles && htfCandles.length >= 50) {
+    const ema20 = calculateEMASeries(htfCandles, 20);
+    const ema50 = calculateEMASeries(htfCandles, 50);
+    const i = htfCandles.length - 1;
+    if (ema20[i] !== null && ema50[i] !== null) htfTrend = ema20[i] > ema50[i] ? 'bullish' : (ema20[i] < ema50[i] ? 'bearish' : 'neutral');
+  }
+
+  // Zona de demanda más cercana por debajo, zona de oferta más cercana por arriba
+  const demandZones = zones.filter(z => z.type === 'demand').sort((a, b) => b.high - a.high);
+  const supplyZones = zones.filter(z => z.type === 'supply').sort((a, b) => a.low - b.low);
+
+  const priceInZone = (zone) => last.low <= zone.high && last.high >= zone.low;
+
+  // --- Lado COMPRA: precio en zona de demanda + confirmación alcista ---
+  const demandHit = demandZones.find(z => priceInZone(z));
+  if (demandHit && htfTrend !== 'bearish') {
+    const confirm = isPinBar(last, 'bull') || isEngulfing(prev, last, 'bull');
+    if (confirm && last.close > last.open) {
+      const oppositeSupply = supplyZones.find(z => z.low > last.close);
+      if (oppositeSupply) {
+        result.bullish = true;
+        result.entry = last.close;
+        result.sl = demandHit.low - atr * 0.2;
+        result.tp1 = oppositeSupply.low;
+        const risk = result.entry - result.sl;
+        const reward = result.tp1 - result.entry;
+        if (risk > 0 && reward / risk >= 2) {
+          result.details.push(`Rebote alcista en demanda fresca (${demandHit.touches} toque previo), TP en oferta siguiente`);
+        } else {
+          result.bullish = false; // no cumple RR mínima 1:2
+        }
+      }
+    }
+  }
+
+  // --- Lado VENTA: precio en zona de oferta + confirmación bajista ---
+  if (!result.bullish) {
+    const supplyHit = supplyZones.find(z => priceInZone(z));
+    if (supplyHit && htfTrend !== 'bullish') {
+      const confirm = isPinBar(last, 'bear') || isEngulfing(prev, last, 'bear');
+      if (confirm && last.close < last.open) {
+        const oppositeDemand = demandZones.find(z => z.high < last.close);
+        if (oppositeDemand) {
+          result.bearish = true;
+          result.entry = last.close;
+          result.sl = supplyHit.high + atr * 0.2;
+          result.tp1 = oppositeDemand.high;
+          const risk = result.sl - result.entry;
+          const reward = result.entry - result.tp1;
+          if (risk > 0 && reward / risk >= 2) {
+            result.details.push(`Rechazo bajista en oferta fresca (${supplyHit.touches} toque previo), TP en demanda siguiente`);
+          } else {
+            result.bearish = false; // no cumple RR mínima 1:2
+          }
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------
 // EVALUACIÓN CONJUNTA (independiente, sin pasar por evalSide)
 // ---------------------------------------------------------
 
-function evaluateAll(candles, symbol, asset) {
+function evaluateAll(candles, symbol, asset, htfCandles = null) {
   const signals = [];
 
   const kz = detectKillZoneNY(candles);
@@ -471,6 +626,15 @@ function evaluateAll(candles, symbol, asset) {
     });
   }
 
+  const sd = detectSupplyDemand(candles, htfCandles);
+  if (sd.bullish || sd.bearish) {
+    signals.push({
+      strategy: 'supply_demand', label: 'Supply and Demand',
+      direction: sd.bullish ? 'long' : 'short', entry: sd.entry, sl: sd.sl, tp1: sd.tp1,
+      details: sd.details, independent: true
+    });
+  }
+
   return signals;
 }
 
@@ -479,6 +643,7 @@ module.exports = {
   detectKillZoneNY,
   detectPivotsBreakoutReversal,
   detectPriceActionRsiEma,
+  detectSupplyDemand,
   calculateRSISeries,
   calculateMACDSeries,
   calculateSMASeries
