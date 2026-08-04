@@ -1834,4 +1834,21 @@ async function autoRefreshTick() {
     console.warn('autoRefreshTick: error en refreshAllData', e.message);
   } finally {
     const delay = getDynamicRefreshIntervalMs();
-    addLog('schedule
+    addLog('scheduler', `Próximo refresco en ${Math.round(delay / 1000)}s (${isArgKillZoneWindow() ? 'Kill Zone NY activa' : 'horario normal'})`, 'ALL');
+    autoRefreshTimer = setTimeout(autoRefreshTick, delay);
+  }
+}
+
+function startAutoRefreshLoop() {
+  if (autoRefreshTimer) return; // ya está corriendo, no duplicar
+  autoRefreshTick();
+}
+
+function stopAutoRefreshLoop() {
+  if (autoRefreshTimer) { clearTimeout(autoRefreshTimer); autoRefreshTimer = null; }
+}
+
+module.exports = {
+  state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
+  startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isArgKillZoneWindow
+};
