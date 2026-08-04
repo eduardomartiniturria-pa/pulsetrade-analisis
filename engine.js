@@ -64,7 +64,11 @@ const CONFIG = {
     SEED_CAP: 40,
     YIELD_EVERY: 40
   },
-  PROVIDER_PRIORITY: ['exchangerate', 'twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare', 'binanceSpot', 'binanceFutures'],
+  // Se sacaron finnhub y fmp (sus planes gratuitos ya no dan velas históricas de
+  // cripto/forex) y binanceSpot/binanceFutures (Binance devuelve HTTP 451: bloquea
+  // por país las IPs de los servidores de Render, ubicados en EE.UU.). Intentar con
+  // ellos solo hacía perder tiempo antes de llegar a un proveedor que sí funciona.
+  PROVIDER_PRIORITY: ['exchangerate', 'twelveData', 'alphaVantage', 'cryptocompare'],
   ENDPOINTS: {
     BINANCE_SPOT: 'https://api.binance.com/api/v3',
     BINANCE_FUTURES: 'https://fapi.binance.com/fapi/v1',
@@ -105,26 +109,26 @@ const ASSETS = {
     symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', cryptocompare: 'BTC', metaapi: 'BTCUSD' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['metaapi', 'twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare', 'binanceSpot', 'binanceFutures']
+    providerPriority: ['metaapi', 'twelveData', 'alphaVantage', 'cryptocompare']
   },
   ETHUSD: {
     name: 'ETH/USD', market: 'crypto', type: 'crypto',
     symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', cryptocompare: 'ETH', metaapi: 'ETHUSD' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['metaapi', 'twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare', 'binanceSpot', 'binanceFutures']
+    providerPriority: ['metaapi', 'twelveData', 'alphaVantage', 'cryptocompare']
   },
   EURUSD: {
     name: 'EUR/USD', market: 'forex', type: 'forex',
     symbols: { twelveData: 'EUR/USD', finnhub: 'OANDA:EUR_USD', alphaVantage: 'EURUSD', fmp: 'EURUSD', cryptocompare: 'EUR', exchangerate: 'EUR', metaapi: 'EURUSD' },
     decimals: 5, pipSize: 0.0001, is24h: false, timezone: 'UTC',
-    providerPriority: ['metaapi', 'exchangerate', 'twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare']
+    providerPriority: ['metaapi', 'exchangerate', 'twelveData', 'alphaVantage', 'cryptocompare']
   },
   XAUUSD: {
     name: 'XAU/USD (Oro)', market: 'forex', type: 'commodity',
     symbols: { twelveData: 'XAU/USD', finnhub: 'OANDA:XAU_USD', alphaVantage: 'XAU', fmp: 'GCUSD', cryptocompare: 'XAU', metaapi: 'XAUUSD' },
     decimals: 2, pipSize: 0.1, is24h: false, timezone: 'UTC',
-    providerPriority: ['metaapi', 'twelveData', 'finnhub', 'alphaVantage', 'fmp', 'cryptocompare']
+    providerPriority: ['metaapi', 'twelveData', 'alphaVantage', 'cryptocompare']
   }
 };
 
@@ -1325,13 +1329,39 @@ const BacktestEngine = {
   async fetchCandles(symbol, interval) {
     const asset = ASSETS[symbol];
     if (asset.type === 'crypto') {
-      const url = `${CONFIG.ENDPOINTS.BINANCE_SPOT}/klines?symbol=${asset.symbols.binance}&interval=${interval}&limit=${CONFIG.BACKTEST.CANDLE_LIMIT}`;
-      const res = await fetchWithTimeout(url, 8000);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      return data.map(k => ({ time: k[0], open: parseFloat(k[1]), high: parseFloat(k[2]), low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]) }));
+      // Binance devuelve HTTP 451 desde los servidores de Render (bloqueo geográfico),
+      // así que ya no puede ser el único intento: si falla, caemos a CryptoCompare
+      // y, si esa también falla, a TwelveData (que también tiene BTC/USD y ETH/USD).
+      try {
+        const url = `${CONFIG.ENDPOINTS.BINANCE_SPOT}/klines?symbol=${asset.symbols.binance}&interval=${interval}&limit=${CONFIG.BACKTEST.CANDLE_LIMIT}`;
+        const res = await fetchWithTimeout(url, 8000);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        return data.map(k => ({ time: k[0], open: parseFloat(k[1]), high: parseFloat(k[2]), low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]) }));
+      } catch (e) {
+        console.warn(`Backtest: Binance falló para ${symbol} (${e.message}), probando CryptoCompare`);
+      }
+      try {
+        return await this.fetchCandlesCryptoCompare(symbol, interval);
+      } catch (e) {
+        console.warn(`Backtest: CryptoCompare falló para ${symbol} (${e.message}), probando TwelveData`);
+      }
+      return this.fetchCandlesTwelveData(symbol, interval);
     }
     return this.fetchCandlesTwelveData(symbol, interval);
+  },
+
+  async fetchCandlesCryptoCompare(symbol, interval) {
+    const asset = ASSETS[symbol];
+    const fsym = asset.symbols.cryptocompare;
+    const tfMap = { '15m': '15', '1h': '60' };
+    const ccHeaders = state.apiKeys.cryptocompare ? { authorization: `Apikey ${state.apiKeys.cryptocompare}` } : {};
+    const url = `${CONFIG.ENDPOINTS.CRYPTOCOMPARE}/v2/histominute?fsym=${fsym}&tsym=USD&limit=${CONFIG.BACKTEST.CANDLE_LIMIT}&aggregate=${tfMap[interval] || '15'}`;
+    const res = await fetchWithTimeout(url, 8000, { headers: ccHeaders }, 'cryptocompare');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (data.Response !== 'Success') throw new Error(data.Message || 'CryptoCompare sin datos');
+    return data.Data.Data.map(k => ({ time: k.time * 1000, open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volumefrom }));
   },
 
   async fetchCandlesTwelveData(symbol, interval) {
@@ -1435,6 +1465,9 @@ const BacktestEngine = {
       } catch (e) {
         console.warn(`Backtest: no se pudo traer historial de ${symbol} en ${tf}:`, e.message);
       }
+      // Espacio entre cada pedido de historial (símbolo x temporalidad) para no saturar
+      // el límite de consultas por minuto de TwelveData/CryptoCompare en el plan gratuito.
+      await sleep(6000);
     }
     if (!allEvents.length) return null;
     const { threshold, stats } = this.calibrateThreshold(allEvents);
@@ -1462,6 +1495,7 @@ const BacktestEngine = {
       for (const symbol of cfg.SYMBOLS) {
         const r = await this.runSymbol(symbol);
         if (r) results[symbol] = r;
+        await sleep(6000); // espacio entre activos, mismo motivo que arriba
       }
       if (Object.keys(results).length) {
         const combinedPatternStats = {};
