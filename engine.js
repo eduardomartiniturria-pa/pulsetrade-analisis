@@ -64,11 +64,9 @@ const CONFIG = {
     SEED_CAP: 40,
     YIELD_EVERY: 40
   },
-  // Se sacaron finnhub y fmp (sus planes gratuitos ya no dan velas históricas de
-  // cripto/forex) y binanceSpot/binanceFutures (Binance devuelve HTTP 451: bloquea
-  // por país las IPs de los servidores de Render, ubicados en EE.UU.). Intentar con
-  // ellos solo hacía perder tiempo antes de llegar a un proveedor que sí funciona.
-  PROVIDER_PRIORITY: ['exchangerate', 'twelveData', 'alphaVantage', 'cryptocompare'],
+  // Se sacó cryptocompare: su plan gratuito solo permite 100 consultas por MES para
+  // este tipo de dato (velas históricas) — no alcanza ni para un día de uso normal.
+  PROVIDER_PRIORITY: ['exchangerate', 'twelveData', 'alphaVantage'],
   ENDPOINTS: {
     BINANCE_SPOT: 'https://api.binance.com/api/v3',
     BINANCE_FUTURES: 'https://fapi.binance.com/fapi/v1',
@@ -78,8 +76,10 @@ const CONFIG = {
     FINNHUB: 'https://finnhub.io/api/v1',
     ALPHAVANTAGE: 'https://www.alphavantage.co/query',
     FMP: 'https://financialmodelingprep.com/stable',
-    // Región de tu cuenta MetaApi (revisar en el panel: new-york, london, singapore, etc.)
-    METAAPI_MARKET_DATA: 'https://mt-market-data-client-api-v1.new-york.agiliumtrade.ai'
+    // Región de tu cuenta MetaApi (se arma sola desde la variable de entorno
+    // METAAPI_REGION que cargues en Render — la ves en el panel de MetaApi al
+    // conectar tu cuenta: new-york, london, singapore, etc.)
+    METAAPI_MARKET_DATA: `https://mt-market-data-client-api-v1.${process.env.METAAPI_REGION || 'new-york'}.agiliumtrade.ai`
   }
 };
 
@@ -109,26 +109,26 @@ const ASSETS = {
     symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', cryptocompare: 'BTC', metaapi: 'BTCUSD' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['metaapi', 'twelveData', 'alphaVantage', 'cryptocompare']
+    providerPriority: ['metaapi', 'twelveData', 'alphaVantage']
   },
   ETHUSD: {
     name: 'ETH/USD', market: 'crypto', type: 'crypto',
     symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', cryptocompare: 'ETH', metaapi: 'ETHUSD' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['metaapi', 'twelveData', 'alphaVantage', 'cryptocompare']
+    providerPriority: ['metaapi', 'twelveData', 'alphaVantage']
   },
   EURUSD: {
     name: 'EUR/USD', market: 'forex', type: 'forex',
     symbols: { twelveData: 'EUR/USD', finnhub: 'OANDA:EUR_USD', alphaVantage: 'EURUSD', fmp: 'EURUSD', cryptocompare: 'EUR', exchangerate: 'EUR', metaapi: 'EURUSD' },
     decimals: 5, pipSize: 0.0001, is24h: false, timezone: 'UTC',
-    providerPriority: ['metaapi', 'exchangerate', 'twelveData', 'alphaVantage', 'cryptocompare']
+    providerPriority: ['metaapi', 'exchangerate', 'twelveData', 'alphaVantage']
   },
   XAUUSD: {
     name: 'XAU/USD (Oro)', market: 'forex', type: 'commodity',
     symbols: { twelveData: 'XAU/USD', finnhub: 'OANDA:XAU_USD', alphaVantage: 'XAU', fmp: 'GCUSD', cryptocompare: 'XAU', metaapi: 'XAUUSD' },
     decimals: 2, pipSize: 0.1, is24h: false, timezone: 'UTC',
-    providerPriority: ['metaapi', 'twelveData', 'alphaVantage', 'cryptocompare']
+    providerPriority: ['metaapi', 'twelveData', 'alphaVantage']
   }
 };
 
@@ -455,40 +455,8 @@ const ProviderAdapters = {
     }
   },
 
-  cryptocompare: {
-    name: 'CryptoCompare', requiresKey: false, supports: ['BTCUSD','ETHUSD','XAUUSD','EURUSD'],
-    async fetchQuote(symbol) {
-      const asset = ASSETS[symbol]; const fsym = asset.symbols.cryptocompare;
-      const cacheKey = `cc_quote_${symbol}`;
-      const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const ccHeaders = state.apiKeys.cryptocompare ? { authorization: `Apikey ${state.apiKeys.cryptocompare}` } : {};
-      const res = await fetchWithTimeout(`${CONFIG.ENDPOINTS.CRYPTOCOMPARE}/pricemultifull?fsyms=${fsym}&tsyms=USD`, CONFIG.REQUEST_TIMEOUT, { headers: ccHeaders }, 'cryptocompare');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      const raw = data && data.RAW && data.RAW[fsym] && data.RAW[fsym].USD;
-      if (!raw) throw new Error(data && data.Message ? data.Message : `CryptoCompare no devolvió datos para ${fsym}`);
-      const d = raw;
-      const marketData = new MarketData({
-        bid: d.BID, ask: d.ASK, last: d.PRICE, open: d.OPEN24HOUR || d.PRICE, high: d.HIGH24HOUR, low: d.LOW24HOUR,
-        close: d.PRICE, volume: d.VOLUME24HOURTO, timestamp: d.LASTUPDATE * 1000, timeframe: '1d', marketStatus: 'open',
-        spread: calculateSpread(d.BID, d.ASK, asset.pipSize), source: 'CryptoCompare', symbol, estimatedSpread: false
-      });
-      ResponseCache.set(cacheKey, marketData); return marketData;
-    },
-    async fetchOHLCV(symbol, interval, limit = 100) {
-      const asset = ASSETS[symbol]; const fsym = asset.symbols.cryptocompare;
-      const cacheKey = `cc_ohlcv_${symbol}_${interval}`;
-      const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const tfMap = { '5m': '5', '15m': '15', '1h': '60' };
-      const ccHeaders = state.apiKeys.cryptocompare ? { authorization: `Apikey ${state.apiKeys.cryptocompare}` } : {};
-      const res = await fetchWithTimeout(`${CONFIG.ENDPOINTS.CRYPTOCOMPARE}/v2/histominute?fsym=${fsym}&tsym=USD&limit=${limit}&aggregate=${tfMap[interval]||'15'}`, CONFIG.REQUEST_TIMEOUT, { headers: ccHeaders }, 'cryptocompare');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      if (data.Response !== 'Success') throw new Error(data.Message);
-      const result = new OHLCVData(data.Data.Data.map(k => ({ time: k.time * 1000, open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volumefrom })));
-      ResponseCache.set(cacheKey, result); return result;
-    }
-  },
+  // CryptoCompare se sacó del todo: su plan gratuito solo permite 100 consultas
+  // por MES para este tipo de dato (histominute), no alcanza para uso real.
 
   exchangerate: {
     name: 'ExchangeRate-API', requiresKey: false, supports: ['EURUSD'],
@@ -1330,8 +1298,9 @@ const BacktestEngine = {
     const asset = ASSETS[symbol];
     if (asset.type === 'crypto') {
       // Binance devuelve HTTP 451 desde los servidores de Render (bloqueo geográfico),
-      // así que ya no puede ser el único intento: si falla, caemos a CryptoCompare
-      // y, si esa también falla, a TwelveData (que también tiene BTC/USD y ETH/USD).
+      // así que si falla, caemos directo a TwelveData (que también tiene BTC/USD y ETH/USD).
+      // CryptoCompare se sacó del todo: su plan gratuito solo permite 100 consultas
+      // por MES para este tipo de dato, no alcanza para uso real.
       try {
         const url = `${CONFIG.ENDPOINTS.BINANCE_SPOT}/klines?symbol=${asset.symbols.binance}&interval=${interval}&limit=${CONFIG.BACKTEST.CANDLE_LIMIT}`;
         const res = await fetchWithTimeout(url, 8000);
@@ -1339,29 +1308,11 @@ const BacktestEngine = {
         const data = await res.json();
         return data.map(k => ({ time: k[0], open: parseFloat(k[1]), high: parseFloat(k[2]), low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]) }));
       } catch (e) {
-        console.warn(`Backtest: Binance falló para ${symbol} (${e.message}), probando CryptoCompare`);
-      }
-      try {
-        return await this.fetchCandlesCryptoCompare(symbol, interval);
-      } catch (e) {
-        console.warn(`Backtest: CryptoCompare falló para ${symbol} (${e.message}), probando TwelveData`);
+        console.warn(`Backtest: Binance falló para ${symbol} (${e.message}), probando TwelveData`);
       }
       return this.fetchCandlesTwelveData(symbol, interval);
     }
     return this.fetchCandlesTwelveData(symbol, interval);
-  },
-
-  async fetchCandlesCryptoCompare(symbol, interval) {
-    const asset = ASSETS[symbol];
-    const fsym = asset.symbols.cryptocompare;
-    const tfMap = { '15m': '15', '1h': '60' };
-    const ccHeaders = state.apiKeys.cryptocompare ? { authorization: `Apikey ${state.apiKeys.cryptocompare}` } : {};
-    const url = `${CONFIG.ENDPOINTS.CRYPTOCOMPARE}/v2/histominute?fsym=${fsym}&tsym=USD&limit=${CONFIG.BACKTEST.CANDLE_LIMIT}&aggregate=${tfMap[interval] || '15'}`;
-    const res = await fetchWithTimeout(url, 8000, { headers: ccHeaders }, 'cryptocompare');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    if (data.Response !== 'Success') throw new Error(data.Message || 'CryptoCompare sin datos');
-    return data.Data.Data.map(k => ({ time: k.time * 1000, open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volumefrom }));
   },
 
   async fetchCandlesTwelveData(symbol, interval) {
