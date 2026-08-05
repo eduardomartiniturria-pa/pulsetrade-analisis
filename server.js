@@ -19,11 +19,13 @@ state.apiKeys = {
   finnhub: process.env.FINNHUB_API_KEY || null,
   alphaVantage: process.env.ALPHAVANTAGE_API_KEY || null,
   fmp: process.env.FMP_API_KEY || null,
-  // CryptoCompare (ahora CCData) dejó de aceptar pedidos sin API key — antes andaba gratis
-  // sin registrarse, por eso el código viejo no la pedía. Es gratis igual, solo hay que
-  // registrarse. Sin esta key, CryptoCompare devuelve HTTP 401 siempre.
-  cryptocompare: process.env.CRYPTOCOMPARE_API_KEY || null
+  // MetaApi (datos reales del bróker vía MT5) — token de API generado en el panel
+  // de metaapi.cloud. La región (METAAPI_REGION) se usa en engine.js para armar
+  // la URL correcta del servidor de datos.
+  metaapi: process.env.METAAPI_TOKEN || null
 };
+// Id de la cuenta MT5 conectada en MetaApi (se ve en el panel, junto a la cuenta).
+state.metaapiAccountId = process.env.METAAPI_ACCOUNT_ID || null;
 state.lastDisplay = state.lastDisplay || {};
 
 const app = express();
