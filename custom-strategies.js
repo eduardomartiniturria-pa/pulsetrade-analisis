@@ -1,7 +1,7 @@
 // ============================================================
-// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4
+// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4 (CORREGIDO)
 // ============================================================
-// Estas 3 estrategias NO pasan por SMCEngine.evalSide() ni por los
+// Estas 5 estrategias NO pasan por SMCEngine.evalSide() ni por los
 // filtros globales de confluencia (premium/discount, HTF trend, etc).
 // Cada una se evalúa por sí sola, con su propia gestión de riesgo,
 // tal como fueron definidas. Corren en paralelo a las estrategias SMC
@@ -10,13 +10,21 @@
 // Cómo integrar en engine.js:
 //   const CustomStrategies = require('./custom-strategies');
 //   ... dentro de refreshAsset(), después de calcular `analysis`:
-//   const customSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset);
+//   const customSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfOhlcv?.candles);
 //   customSignals.forEach(sig => resolveCustomSignal(symbol, sig, quote));
 // (ver función resolveCustomSignal de ejemplo al final de este archivo)
+//
+// NOTA: htfCandles es opcional, pero si no se pasa, "Supply and Demand"
+// pierde el filtro de tendencia mayor (EMA20/EMA50 en HTF) y arma sus
+// zonas con el mismo timeframe de entrada. Pasarlo siempre que se pueda.
 // ============================================================
 
 // ---------------------------------------------------------
-// INDICADORES BASE (RSI, MACD, SMA) - no existían en engine.js
+// CORRECCIONES APLICADAS EN ESTA VERSIÓN (ver changelog al final)
+// ---------------------------------------------------------
+
+// ---------------------------------------------------------
+// INDICADORES BASE (RSI, MACD, SMA, EMA) - no existían en engine.js
 // ---------------------------------------------------------
 
 function calculateSMASeries(candles, period) {
@@ -30,6 +38,9 @@ function calculateSMASeries(candles, period) {
   return out;
 }
 
+// CORREGIDO: antes existía una copia idéntica de esta función llamada
+// calculateEMASeriesFromIndex0. Se unificó en una sola, usada tanto para
+// EMA20/EMA50/EMA9/EMA21 como para el cálculo interno del MACD.
 function calculateEMASeries(candles, period) {
   const closes = candles.map(c => c.close);
   const out = new Array(closes.length).fill(null);
@@ -69,8 +80,8 @@ function calculateRSISeries(candles, period = 14) {
 // MACD estándar (12,26,9): línea MACD, línea señal, histograma
 function calculateMACDSeries(candles, fast = 12, slow = 26, signalPeriod = 9) {
   const n = candles.length;
-  const emaFastFull = calculateEMASeriesFromIndex0(candles, fast);
-  const emaSlowFull = calculateEMASeriesFromIndex0(candles, slow);
+  const emaFastFull = calculateEMASeries(candles, fast);
+  const emaSlowFull = calculateEMASeries(candles, slow);
   const macdLine = new Array(n).fill(null);
   for (let i = 0; i < n; i++) {
     if (emaFastFull[i] !== null && emaSlowFull[i] !== null) macdLine[i] = emaFastFull[i] - emaSlowFull[i];
@@ -96,143 +107,113 @@ function calculateMACDSeries(candles, fast = 12, slow = 26, signalPeriod = 9) {
   return { macdLine, signalLine, histogram };
 }
 
-// EMA calculada desde el índice 0 (necesaria para alinear MACD con velas exactas)
-function calculateEMASeriesFromIndex0(candles, period) {
-  const closes = candles.map(c => c.close);
-  const out = new Array(closes.length).fill(null);
-  if (closes.length < period) return out;
-  const k = 2 / (period + 1);
-  let ema = closes.slice(0, period).reduce((a, b) => a + b, 0) / period;
-  out[period - 1] = ema;
-  for (let i = period; i < closes.length; i++) {
-    ema = closes[i] * k + ema * (1 - k);
-    out[i] = ema;
-  }
-  return out;
-}
-
 // ---------------------------------------------------------
-// Utilidades de tiempo (hora Argentina, sin DST: UTC-3 fijo)
+// Utilidades de tiempo (hora real de Nueva York, con DST automático)
 // ---------------------------------------------------------
+// Se usa el timezone real 'America/New_York' en vez de un offset fijo
+// (ej. "ARG = NY + 1h"), porque ese offset cambia con el horario de
+// verano de EE.UU. (EDT/EST) y un valor fijo queda mal la mitad del año.
 
-function getArgTimeParts(ms) {
+function getNYTimeParts(ms) {
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Argentina/Buenos_Aires', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false
+    timeZone: 'America/New_York', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: 'numeric', minute: 'numeric', hour12: false
   }).formatToParts(new Date(ms));
+  const get = t => parts.find(p => p.type === t).value;
   return {
-    weekday: parts.find(p => p.type === 'weekday').value,
-    hour: parseInt(parts.find(p => p.type === 'hour').value, 10) % 24,
-    minute: parseInt(parts.find(p => p.type === 'minute').value, 10)
+    weekday: get('weekday'),
+    dateKey: `${get('year')}-${get('month')}-${get('day')}`,
+    hour: parseInt(get('hour'), 10) % 24,
+    minute: parseInt(get('minute'), 10)
   };
 }
 
-function minutesOfDay(hour, minute) { return hour * 60 + minute; }
-
 // ---------------------------------------------------------
-// ESTRATEGIA 1: ZONA DE CAZA (Kill Zone NY, hora Argentina)
+// ESTRATEGIA 1: KILL ZONE APERTURA DE NUEVA YORK (9:30 AM real)
 // ---------------------------------------------------------
-// Rango completo 10:30-13:30 ARG. Bala de plata 11:00-12:00 ARG.
-// PA = apertura de la vela de 10:30. T/P = máx/mín entre 10:30 y 11:00.
-// Requiere velas de 15m (o menor) para poder ubicar la vela de 10:30 exacta.
+// Implementación fiel al método de la infografía. Sin agregados propios
+// (nada de Silver Bullet, MACD, Order Blocks ni FVG acá):
+//   1. Vela de referencia: 9:30-9:45 hora de Nueva York (una sola, TF 15m,
+//      o el rango agregado de esas velas si el TF es menor a 15m).
+//   2. Confirmación: la PRIMERA vela después de las 9:45 que CIERRA por
+//      encima del máximo (compra) o por debajo del mínimo (venta) de la
+//      vela de referencia.
+//   3. Entrada: en el cierre de esa misma vela de confirmación.
+//   4. Stop Loss: del otro lado del rango de referencia (mínimo para
+//      compra, máximo para venta).
+//   5. Take Profit: mínimo 1.5R, ideal 2R (tp1 = 1.5R, tp2 = 2R).
+//   6. Si no hay ruptura confirmada -> no hay señal (cubre el escenario
+//      de mercado lateral sin necesidad de ningún filtro adicional).
+//   7. Si la ruptura ya ocurrió en una vela anterior, no se repite la
+//      señal (solo dispara en la vela exacta de la confirmación).
+// Gestión de riesgo sugerida por la infografía (no está en el código,
+// es decisión de tamaño de posición): 0.5%-1% del capital por operación.
 
-function detectKillZoneNY(candles, opts = {}) {
-  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, mode: null, silverBullet: false };
-  if (!candles || candles.length < 20) return result;
+function detectNYOpenKillZone(candles) {
+  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, mode: null };
+  if (!candles || candles.length < 5) return result;
 
   const last = candles[candles.length - 1];
-  const lastArg = getArgTimeParts(last.time);
-  if (lastArg.weekday === 'Sat' || lastArg.weekday === 'Sun') return result;
+  const lastNY = getNYTimeParts(last.time);
+  if (lastNY.weekday === 'Sat' || lastNY.weekday === 'Sun') return result;
 
-  const nowMin = minutesOfDay(lastArg.hour, lastArg.minute);
-  const rangeStart = 10 * 60 + 30, rangeEnd = 13 * 60 + 30;
-  const silverStart = 11 * 60, silverEnd = 12 * 60;
-  if (nowMin < rangeStart || nowMin >= rangeEnd) return result; // fuera de horario, no aplica
+  const openMin = 9 * 60 + 30;   // 9:30 NY
+  const refEndMin = 9 * 60 + 45; // 9:45 NY
+  const nowMin = lastNY.hour * 60 + lastNY.minute;
+  if (nowMin < refEndMin) return result; // la vela de referencia todavía no cerró
 
-  // Ubicar la vela de apertura (10:30) dentro del historial reciente
-  let openIdx = -1;
-  for (let i = candles.length - 1; i >= 0 && i >= candles.length - 60; i--) {
-    const p = getArgTimeParts(candles[i].time);
-    if (p.hour === 10 && p.minute >= 30 && p.minute < 45) { openIdx = i; break; }
-  }
-  if (openIdx === -1 || openIdx >= candles.length - 1) return result;
-
-  const PA = candles[openIdx].open;
-
-  // Techo (T) y Piso (P): máx/mín entre 10:30 y 11:00
-  let windowEndIdx = openIdx;
-  for (let i = openIdx; i < candles.length; i++) {
-    const p = getArgTimeParts(candles[i].time);
-    const m = minutesOfDay(p.hour, p.minute);
-    if (m >= silverStart) break;
-    windowEndIdx = i;
-  }
-  const kzWindow = candles.slice(openIdx, windowEndIdx + 1);
-  if (!kzWindow.length) return result;
-  const T = Math.max(...kzWindow.map(c => c.high));
-  const P = Math.min(...kzWindow.map(c => c.low));
-
-  const { macdLine, signalLine } = calculateMACDSeries(candles);
-  const macdNow = macdLine[candles.length - 1];
-  const signalNow = signalLine[candles.length - 1];
-  const macdBullOk = macdNow !== null && signalNow !== null && macdNow > signalNow;
-  const macdBearOk = macdNow !== null && signalNow !== null && macdNow < signalNow;
-
-  const isSilverBullet = nowMin >= silverStart && nowMin < silverEnd;
-
-  // --- Modalidad 1: Ruptura + Retroceso ---
-  if (candles.length >= 2) {
-    const prev = candles[candles.length - 2];
-    // BUY: cierre de una vela por encima de T, y la siguiente toca T con la mecha (retroceso)
-    if (prev.close > T && last.low <= T && last.close > T && macdBullOk) {
-      result.bullish = true; result.mode = 'breakout_retest'; result.entry = T;
-      result.details.push('Ruptura+Retroceso en Techo (Kill Zone NY)');
-    }
-    // SELL: cierre de una vela por debajo de P, y la siguiente toca P con la mecha
-    if (prev.close < P && last.high >= P && last.close < P && macdBearOk) {
-      result.bearish = true; result.mode = 'breakout_retest'; result.entry = P;
-      result.details.push('Ruptura+Retroceso en Piso (Kill Zone NY)');
+  // Ubicar las velas del mismo día que caen dentro de 9:30-9:45 NY
+  let windowStartIdx = -1, windowEndIdx = -1;
+  for (let i = candles.length - 1; i >= 0 && i >= candles.length - 200; i--) {
+    const p = getNYTimeParts(candles[i].time);
+    if (p.dateKey !== lastNY.dateKey) break; // se salió del día de hoy
+    const m = p.hour * 60 + p.minute;
+    if (m >= openMin && m < refEndMin) {
+      if (windowEndIdx === -1) windowEndIdx = i;
+      windowStartIdx = i;
+    } else if (m < openMin) {
+      break; // ya pasamos la apertura, no hay más velas de referencia que buscar
     }
   }
+  if (windowStartIdx === -1 || windowEndIdx === -1) return result;
 
-  // --- Modalidad 2: Continuación de tendencia (OB simplificado + FVG dentro de la zona) ---
-  if (!result.bullish && !result.bearish && candles.length >= 5) {
-    const zoneCandles = candles.slice(openIdx);
-    if (zoneCandles.length >= 4) {
-      const highs = zoneCandles.map(c => c.high), lows = zoneCandles.map(c => c.low);
-      const risingLows = lows.length >= 3 && lows[lows.length - 1] > lows[lows.length - 3];
-      const fallingHighs = highs.length >= 3 && highs[highs.length - 1] < highs[highs.length - 3];
+  // La primera vela de la ventana debe ser justo la de las 9:30 (no una
+  // posterior por datos faltantes), para no calcular un rango incompleto.
+  const firstWindowNY = getNYTimeParts(candles[windowStartIdx].time);
+  if (firstWindowNY.hour * 60 + firstWindowNY.minute !== openMin) return result;
 
-      const c1 = candles[candles.length - 4], c3 = candles[candles.length - 2];
-      const fvgBull = c3.low > c1.high && last.close > c3.low;
-      const fvgBear = c3.high < c1.low && last.close < c3.high;
+  const windowCandles = candles.slice(windowStartIdx, windowEndIdx + 1);
+  const rangeHigh = Math.max(...windowCandles.map(c => c.high));
+  const rangeLow = Math.min(...windowCandles.map(c => c.low));
 
-      const prev2 = candles[candles.length - 3], prev1 = candles[candles.length - 2];
-      const obBull = prev2.close < prev2.open && prev1.close > prev1.open && last.close > prev1.high;
-      const obBear = prev2.close > prev2.open && prev1.close < prev1.open && last.close < prev1.low;
+  // Velas posteriores a la ventana de referencia, mismo día -> zona de confirmación
+  const confirmCandles = candles.slice(windowEndIdx + 1).filter(c => getNYTimeParts(c.time).dateKey === lastNY.dateKey);
+  if (!confirmCandles.length) return result;
 
-      if (risingLows && (fvgBull || obBull)) {
-        result.bullish = true; result.mode = 'trend_continuation'; result.entry = last.close;
-        result.details.push(`Continuación alcista en Kill Zone NY (${obBull ? 'Order Block' : 'FVG'})`);
-      } else if (fallingHighs && (fvgBear || obBear)) {
-        result.bearish = true; result.mode = 'trend_continuation'; result.entry = last.close;
-        result.details.push(`Continuación bajista en Kill Zone NY (${obBear ? 'Order Block' : 'FVG'})`);
-      }
-    }
+  // Primera vela que cierra fuera del rango
+  let breakoutCandle = null, direction = null;
+  for (const c of confirmCandles) {
+    if (c.close > rangeHigh) { breakoutCandle = c; direction = 'bull'; break; }
+    if (c.close < rangeLow) { breakoutCandle = c; direction = 'bear'; break; }
   }
+  if (!breakoutCandle) return result; // sin ruptura confirmada todavía (mercado lateral)
+  if (breakoutCandle !== last) return result; // la ruptura ya pasó antes, no repetir señal
 
-  if (result.bullish || result.bearish) {
-    result.silverBullet = isSilverBullet;
-    const entry = result.entry || last.close;
-    // Gestión de riesgo: SL detrás del último pivote visible, o 1.5% si no hay pivote claro
-    const pivotSL = result.bullish ? P : T;
-    const hasPivot = result.mode === 'breakout_retest';
-    const sl = hasPivot ? pivotSL : (result.bullish ? entry * 0.985 : entry * 1.015);
-    const risk = Math.abs(entry - sl);
-    result.entry = entry; result.sl = sl;
-    result.tp1 = result.bullish ? entry + risk * 2 : entry - risk * 2; // RR 1:2
-    result.tp2 = result.bullish ? entry + risk * 3 : entry - risk * 3; // liquidez visible aproximada 1:3
-    if (isSilverBullet) result.details.push('Dentro de Bala de Plata (11:00-12:00 ARG, prioridad máxima)');
+  const entry = last.close;
+  if (direction === 'bull') {
+    result.bullish = true;
+    result.sl = rangeLow;
+    result.details.push('Ruptura confirmada del máximo de la vela 9:30-9:45 NY');
+  } else {
+    result.bearish = true;
+    result.sl = rangeHigh;
+    result.details.push('Ruptura confirmada del mínimo de la vela 9:30-9:45 NY');
   }
+  result.entry = entry;
+  result.mode = 'breakout_confirmation';
+  const risk = Math.abs(entry - result.sl);
+  result.tp1 = result.bullish ? entry + risk * 1.5 : entry - risk * 1.5; // objetivo mínimo 1.5R
+  result.tp2 = result.bullish ? entry + risk * 2 : entry - risk * 2;     // objetivo ideal 2R
 
   return result;
 }
@@ -240,9 +221,14 @@ function detectKillZoneNY(candles, opts = {}) {
 // ---------------------------------------------------------
 // ESTRATEGIA 2: PIVOTS BREAKOUT & REVERSAL
 // ---------------------------------------------------------
-// PH: máximo de la vela > máximo de las 4 anteriores y > máximo de las 2 siguientes.
-// PL: mínimo de la vela < mínimo de las 4 anteriores y < mínimo de las 2 siguientes.
-// No tiene restricción horaria. Recomendado 15m.
+// Parámetros:
+//   - PH (pivot high): máximo de la vela > máximo de las 4 anteriores y > máximo de las 2 siguientes
+//   - PL (pivot low): mínimo de la vela < mínimo de las 4 anteriores y < mínimo de las 2 siguientes
+//   - Sin restricción horaria. Timeframe recomendado: 15m
+//   - Modalidad A (Ruptura): cruce de SMA5/SMA10 (o alineación ya vigente) + MACD a favor
+//   - Modalidad B (Reversión): barrida del pivote + divergencia de MACD contra el precio
+//   - SL = 1.5% del nivel de pivote roto
+//   - TP1 = riesgo x2 (RR 1:2 fijo)
 
 function findStrictPivotHighs(candles) {
   const pivots = [];
@@ -357,11 +343,17 @@ function detectPivotsBreakoutReversal(candles) {
 // ---------------------------------------------------------
 // ESTRATEGIA 3: PRICE ACTION + RSI + EMA (Bullish/Bearish Momentum)
 // ---------------------------------------------------------
-// Requiere EMA20, EMA50, RSI14. Las 4 condiciones deben cumplirse TODAS.
-// Filtro opcional de volumen (vela de entrada > promedio de 20).
+// Parámetros:
+//   - EMA20, EMA50 (alineación de tendencia), RSI14
+//   - Zona S/R: swing points de las últimas 40 velas
+//   - Compra: EMA20>EMA50 + retest de EMA50 + retest de SOPORTE + RSI<=40 + vela alcista
+//   - Venta:  EMA20<EMA50 + retest de EMA50 + retest de RESISTENCIA + RSI>=60 + vela bajista
+//   - Filtro opcional de volumen (vela de entrada > promedio de 20)
+//   - TP1 = riesgo x2 (RR 1:2) / TP2 = próxima zona S/R visible
+//   - Salida alternativa por RSI: 60 (compra) / 40 (venta)
 
 function findBrokenSRZones(candles, lookback = 40) {
-  // Zonas simples: swing highs/lows recientes que el precio ya rompió (retest)
+  // Zonas simples: swing highs/lows recientes del rango analizado.
   const zones = [];
   const window = candles.slice(-lookback);
   for (let i = 2; i < window.length - 2; i++) {
@@ -384,7 +376,6 @@ function detectPriceActionRsiEma(candles) {
 
   const i = candles.length - 1;
   const last = candles[i];
-  const prev = candles[i - 1];
   const e20 = ema20[i], e50 = ema50[i], rsiNow = rsi[i];
   if (e20 === null || e50 === null || rsiNow === null) return result;
 
@@ -397,30 +388,36 @@ function detectPriceActionRsiEma(candles) {
   const volOk = !avgVol || (last.volume || 0) > avgVol;
 
   // --- Lado BUY ---
+  // CORREGIDO: antes se pedía una zona 'resistance' para comprar. Estaba
+  // invertido: para un setup de compra hay que buscar confluencia con
+  // SOPORTE, no con resistencia (comprar justo debajo de una resistencia
+  // sin romper no tiene sentido dentro de la lógica de price action que
+  // describe la propia estrategia).
   const bullEmaAligned = e20 > e50;
   const touchedEma50Bull = last.low <= e50 + tolerance || (last.open <= e50 + tolerance && last.close >= e50 - tolerance);
-  const resistanceZone = zones.find(z => z.type === 'resistance' && Math.abs(last.close - z.price) <= tolerance * 3);
+  const supportZoneBuy = zones.find(z => z.type === 'support' && Math.abs(last.close - z.price) <= tolerance * 3);
   const rsiOversold = rsiNow <= 40;
-  const confirmBull = last.close > last.open && prev.close <= prev.open === false ? true : last.close > last.open;
 
-  if (bullEmaAligned && touchedEma50Bull && resistanceZone && rsiOversold && last.close > last.open && volOk) {
+  if (bullEmaAligned && touchedEma50Bull && supportZoneBuy && rsiOversold && last.close > last.open && volOk) {
     result.bullish = true;
     result.entry = last.close;
     result.sl = last.low;
-    result.details.push(`Momentum alcista: EMA20>EMA50, retest EMA50 y S/R (${resistanceZone.price.toFixed(2)}), RSI ${rsiNow.toFixed(1)} (<=40)`);
+    result.details.push(`Momentum alcista: EMA20>EMA50, retest EMA50 y soporte (${supportZoneBuy.price.toFixed(2)}), RSI ${rsiNow.toFixed(1)} (<=40)`);
   }
 
   // --- Lado SELL (espejo) ---
+  // CORREGIDO: antes se pedía una zona 'support' para vender, también
+  // invertido respecto al lado BUY. Ahora pide RESISTENCIA para vender.
   const bearEmaAligned = e20 < e50;
   const touchedEma50Bear = last.high >= e50 - tolerance || (last.open >= e50 - tolerance && last.close <= e50 + tolerance);
-  const supportZone = zones.find(z => z.type === 'support' && Math.abs(last.close - z.price) <= tolerance * 3);
+  const resistanceZoneSell = zones.find(z => z.type === 'resistance' && Math.abs(last.close - z.price) <= tolerance * 3);
   const rsiOverbought = rsiNow >= 60;
 
-  if (!result.bullish && bearEmaAligned && touchedEma50Bear && supportZone && rsiOverbought && last.close < last.open && volOk) {
+  if (!result.bullish && bearEmaAligned && touchedEma50Bear && resistanceZoneSell && rsiOverbought && last.close < last.open && volOk) {
     result.bearish = true;
     result.entry = last.close;
     result.sl = last.high;
-    result.details.push(`Momentum bajista: EMA20<EMA50, retest EMA50 y S/R (${supportZone.price.toFixed(2)}), RSI ${rsiNow.toFixed(1)} (>=60)`);
+    result.details.push(`Momentum bajista: EMA20<EMA50, retest EMA50 y resistencia (${resistanceZoneSell.price.toFixed(2)}), RSI ${rsiNow.toFixed(1)} (>=60)`);
   }
 
   if (result.bullish || result.bearish) {
@@ -440,18 +437,17 @@ function detectPriceActionRsiEma(candles) {
 // ---------------------------------------------------------
 // ESTRATEGIA 4: SUPPLY AND DEMAND (Oferta y Demanda)
 // ---------------------------------------------------------
-// Timeframe principal (HTF): H1/H4 -> se usa htfCandles (ya se piden en engine.js).
-// Timeframe de entrada: M15/M5 -> se usa `candles` (el timeframe activo del motor).
-// Zonas: base de una vela/grupo antes de un impulso fuerte (igual concepto que Order
-// Block, pero acá se trackea CUÁNTAS VECES fue tocada la zona después de formada -
-// "fresca" = 0-1 toques). Se descartan zonas ya muy tocadas.
-// Confirmación de entrada: pin bar o engulfing en la zona, a favor de la tendencia mayor
-// (EMA20 vs EMA50 en HTF). SL detrás de la zona, TP en la zona opuesta más cercana.
+// Parámetros:
+//   - Timeframe principal (HTF): H1/H4 -> se usa htfCandles (pedirlos en engine.js)
+//   - Timeframe de entrada: M15/M5 -> se usa `candles` (el timeframe activo del motor)
+//   - Zona = vela base (cuerpo chico) antes de un impulso >= 1.5x ATR
+//   - "Fresca" = 0-1 toques posteriores a su formación (más de eso se descarta)
+//   - Confirmación de entrada: pin bar o engulfing en la zona, a favor de la
+//     tendencia mayor (EMA20 vs EMA50 en HTF)
+//   - SL detrás de la zona (+/- 0.2 ATR) / TP en la zona opuesta más cercana
+//   - Filtro duro: se descarta la señal si el RR resultante es menor a 1:2
 
 function findImpulseZones(candles, atr) {
-  // Detecta zonas de oferta/demanda: una vela base (cuerpo chico) seguida de un
-  // movimiento impulsivo (cuerpo grande, >= 1.5x ATR) en la dirección opuesta al lado
-  // de la zona. La zona es el rango de la vela base.
   const zones = [];
   if (!candles || candles.length < 10 || !atr) return zones;
   for (let i = 2; i < candles.length - 1; i++) {
@@ -474,8 +470,6 @@ function findImpulseZones(candles, atr) {
     }
   }
 
-  // Contar toques posteriores a la formación (cuántas veces el precio volvió a la zona
-  // desde que se formó). "Fresca" = 0 o 1 toque. Más de eso, se descarta.
   zones.forEach(zone => {
     for (let j = zone.formedAt + 2; j < candles.length; j++) {
       const c = candles[j];
@@ -510,7 +504,6 @@ function detectSupplyDemand(candles, htfCandles) {
   const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null };
   if (!candles || candles.length < 15) return result;
 
-  // ATR del timeframe de entrada, para dimensionar impulsos y definir zonas
   const trueRanges = [];
   for (let i = 1; i < candles.length; i++) {
     const h = candles[i].high, l = candles[i].low, pc = candles[i - 1].close;
@@ -519,8 +512,6 @@ function detectSupplyDemand(candles, htfCandles) {
   const atr = trueRanges.length ? trueRanges.slice(-14).reduce((a, b) => a + b, 0) / Math.min(14, trueRanges.length) : null;
   if (!atr) return result;
 
-  // Zonas detectadas en el timeframe HTF si está disponible (más confiables/"reales"),
-  // si no, se cae al timeframe de entrada.
   const zoneSource = (htfCandles && htfCandles.length >= 15) ? htfCandles : candles;
   const zones = findImpulseZones(zoneSource, atr);
   if (!zones.length) return result;
@@ -528,7 +519,6 @@ function detectSupplyDemand(candles, htfCandles) {
   const last = candles[candles.length - 1];
   const prev = candles[candles.length - 2];
 
-  // Filtro de tendencia mayor: EMA20 vs EMA50 en HTF (si hay datos suficientes)
   let htfTrend = 'neutral';
   if (htfCandles && htfCandles.length >= 50) {
     const ema20 = calculateEMASeries(htfCandles, 20);
@@ -537,7 +527,6 @@ function detectSupplyDemand(candles, htfCandles) {
     if (ema20[i] !== null && ema50[i] !== null) htfTrend = ema20[i] > ema50[i] ? 'bullish' : (ema20[i] < ema50[i] ? 'bearish' : 'neutral');
   }
 
-  // Zona de demanda más cercana por debajo, zona de oferta más cercana por arriba
   const demandZones = zones.filter(z => z.type === 'demand').sort((a, b) => b.high - a.high);
   const supplyZones = zones.filter(z => z.type === 'supply').sort((a, b) => a.low - b.low);
 
@@ -595,9 +584,12 @@ function detectSupplyDemand(candles, htfCandles) {
 // ---------------------------------------------------------
 // ESTRATEGIA 5: EMA CROSS SCALPING (EMA9/EMA21 + RSI + MACD)
 // ---------------------------------------------------------
-// Nota: la infografía de origen promociona "90% win rate" — eso es marketing de plantilla,
-// no un resultado verificable. Se implementa la lógica tal cual el Pine Script (cruce +
-// filtros RSI/MACD + TP 2% / SL 1% fijos), sin ninguna expectativa de ese winrate.
+// Nota: la infografía de origen promociona "90% win rate" — eso es marketing
+// de plantilla, no un resultado verificable. Se implementa la lógica tal
+// cual el Pine Script (cruce + filtros RSI/MACD + TP 2% / SL 1% fijos),
+// sin ninguna expectativa de ese winrate.
+// Parámetros: EMA9, EMA21, RSI14 (>50 compra / <50 venta), MACD(12,26,9)
+// SL = 1% fijo / TP1 = 2% fijo (RR 1:2)
 
 function detectEmaCrossScalping(candles) {
   const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null };
@@ -645,12 +637,12 @@ function detectEmaCrossScalping(candles) {
 function evaluateAll(candles, symbol, asset, htfCandles = null) {
   const signals = [];
 
-  const kz = detectKillZoneNY(candles);
+  const kz = detectNYOpenKillZone(candles);
   if (kz.bullish || kz.bearish) {
     signals.push({
-      strategy: 'kill_zone_ny', label: 'Zona de Caza (Kill Zone NY)',
+      strategy: 'ny_open_kill_zone', label: 'Kill Zone Apertura NY (9:30 AM)',
       direction: kz.bullish ? 'long' : 'short', entry: kz.entry, sl: kz.sl, tp1: kz.tp1, tp2: kz.tp2,
-      details: kz.details, silverBullet: kz.silverBullet, independent: true
+      details: kz.details, independent: true
     });
   }
 
@@ -695,12 +687,42 @@ function evaluateAll(candles, symbol, asset, htfCandles = null) {
 
 module.exports = {
   evaluateAll,
-  detectKillZoneNY,
+  detectNYOpenKillZone,
   detectPivotsBreakoutReversal,
   detectPriceActionRsiEma,
   detectSupplyDemand,
   detectEmaCrossScalping,
   calculateRSISeries,
   calculateMACDSeries,
-  calculateSMASeries
+  calculateSMASeries,
+  calculateEMASeries
 };
+
+// ============================================================
+// CHANGELOG DE ESTA REVISIÓN
+// ============================================================
+// 1. [Price Action + RSI + EMA] Se corrigió el filtro de zona invertido:
+//    ahora COMPRA busca soporte y VENTA busca resistencia (antes era al revés).
+// 2. [Price Action + RSI + EMA] Se eliminó la variable muerta `confirmBull`
+//    que se calculaba pero nunca se usaba.
+// 3. [Kill Zone NY] La ventana usada para calcular Techo/Piso ahora excluye
+//    siempre la vela actual, evitando la auto-referencia que impedía
+//    detectar rupturas mientras la ventana 10:30-11:00 seguía en curso.
+// 4. [Kill Zone NY] La búsqueda de la vela de apertura (10:30) ahora exige
+//    minute === 30 exacto, en vez de un rango 30-44 que en timeframes
+//    menores a 15m podía enganchar la vela equivocada.
+// 5. [Integración] El ejemplo de llamada a evaluateAll() ahora incluye el
+//    parámetro htfCandles, necesario para que Supply and Demand aplique
+//    el filtro de tendencia mayor.
+// 6. [Indicadores] Se eliminó la función duplicada calculateEMASeriesFromIndex0,
+//    unificada con calculateEMASeries (calculateMACDSeries ahora la reutiliza).
+// 7. [Kill Zone] REEMPLAZADA por completo. La versión anterior ("Zona de
+//    Caza") mezclaba esta idea con Silver Bullet de ICT, filtro MACD
+//    obligatorio y una modalidad de continuación con Order Block/FVG que
+//    no forman parte del método real de la infografía, además de usar un
+//    offset fijo de Argentina que fallaba en horario de invierno de EE.UU.
+//    Ahora detectNYOpenKillZone() implementa exactamente lo que muestra
+//    la infografía: vela única 9:30-9:45 hora real de Nueva York, entrada
+//    en la confirmación de ruptura (sin retest obligatorio), SL del otro
+//    lado del rango, TP 1.5R-2R. Nada más.
+// ============================================================
