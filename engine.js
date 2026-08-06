@@ -64,14 +64,15 @@ const CONFIG = {
     SEED_CAP: 40,
     YIELD_EVERY: 40
   },
-  // CryptoCompare vuelve como respaldo en vivo (con API key + cola de rate-limit propia,
-  // ver fetchCryptoCompare) — se había sacado por completo pensando en el límite del
-  // backtest (velas históricas masivas), pero para tráfico liviano de panel funciona bien.
-  PROVIDER_PRIORITY: ['exchangerate', 'twelveData', 'cryptocompare', 'alphaVantage'],
+  // CryptoCompare (min-api.cryptocompare.com / CoinDesk Data) discontinuó su nivel gratis
+  // el 21 de mayo de 2026 — con o sin API key, ahora corta con "rate limit / upgrade your
+  // account" siempre. Se reemplazó por CoinGecko (coingecko, 10.000 pedidos/mes gratis) como
+  // respaldo de cripto en BTCUSD/ETHUSD. EUR/USD y XAU/USD no son cripto, así que no aplica.
+  PROVIDER_PRIORITY: ['exchangerate', 'twelveData', 'alphaVantage'],
   ENDPOINTS: {
     BINANCE_SPOT: 'https://api.binance.com/api/v3',
     BINANCE_FUTURES: 'https://fapi.binance.com/fapi/v1',
-    CRYPTOCOMPARE: 'https://min-api.cryptocompare.com/data',
+    COINGECKO: 'https://api.coingecko.com/api/v3',
     EXCHANGERATE: 'https://api.exchangerate-api.com/v4/latest',
     TWELVEDATA: 'https://api.twelvedata.com',
     FINNHUB: 'https://finnhub.io/api/v1',
@@ -107,29 +108,31 @@ class OHLCVData {
 const ASSETS = {
   BTCUSD: {
     name: 'BTC/USD', market: 'crypto', type: 'crypto',
-    symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', cryptocompare: 'BTC', metaapi: 'BTCUSD' },
+    symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', coingecko: 'bitcoin', metaapi: 'BTCUSD' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['metaapi', 'twelveData', 'cryptocompare', 'alphaVantage']
+    providerPriority: ['metaapi', 'twelveData', 'coingecko', 'alphaVantage']
   },
   ETHUSD: {
     name: 'ETH/USD', market: 'crypto', type: 'crypto',
-    symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', cryptocompare: 'ETH', metaapi: 'ETHUSD' },
+    symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', coingecko: 'ethereum', metaapi: 'ETHUSD' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['metaapi', 'twelveData', 'cryptocompare', 'alphaVantage']
+    providerPriority: ['metaapi', 'twelveData', 'coingecko', 'alphaVantage']
   },
   EURUSD: {
     name: 'EUR/USD', market: 'forex', type: 'forex',
-    symbols: { twelveData: 'EUR/USD', finnhub: 'OANDA:EUR_USD', alphaVantage: 'EURUSD', fmp: 'EURUSD', cryptocompare: 'EUR', exchangerate: 'EUR', metaapi: 'EURUSD' },
+    symbols: { twelveData: 'EUR/USD', finnhub: 'OANDA:EUR_USD', alphaVantage: 'EURUSD', fmp: 'EURUSD', exchangerate: 'EUR', metaapi: 'EURUSD' },
     decimals: 5, pipSize: 0.0001, is24h: false, timezone: 'UTC',
-    providerPriority: ['metaapi', 'exchangerate', 'twelveData', 'cryptocompare', 'alphaVantage']
+    // CoinGecko no cubre forex (EUR/USD no es cripto), por eso no aparece en esta lista.
+    providerPriority: ['metaapi', 'exchangerate', 'twelveData', 'alphaVantage']
   },
   XAUUSD: {
     name: 'XAU/USD (Oro)', market: 'forex', type: 'commodity',
-    symbols: { twelveData: 'XAU/USD', finnhub: 'OANDA:XAU_USD', alphaVantage: 'XAU', fmp: 'GCUSD', cryptocompare: 'XAU', metaapi: 'XAUUSD' },
+    symbols: { twelveData: 'XAU/USD', finnhub: 'OANDA:XAU_USD', alphaVantage: 'XAU', fmp: 'GCUSD', metaapi: 'XAUUSD' },
     decimals: 2, pipSize: 0.1, is24h: false, timezone: 'UTC',
-    providerPriority: ['metaapi', 'twelveData', 'cryptocompare', 'alphaVantage']
+    // CoinGecko no cubre commodities (oro no es cripto), por eso no aparece en esta lista.
+    providerPriority: ['metaapi', 'twelveData', 'alphaVantage']
   }
 };
 
@@ -269,25 +272,6 @@ async function fetchWithTimeout(url, timeout = CONFIG.REQUEST_TIMEOUT, options =
     if (error.name === 'AbortError') throw new Error('Timeout: sin respuesta del proveedor');
     throw error;
   }
-}
-
-// El plan free de CryptoCompare corta con "rate limit" si le llegan varios pedidos casi
-// simultáneos. Esta cola serializa TODOS los pedidos a CryptoCompare de la app entera,
-// dejando un margen mínimo entre uno y el siguiente. Solo se usa para tráfico EN VIVO
-// (quote + velas del panel) — el backtest sigue yendo directo a TwelveData nada más,
-// porque ahí sí se piden cientos de velas de una y se comería la cuota mensual rápido.
-let ccQueue = Promise.resolve();
-let ccLastCallAt = 0;
-const CC_MIN_GAP_MS = 1100;
-function fetchCryptoCompare(url, headers) {
-  const run = ccQueue.then(async () => {
-    const wait = ccLastCallAt + CC_MIN_GAP_MS - Date.now();
-    if (wait > 0) await new Promise(r => setTimeout(r, wait));
-    ccLastCallAt = Date.now();
-    return fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, { headers }, 'cryptocompare');
-  });
-  ccQueue = run.catch(() => {});
-  return run;
 }
 
 function getAssetLocalTime(asset) {
@@ -575,45 +559,51 @@ const ProviderAdapters = {
     }
   },
 
-  cryptocompare: {
-    name: 'CryptoCompare', requiresKey: true, supports: ['BTCUSD','ETHUSD','XAUUSD','EURUSD'],
+  // CoinGecko reemplaza a CryptoCompare como respaldo de cripto: CoinDesk (dueño de
+  // CryptoCompare desde 2024) discontinuó el nivel gratis de esa API el 21 de mayo de 2026 —
+  // por eso pegaba "rate limit / upgrade your account" siempre, no era un problema de ráfaga.
+  // CoinGecko Demo (gratis, con key) sigue dando 10.000 pedidos/mes.
+  // Nota sobre velas: el endpoint /ohlc gratuito no deja elegir el intervalo (15m/1h) como los
+  // demás proveedores — la granularidad depende de "days" y CoinGecko la fija sola (con days=1
+  // da velas de 30 min). Se usa como aproximación aceptable solo para este proveedor de
+  // respaldo; los proveedores de arriba en la prioridad sí respetan el timeframe exacto.
+  coingecko: {
+    name: 'CoinGecko', requiresKey: true, supports: ['BTCUSD','ETHUSD'],
     async fetchQuote(symbol) {
       const asset = ASSETS[symbol];
-      const fsym = asset.symbols.cryptocompare;
-      const cacheKey = `cc_quote_${symbol}`;
+      const id = asset.symbols.coingecko;
+      const cacheKey = `cg_quote_${symbol}`;
       const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const headers = { authorization: `Apikey ${state.apiKeys.cryptocompare}` };
-      const res = await fetchCryptoCompare(`${CONFIG.ENDPOINTS.CRYPTOCOMPARE}/pricemultifull?fsyms=${fsym}&tsyms=USD`, headers);
+      const headers = { 'x-cg-demo-api-key': state.apiKeys.coingecko };
+      const url = `${CONFIG.ENDPOINTS.COINGECKO}/simple/price?ids=${id}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true&include_last_updated_at=true`;
+      const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, { headers }, 'coingecko');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
-      if (!data.RAW || !data.RAW[fsym] || !data.RAW[fsym].USD) throw new Error(data.Message || 'Respuesta inválida de CryptoCompare');
-      const d = data.RAW[fsym].USD;
+      const d = data[id]; if (!d || d.usd == null) throw new Error('Respuesta inesperada de CoinGecko');
+      const price = d.usd;
+      const estBid = price * 0.9995, estAsk = price * 1.0005; // CoinGecko no da bid/ask, se estima igual que Alpha Vantage
       const marketData = new MarketData({
-        bid: d.BID, ask: d.ASK, last: d.PRICE,
-        open: d.OPEN24HOUR || d.PRICE, high: d.HIGH24HOUR, low: d.LOW24HOUR,
-        close: d.PRICE, volume: d.VOLUME24HOURTO,
-        timestamp: d.LASTUPDATE * 1000, timeframe: '1d', marketStatus: 'open',
-        spread: calculateSpread(d.BID, d.ASK, asset.pipSize),
-        source: 'CryptoCompare', symbol, estimatedSpread: false
+        bid: estBid, ask: estAsk, last: price,
+        open: price, high: price, low: price, close: price, volume: d.usd_24h_vol || 0,
+        timestamp: (d.last_updated_at || Date.now() / 1000) * 1000, timeframe: '1d', marketStatus: 'open',
+        spread: calculateSpread(estBid, estAsk, asset.pipSize),
+        source: 'CoinGecko', symbol, estimatedSpread: true
       });
       ResponseCache.set(cacheKey, marketData); return marketData;
     },
     async fetchOHLCV(symbol, interval, limit = 100) {
       const asset = ASSETS[symbol];
-      const fsym = asset.symbols.cryptocompare;
-      const cacheKey = `cc_ohlcv_${symbol}_${interval}`;
+      const id = asset.symbols.coingecko;
+      const cacheKey = `cg_ohlcv_${symbol}_${interval}`;
       const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const tfMap = { '5m': '5', '15m': '15', '1h': '60' };
-      const headers = { authorization: `Apikey ${state.apiKeys.cryptocompare}` };
-      const res = await fetchCryptoCompare(
-        `${CONFIG.ENDPOINTS.CRYPTOCOMPARE}/v2/histominute?fsym=${fsym}&tsym=USD&limit=${limit}&aggregate=${tfMap[interval]||'15'}`,
-        headers
-      );
+      const headers = { 'x-cg-demo-api-key': state.apiKeys.coingecko };
+      const url = `${CONFIG.ENDPOINTS.COINGECKO}/coins/${id}/ohlc?vs_currency=usd&days=1`;
+      const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, { headers }, 'coingecko');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
-      if (data.Response !== 'Success') throw new Error(data.Message);
-      const result = new OHLCVData(data.Data.Data.map(k => ({
-        time: k.time * 1000, open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volumefrom
+      if (!Array.isArray(data) || !data.length) throw new Error('Sin datos históricos de CoinGecko');
+      const result = new OHLCVData(data.slice(-limit).map(([t, o, h, l, c]) => ({
+        time: t, open: o, high: h, low: l, close: c, volume: 0
       })));
       ResponseCache.set(cacheKey, result); return result;
     }
@@ -1381,8 +1371,9 @@ const BacktestEngine = {
     // rate limit ni de nada que podamos arreglar) — mantenerlo como primer intento solo
     // hacía perder hasta 8s por corrida antes de caer a TwelveData. Se va directo a
     // TwelveData para BTC/USD y ETH/USD también.
-    // CryptoCompare se sacó del todo: su plan gratuito solo permite 100 consultas
-    // por MES para este tipo de dato, no alcanza para uso real.
+    // CryptoCompare no es opción acá: CoinDesk discontinuó su nivel gratis en mayo 2026.
+    // CoinGecko (el nuevo respaldo en vivo) tampoco sirve para esto: su /ohlc gratuito no
+    // deja pedir cientos de velas con el detalle que necesita el backtest.
     return this.fetchCandlesTwelveData(symbol, interval);
   },
 
