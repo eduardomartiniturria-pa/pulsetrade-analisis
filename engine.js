@@ -150,6 +150,10 @@ let state = {
   patternStats: (() => { try { return JSON.parse(localStorage.getItem('pt_pattern_stats') || '{}'); } catch (e) { return {}; } })(),
   backtestPatternStats: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_pattern_stats') || '{}'); } catch (e) { return {}; } })(),
   backtestAutoTune: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_autotune') || '{}'); } catch (e) { return {}; } })(),
+  // Estadísticas de backtest de las 5 estrategias independientes (custom-strategies.js).
+  // Separado de backtestPatternStats/backtestAutoTune porque estas estrategias no usan
+  // confianza ni régimen (trending/ranging) como SMCEngine — solo gana/pierde por estrategia.
+  backtestCustomStats: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_custom_stats') || '{}'); } catch (e) { return {}; } })(),
   backtestRunning: false,
   soundEnabled: localStorage.getItem('pt_sound_enabled') !== 'false',
   persistKeys: localStorage.getItem('pt_persist_keys') === 'true',
@@ -1393,9 +1397,67 @@ const BacktestEngine = {
     return stats;
   },
 
+  // Igual que simulate(), pero para las 5 estrategias independientes de custom-strategies.js
+  // en vez de SMCEngine. No usan `confidence` ni `regime`, así que no pasan por
+  // calibrateThreshold() — cada una solo suma gana/pierde por separado (aggregateCustomStats).
+  // htfCandles se pasa null a propósito: en vivo (refreshAsset) sí hay HTF real, pero acá
+  // solo se descarga un timeframe por corrida (fetchCandles), así que Supply and Demand
+  // corre sin su filtro de tendencia mayor — igual que documenta custom-strategies.js cuando
+  // no se le pasa htfCandles.
+  async simulateCustom(candles, symbol, asset) {
+    const cfg = CONFIG.BACKTEST;
+    const events = [];
+    const lastSignalIndexByStrategy = {};
+    for (let i = cfg.MIN_LOOKBACK; i < candles.length - 1; i++) {
+      if (i % cfg.YIELD_EVERY === 0) await sleep(0);
+      const windowStart = Math.max(0, i - cfg.WINDOW_SIZE + 1);
+      const window = candles.slice(windowStart, i + 1);
+      let signals;
+      try { signals = CustomStrategies.evaluateAll(window, symbol, asset, null); }
+      catch (e) { continue; }
+      for (const sig of signals) {
+        const lastIdx = lastSignalIndexByStrategy[sig.strategy] ?? -9999;
+        if (i - lastIdx < cfg.COOLDOWN_CANDLES) continue;
+        const entry = sig.entry, sl = sig.sl, tp1 = sig.tp1;
+        if (entry == null || sl == null || tp1 == null) continue;
+        const isLong = sig.direction === 'long';
+        let result = null;
+        const horizon = Math.min(candles.length, i + 1 + cfg.MAX_HOLD_CANDLES);
+        for (let j = i + 1; j < horizon; j++) {
+          const c = candles[j];
+          const hitSL = isLong ? c.low <= sl : c.high >= sl;
+          const hitTP = isLong ? c.high >= tp1 : c.low <= tp1;
+          if (hitSL) { result = 'loss'; break; }
+          if (hitTP) { result = 'win'; break; }
+        }
+        if (result) {
+          events.push({ index: i, strategy: sig.strategy, direction: sig.direction, result });
+          lastSignalIndexByStrategy[sig.strategy] = i;
+        }
+      }
+    }
+    return events;
+  },
+
+  aggregateCustomStats(events) {
+    const stats = {};
+    events.forEach(e => {
+      if (!stats[e.strategy]) stats[e.strategy] = { wins: 0, losses: 0 };
+      if (e.result === 'win') stats[e.strategy].wins++; else stats[e.strategy].losses++;
+    });
+    Object.keys(stats).forEach(key => {
+      const s = stats[key];
+      const total = s.wins + s.losses;
+      s.sampleSize = total;
+      s.winRate = total ? s.wins / total : 0;
+    });
+    return stats;
+  },
+
   async runSymbol(symbol) {
     const asset = ASSETS[symbol];
     let allEvents = [];
+    let allCustomEvents = [];
     let candlesAnalyzed = 0;
     for (const tf of CONFIG.BACKTEST.TIMEFRAMES) {
       try {
@@ -1404,6 +1466,8 @@ const BacktestEngine = {
         candlesAnalyzed += candles.length;
         const events = await this.simulate(candles, asset.type);
         allEvents = allEvents.concat(events);
+        const customEvents = await this.simulateCustom(candles, symbol, asset);
+        allCustomEvents = allCustomEvents.concat(customEvents);
       } catch (e) {
         console.warn(`Backtest: no se pudo traer historial de ${symbol} en ${tf}:`, e.message);
       }
@@ -1411,9 +1475,10 @@ const BacktestEngine = {
       // el límite de consultas por minuto de TwelveData/CryptoCompare en el plan gratuito.
       await sleep(6000);
     }
-    if (!allEvents.length) return null;
+    if (!allEvents.length && !allCustomEvents.length) return null;
     const { threshold, stats } = this.calibrateThreshold(allEvents);
     const patternStats = this.aggregatePatternStats(allEvents);
+    const customStats = this.aggregateCustomStats(allCustomEvents);
     const wins = allEvents.filter(e => e.result === 'win').length;
     const regimeCalibration = {};
     ['trending', 'ranging'].forEach(regime => {
@@ -1422,7 +1487,12 @@ const BacktestEngine = {
       const r = this.calibrateThreshold(regimeEvents);
       if (r.stats) regimeCalibration[regime] = { threshold: r.threshold, sampleSize: regimeEvents.length, winRate: r.stats.winRate };
     });
-    return { symbol, candlesAnalyzed, totalSignals: allEvents.length, winRate: wins / allEvents.length, calibratedThreshold: threshold, calibratedStats: stats, regimeCalibration, patternStats };
+    return {
+      symbol, candlesAnalyzed,
+      totalSignals: allEvents.length, winRate: allEvents.length ? wins / allEvents.length : 0,
+      calibratedThreshold: threshold, calibratedStats: stats, regimeCalibration, patternStats,
+      customStats
+    };
   },
 
   async runAll(force = false) {
@@ -1449,6 +1519,25 @@ const BacktestEngine = {
         });
         state.backtestPatternStats = combinedPatternStats;
         localStorage.setItem('pt_backtest_pattern_stats', JSON.stringify(combinedPatternStats));
+
+        // Igual que arriba pero para las 5 estrategias independientes: se suman gana/pierde
+        // de los 4 símbolos x 2 timeframes en una sola tabla por estrategia.
+        const combinedCustomStats = {};
+        Object.values(results).forEach(r => {
+          Object.entries(r.customStats || {}).forEach(([key, s]) => {
+            if (!combinedCustomStats[key]) combinedCustomStats[key] = { wins: 0, losses: 0 };
+            combinedCustomStats[key].wins += s.wins; combinedCustomStats[key].losses += s.losses;
+          });
+        });
+        Object.keys(combinedCustomStats).forEach(key => {
+          const s = combinedCustomStats[key];
+          const total = s.wins + s.losses;
+          s.sampleSize = total;
+          s.winRate = total ? s.wins / total : 0;
+        });
+        state.backtestCustomStats = combinedCustomStats;
+        localStorage.setItem('pt_backtest_custom_stats', JSON.stringify(combinedCustomStats));
+
         const autoTune = {};
         Object.entries(results).forEach(([symbol, r]) => {
           autoTune[symbol] = { threshold: r.calibratedThreshold, sampleSize: r.totalSignals, winRate: r.winRate, candlesAnalyzed: r.candlesAnalyzed };
