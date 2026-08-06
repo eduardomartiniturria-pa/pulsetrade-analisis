@@ -24,6 +24,9 @@ const { init } = require('./localStorage'); // ahora es async: hay que esperarlo
     finnhub: process.env.FINNHUB_API_KEY || null,
     alphaVantage: process.env.ALPHAVANTAGE_API_KEY || null,
     fmp: process.env.FMP_API_KEY || null,
+    // CryptoCompare (ahora CCData) exige API key en todos los pedidos — es gratis igual,
+    // solo hay que registrarse. Sin esto, ese proveedor se salta siempre (requiresKey: true).
+    cryptocompare: process.env.CRYPTOCOMPARE_API_KEY || null,
     // MetaApi (datos reales del bróker vía MT5) — token de API generado en el panel
     // de metaapi.cloud. La región (METAAPI_REGION) se usa en engine.js para armar
     // la URL correcta del servidor de datos.
