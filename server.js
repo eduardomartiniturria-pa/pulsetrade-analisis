@@ -26,7 +26,10 @@ const { init } = require('./localStorage'); // ahora es async: hay que esperarlo
     fmp: process.env.FMP_API_KEY || null,
     // CryptoCompare (ahora CCData) exige API key en todos los pedidos — es gratis igual,
     // solo hay que registrarse. Sin esto, ese proveedor se salta siempre (requiresKey: true).
-    cryptocompare: process.env.CRYPTOCOMPARE_API_KEY || null,
+    // CoinGecko Demo (gratis, 10.000 pedidos/mes) — respaldo de cripto (BTC/ETH) para cuando
+    // TwelveData se queda sin cupo. Reemplaza a CryptoCompare, discontinuada en mayo 2026.
+    // Se saca gratis en https://www.coingecko.com/en/developers/dashboard
+    coingecko: process.env.COINGECKO_API_KEY || null,
     // MetaApi (datos reales del bróker vía MT5) — token de API generado en el panel
     // de metaapi.cloud. La región (METAAPI_REGION) se usa en engine.js para armar
     // la URL correcta del servidor de datos.
