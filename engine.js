@@ -1296,22 +1296,13 @@ function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 const BacktestEngine = {
   async fetchCandles(symbol, interval) {
     const asset = ASSETS[symbol];
-    if (asset.type === 'crypto') {
-      // Binance devuelve HTTP 451 desde los servidores de Render (bloqueo geográfico),
-      // así que si falla, caemos directo a TwelveData (que también tiene BTC/USD y ETH/USD).
-      // CryptoCompare se sacó del todo: su plan gratuito solo permite 100 consultas
-      // por MES para este tipo de dato, no alcanza para uso real.
-      try {
-        const url = `${CONFIG.ENDPOINTS.BINANCE_SPOT}/klines?symbol=${asset.symbols.binance}&interval=${interval}&limit=${CONFIG.BACKTEST.CANDLE_LIMIT}`;
-        const res = await fetchWithTimeout(url, 8000);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-        return data.map(k => ({ time: k[0], open: parseFloat(k[1]), high: parseFloat(k[2]), low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]) }));
-      } catch (e) {
-        console.warn(`Backtest: Binance falló para ${symbol} (${e.message}), probando TwelveData`);
-      }
-      return this.fetchCandlesTwelveData(symbol, interval);
-    }
+    // Nota: Binance se sacó por completo de acá. Devuelve HTTP 451 SIEMPRE desde los
+    // servidores de Render (bloqueo geográfico permanente de Binance, no depende de
+    // rate limit ni de nada que podamos arreglar) — mantenerlo como primer intento solo
+    // hacía perder hasta 8s por corrida antes de caer a TwelveData. Se va directo a
+    // TwelveData para BTC/USD y ETH/USD también.
+    // CryptoCompare se sacó del todo: su plan gratuito solo permite 100 consultas
+    // por MES para este tipo de dato, no alcanza para uso real.
     return this.fetchCandlesTwelveData(symbol, interval);
   },
 
