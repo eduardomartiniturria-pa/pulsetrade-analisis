@@ -631,6 +631,168 @@ function detectEmaCrossScalping(candles) {
 }
 
 // ---------------------------------------------------------
+// ESTRATEGIA 6: DIVERGENCIA RSI
+// ---------------------------------------------------------
+// Parámetros:
+//   - RSI14 sobre los pivots estrictos de precio (findStrictPivotHighs/Lows,
+//     ya usados por Pivots Breakout & Reversal) — a diferencia de esa
+//     estrategia, acá la divergencia se mide contra RSI (no MACD) y no
+//     requiere una barrida/falsa ruptura previa: es una señal independiente.
+//   - Divergencia alcista: precio hace mínimo más bajo (PL actual < PL previo)
+//     mientras el RSI hace mínimo más alto en esos mismos puntos.
+//   - Divergencia bajista: precio hace máximo más alto (PH actual > PH previo)
+//     mientras el RSI hace máximo más bajo en esos mismos puntos.
+//   - Confirmación de entrada: el RSI tiene que cruzar de vuelta el nivel
+//     30 (divergencia alcista) o 70 (divergencia bajista) en la vela actual,
+//     con una vela de precio a favor (verde para alcista, roja para bajista).
+//     Sin esa confirmación, la divergencia queda "abierta" y no dispara nada.
+//   - SL: por debajo/encima del extremo de precio del pivot actual (con
+//     colchón de 0.5%). TP1 = riesgo x2 (RR 1:2). TP2 = riesgo x3.
+
+function detectRsiDivergence(candles) {
+  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null };
+  if (!candles || candles.length < 60) return result;
+
+  const rsi = calculateRSISeries(candles, 14);
+  const i = candles.length - 1;
+  const last = candles[i];
+  const rsiNow = rsi[i], rsiPrev = rsi[i - 1];
+  if (rsiNow === null || rsiPrev === null) return result;
+
+  const PH = findStrictPivotHighs(candles);
+  const PL = findStrictPivotLows(candles);
+
+  // --- Divergencia alcista: precio LL, RSI HL, confirmación cruzando 30 al alza ---
+  if (PL.length >= 2) {
+    const lastPL = PL[PL.length - 1];
+    const priorPL = PL[PL.length - 2];
+    const rsiAtLast = rsi[lastPL.index];
+    const rsiAtPrior = rsi[priorPL.index];
+    if (rsiAtLast !== null && rsiAtPrior !== null) {
+      const priceLL = lastPL.price < priorPL.price;
+      const rsiHL = rsiAtLast > rsiAtPrior;
+      const rsiCrossUp30 = rsiPrev <= 30 && rsiNow > 30;
+      if (priceLL && rsiHL && rsiCrossUp30 && last.close > last.open) {
+        result.bullish = true;
+        result.entry = last.close;
+        result.sl = Math.min(lastPL.price, last.low) * 0.995;
+        result.details.push(`Divergencia alcista RSI: precio LL (${lastPL.price.toFixed(2)}) vs RSI HL (${rsiAtPrior.toFixed(1)}→${rsiAtLast.toFixed(1)}), confirmación cruzando 30`);
+      }
+    }
+  }
+
+  // --- Divergencia bajista: precio HH, RSI LH, confirmación cruzando 70 a la baja ---
+  if (!result.bullish && PH.length >= 2) {
+    const lastPH = PH[PH.length - 1];
+    const priorPH = PH[PH.length - 2];
+    const rsiAtLast = rsi[lastPH.index];
+    const rsiAtPrior = rsi[priorPH.index];
+    if (rsiAtLast !== null && rsiAtPrior !== null) {
+      const priceHH = lastPH.price > priorPH.price;
+      const rsiLH = rsiAtLast < rsiAtPrior;
+      const rsiCrossDown70 = rsiPrev >= 70 && rsiNow < 70;
+      if (priceHH && rsiLH && rsiCrossDown70 && last.close < last.open) {
+        result.bearish = true;
+        result.entry = last.close;
+        result.sl = Math.max(lastPH.price, last.high) * 1.005;
+        result.details.push(`Divergencia bajista RSI: precio HH (${lastPH.price.toFixed(2)}) vs RSI LH (${rsiAtPrior.toFixed(1)}→${rsiAtLast.toFixed(1)}), confirmación cruzando 70`);
+      }
+    }
+  }
+
+  if (result.bullish || result.bearish) {
+    const risk = Math.abs(result.entry - result.sl);
+    result.tp1 = result.bullish ? result.entry + risk * 2 : result.entry - risk * 2; // RR 1:2
+    result.tp2 = result.bullish ? result.entry + risk * 3 : result.entry - risk * 3; // RR 1:3
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------
+// ESTRATEGIA 7: BOLLINGER SQUEEZE BREAKOUT
+// ---------------------------------------------------------
+// Parámetros:
+//   - Bandas de Bollinger: SMA20 +/- 2 desvíos estándar.
+//   - "Squeeze" = el ancho de banda (bandwidth = (upper-lower)/sma) tocó,
+//     en alguna de las últimas 5 velas, un valor dentro del 20% más bajo
+//     de los últimos 60 anchos de banda — es decir, volatilidad
+//     comprimida de forma inusual para ese activo en ese período.
+//   - Ruptura: la vela actual cierra por fuera de la banda (arriba de la
+//     superior para alcista, abajo de la inferior para bajista) mientras
+//     que la vela anterior cerraba todavía adentro — señal de arranque
+//     recién confirmado, no de un movimiento ya extendido.
+//   - SL: banda media (SMA20). TP1 = riesgo x2 (RR 1:2). TP2 = riesgo x3.
+
+function calculateBollingerSeries(candles, period = 20, mult = 2) {
+  const closes = candles.map(c => c.close);
+  const n = closes.length;
+  const sma = calculateSMASeries(candles, period);
+  const upper = new Array(n).fill(null);
+  const lower = new Array(n).fill(null);
+  const bandwidth = new Array(n).fill(null);
+  for (let i = period - 1; i < n; i++) {
+    if (sma[i] === null) continue;
+    let sumSq = 0;
+    for (let j = i - period + 1; j <= i; j++) {
+      const d = closes[j] - sma[i];
+      sumSq += d * d;
+    }
+    const std = Math.sqrt(sumSq / period);
+    upper[i] = sma[i] + mult * std;
+    lower[i] = sma[i] - mult * std;
+    bandwidth[i] = sma[i] ? (upper[i] - lower[i]) / sma[i] : null;
+  }
+  return { sma, upper, lower, bandwidth };
+}
+
+function detectBollingerSqueeze(candles) {
+  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null };
+  if (!candles || candles.length < 90) return result;
+
+  const { sma, upper, lower, bandwidth } = calculateBollingerSeries(candles, 20, 2);
+  const i = candles.length - 1;
+  const last = candles[i];
+  const prev = candles[i - 1];
+  if (upper[i] === null || lower[i] === null || upper[i - 1] === null || lower[i - 1] === null) return result;
+
+  // Umbral de squeeze: percentil 20 de los últimos 60 anchos de banda válidos.
+  const bwWindow = bandwidth.slice(Math.max(0, i - 59), i + 1).filter(v => v !== null);
+  if (bwWindow.length < 30) return result;
+  const sorted = [...bwWindow].sort((a, b) => a - b);
+  const p20 = sorted[Math.floor(sorted.length * 0.2)];
+
+  // ¿Hubo squeeze en alguna de las últimas 5 velas (sin contar la actual)?
+  let squeezeSeen = false;
+  for (let j = i - 5; j < i; j++) {
+    if (bandwidth[j] !== null && bandwidth[j] <= p20) { squeezeSeen = true; break; }
+  }
+  if (!squeezeSeen) return result;
+
+  const prevInside = prev.close <= upper[i - 1] && prev.close >= lower[i - 1];
+
+  if (prevInside && last.close > upper[i]) {
+    result.bullish = true;
+    result.entry = last.close;
+    result.sl = sma[i];
+    result.details.push(`Squeeze + ruptura alcista de banda superior (ancho previo en percentil <=20%)`);
+  } else if (prevInside && last.close < lower[i]) {
+    result.bearish = true;
+    result.entry = last.close;
+    result.sl = sma[i];
+    result.details.push(`Squeeze + ruptura bajista de banda inferior (ancho previo en percentil <=20%)`);
+  }
+
+  if (result.bullish || result.bearish) {
+    const risk = Math.abs(result.entry - result.sl);
+    result.tp1 = result.bullish ? result.entry + risk * 2 : result.entry - risk * 2; // RR 1:2
+    result.tp2 = result.bullish ? result.entry + risk * 3 : result.entry - risk * 3; // RR 1:3
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------
 // EVALUACIÓN CONJUNTA (independiente, sin pasar por evalSide)
 // ---------------------------------------------------------
 
@@ -682,6 +844,24 @@ function evaluateAll(candles, symbol, asset, htfCandles = null) {
     });
   }
 
+  const rsiDiv = detectRsiDivergence(candles);
+  if (rsiDiv.bullish || rsiDiv.bearish) {
+    signals.push({
+      strategy: 'rsi_divergence', label: 'Divergencia RSI',
+      direction: rsiDiv.bullish ? 'long' : 'short', entry: rsiDiv.entry, sl: rsiDiv.sl, tp1: rsiDiv.tp1, tp2: rsiDiv.tp2,
+      details: rsiDiv.details, independent: true
+    });
+  }
+
+  const bbSqueeze = detectBollingerSqueeze(candles);
+  if (bbSqueeze.bullish || bbSqueeze.bearish) {
+    signals.push({
+      strategy: 'bollinger_squeeze', label: 'Bollinger Squeeze Breakout',
+      direction: bbSqueeze.bullish ? 'long' : 'short', entry: bbSqueeze.entry, sl: bbSqueeze.sl, tp1: bbSqueeze.tp1, tp2: bbSqueeze.tp2,
+      details: bbSqueeze.details, independent: true
+    });
+  }
+
   return signals;
 }
 
@@ -692,10 +872,13 @@ module.exports = {
   detectPriceActionRsiEma,
   detectSupplyDemand,
   detectEmaCrossScalping,
+  detectRsiDivergence,
+  detectBollingerSqueeze,
   calculateRSISeries,
   calculateMACDSeries,
   calculateSMASeries,
-  calculateEMASeries
+  calculateEMASeries,
+  calculateBollingerSeries
 };
 
 // ============================================================
