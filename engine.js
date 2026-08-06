@@ -64,9 +64,10 @@ const CONFIG = {
     SEED_CAP: 40,
     YIELD_EVERY: 40
   },
-  // Se sacó cryptocompare: su plan gratuito solo permite 100 consultas por MES para
-  // este tipo de dato (velas históricas) — no alcanza ni para un día de uso normal.
-  PROVIDER_PRIORITY: ['exchangerate', 'twelveData', 'alphaVantage'],
+  // CryptoCompare vuelve como respaldo en vivo (con API key + cola de rate-limit propia,
+  // ver fetchCryptoCompare) — se había sacado por completo pensando en el límite del
+  // backtest (velas históricas masivas), pero para tráfico liviano de panel funciona bien.
+  PROVIDER_PRIORITY: ['exchangerate', 'twelveData', 'cryptocompare', 'alphaVantage'],
   ENDPOINTS: {
     BINANCE_SPOT: 'https://api.binance.com/api/v3',
     BINANCE_FUTURES: 'https://fapi.binance.com/fapi/v1',
@@ -109,26 +110,26 @@ const ASSETS = {
     symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', cryptocompare: 'BTC', metaapi: 'BTCUSD' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['metaapi', 'twelveData', 'alphaVantage']
+    providerPriority: ['metaapi', 'twelveData', 'cryptocompare', 'alphaVantage']
   },
   ETHUSD: {
     name: 'ETH/USD', market: 'crypto', type: 'crypto',
     symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', cryptocompare: 'ETH', metaapi: 'ETHUSD' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['metaapi', 'twelveData', 'alphaVantage']
+    providerPriority: ['metaapi', 'twelveData', 'cryptocompare', 'alphaVantage']
   },
   EURUSD: {
     name: 'EUR/USD', market: 'forex', type: 'forex',
     symbols: { twelveData: 'EUR/USD', finnhub: 'OANDA:EUR_USD', alphaVantage: 'EURUSD', fmp: 'EURUSD', cryptocompare: 'EUR', exchangerate: 'EUR', metaapi: 'EURUSD' },
     decimals: 5, pipSize: 0.0001, is24h: false, timezone: 'UTC',
-    providerPriority: ['metaapi', 'exchangerate', 'twelveData', 'alphaVantage']
+    providerPriority: ['metaapi', 'exchangerate', 'twelveData', 'cryptocompare', 'alphaVantage']
   },
   XAUUSD: {
     name: 'XAU/USD (Oro)', market: 'forex', type: 'commodity',
     symbols: { twelveData: 'XAU/USD', finnhub: 'OANDA:XAU_USD', alphaVantage: 'XAU', fmp: 'GCUSD', cryptocompare: 'XAU', metaapi: 'XAUUSD' },
     decimals: 2, pipSize: 0.1, is24h: false, timezone: 'UTC',
-    providerPriority: ['metaapi', 'twelveData', 'alphaVantage']
+    providerPriority: ['metaapi', 'twelveData', 'cryptocompare', 'alphaVantage']
   }
 };
 
@@ -268,6 +269,25 @@ async function fetchWithTimeout(url, timeout = CONFIG.REQUEST_TIMEOUT, options =
     if (error.name === 'AbortError') throw new Error('Timeout: sin respuesta del proveedor');
     throw error;
   }
+}
+
+// El plan free de CryptoCompare corta con "rate limit" si le llegan varios pedidos casi
+// simultáneos. Esta cola serializa TODOS los pedidos a CryptoCompare de la app entera,
+// dejando un margen mínimo entre uno y el siguiente. Solo se usa para tráfico EN VIVO
+// (quote + velas del panel) — el backtest sigue yendo directo a TwelveData nada más,
+// porque ahí sí se piden cientos de velas de una y se comería la cuota mensual rápido.
+let ccQueue = Promise.resolve();
+let ccLastCallAt = 0;
+const CC_MIN_GAP_MS = 1100;
+function fetchCryptoCompare(url, headers) {
+  const run = ccQueue.then(async () => {
+    const wait = ccLastCallAt + CC_MIN_GAP_MS - Date.now();
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    ccLastCallAt = Date.now();
+    return fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, { headers }, 'cryptocompare');
+  });
+  ccQueue = run.catch(() => {});
+  return run;
 }
 
 function getAssetLocalTime(asset) {
@@ -555,6 +575,50 @@ const ProviderAdapters = {
     }
   },
 
+  cryptocompare: {
+    name: 'CryptoCompare', requiresKey: true, supports: ['BTCUSD','ETHUSD','XAUUSD','EURUSD'],
+    async fetchQuote(symbol) {
+      const asset = ASSETS[symbol];
+      const fsym = asset.symbols.cryptocompare;
+      const cacheKey = `cc_quote_${symbol}`;
+      const cached = ResponseCache.get(cacheKey); if (cached) return cached;
+      const headers = { authorization: `Apikey ${state.apiKeys.cryptocompare}` };
+      const res = await fetchCryptoCompare(`${CONFIG.ENDPOINTS.CRYPTOCOMPARE}/pricemultifull?fsyms=${fsym}&tsyms=USD`, headers);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (!data.RAW || !data.RAW[fsym] || !data.RAW[fsym].USD) throw new Error(data.Message || 'Respuesta inválida de CryptoCompare');
+      const d = data.RAW[fsym].USD;
+      const marketData = new MarketData({
+        bid: d.BID, ask: d.ASK, last: d.PRICE,
+        open: d.OPEN24HOUR || d.PRICE, high: d.HIGH24HOUR, low: d.LOW24HOUR,
+        close: d.PRICE, volume: d.VOLUME24HOURTO,
+        timestamp: d.LASTUPDATE * 1000, timeframe: '1d', marketStatus: 'open',
+        spread: calculateSpread(d.BID, d.ASK, asset.pipSize),
+        source: 'CryptoCompare', symbol, estimatedSpread: false
+      });
+      ResponseCache.set(cacheKey, marketData); return marketData;
+    },
+    async fetchOHLCV(symbol, interval, limit = 100) {
+      const asset = ASSETS[symbol];
+      const fsym = asset.symbols.cryptocompare;
+      const cacheKey = `cc_ohlcv_${symbol}_${interval}`;
+      const cached = ResponseCache.get(cacheKey); if (cached) return cached;
+      const tfMap = { '5m': '5', '15m': '15', '1h': '60' };
+      const headers = { authorization: `Apikey ${state.apiKeys.cryptocompare}` };
+      const res = await fetchCryptoCompare(
+        `${CONFIG.ENDPOINTS.CRYPTOCOMPARE}/v2/histominute?fsym=${fsym}&tsym=USD&limit=${limit}&aggregate=${tfMap[interval]||'15'}`,
+        headers
+      );
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (data.Response !== 'Success') throw new Error(data.Message);
+      const result = new OHLCVData(data.Data.Data.map(k => ({
+        time: k.time * 1000, open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volumefrom
+      })));
+      ResponseCache.set(cacheKey, result); return result;
+    }
+  },
+
   alphaVantage: {
     name: 'Alpha Vantage', requiresKey: true, supports: ['BTCUSD','ETHUSD','EURUSD','XAUUSD'],
     async fetchQuote(symbol) {
@@ -571,7 +635,13 @@ const ProviderAdapters = {
       }
       const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, {}, 'alphaVantage');
       if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json(); if (data['Error Message']) throw new Error(data['Error Message']);
+      const data = await res.json();
+      if (data['Error Message']) throw new Error(data['Error Message']);
+      // Alpha Vantage no manda "Error Message" cuando pega el límite diario (25/día en el
+      // plan free) o cuando la función pedida es premium (CRYPTO_INTRADAY lo es) — manda
+      // "Note" o "Information" con el aviso, y sin esto el error salía genérico.
+      if (data['Note']) throw new Error('Límite diario alcanzado: ' + data['Note']);
+      if (data['Information']) throw new Error(data['Information']);
       const d = data['Realtime Currency Exchange Rate']; if (!d) throw new Error('Respuesta inesperada de Alpha Vantage');
       const price = parseFloat(d['5. Exchange Rate']);
       const marketData = new MarketData({
@@ -596,7 +666,13 @@ const ProviderAdapters = {
       }
       const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, {}, 'alphaVantage');
       if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json(); if (data['Error Message']) throw new Error(data['Error Message']);
+      const data = await res.json();
+      if (data['Error Message']) throw new Error(data['Error Message']);
+      if (data['Note']) throw new Error('Límite diario alcanzado: ' + data['Note']);
+      // CRYPTO_INTRADAY es una función premium de Alpha Vantage: con key free siempre
+      // devuelve "Information" en vez de velas para BTC/ETH — nunca va a haber datos acá
+      // para cripto en el plan gratuito, no es un fallo intermitente.
+      if (data['Information']) throw new Error(data['Information']);
       const key = Object.keys(data).find(k => k.includes('Time Series')); if (!key) throw new Error('Sin datos históricos');
       const result = new OHLCVData(Object.entries(data[key]).slice(0, limit).reverse().map(([time, vals]) => ({
         time: new Date(time).getTime(), open: parseFloat(vals['1. open']), high: parseFloat(vals['2. high']),
