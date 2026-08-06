@@ -593,6 +593,52 @@ function detectSupplyDemand(candles, htfCandles) {
 }
 
 // ---------------------------------------------------------
+// ESTRATEGIA 5: EMA CROSS SCALPING (EMA9/EMA21 + RSI + MACD)
+// ---------------------------------------------------------
+// Nota: la infografía de origen promociona "90% win rate" — eso es marketing de plantilla,
+// no un resultado verificable. Se implementa la lógica tal cual el Pine Script (cruce +
+// filtros RSI/MACD + TP 2% / SL 1% fijos), sin ninguna expectativa de ese winrate.
+
+function detectEmaCrossScalping(candles) {
+  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null };
+  if (!candles || candles.length < 30) return result;
+
+  const emaFast = calculateEMASeries(candles, 9);
+  const emaSlow = calculateEMASeries(candles, 21);
+  const rsi = calculateRSISeries(candles, 14);
+  const { macdLine, signalLine } = calculateMACDSeries(candles, 12, 26, 9);
+
+  const i = candles.length - 1;
+  const fastNow = emaFast[i], fastPrev = emaFast[i - 1];
+  const slowNow = emaSlow[i], slowPrev = emaSlow[i - 1];
+  const rsiNow = rsi[i];
+  const macdNow = macdLine[i], signalNow = signalLine[i];
+
+  if (fastNow === null || slowNow === null || fastPrev === null || slowPrev === null || rsiNow === null || macdNow === null || signalNow === null) return result;
+
+  const crossUp = fastPrev <= slowPrev && fastNow > slowNow;
+  const crossDown = fastPrev >= slowPrev && fastNow < slowNow;
+
+  const last = candles[i];
+
+  if (crossUp && rsiNow > 50 && macdNow > signalNow) {
+    result.bullish = true;
+    result.entry = last.close;
+    result.sl = result.entry * (1 - 0.01);  // 1% SL, tal cual el Pine Script
+    result.tp1 = result.entry * (1 + 0.02); // 2% TP, RR 1:2
+    result.details.push(`Cruce EMA9>EMA21 + RSI ${rsiNow.toFixed(1)} (>50) + MACD alcista`);
+  } else if (crossDown && rsiNow < 50 && macdNow < signalNow) {
+    result.bearish = true;
+    result.entry = last.close;
+    result.sl = result.entry * (1 + 0.01);
+    result.tp1 = result.entry * (1 - 0.02);
+    result.details.push(`Cruce EMA9<EMA21 + RSI ${rsiNow.toFixed(1)} (<50) + MACD bajista`);
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------
 // EVALUACIÓN CONJUNTA (independiente, sin pasar por evalSide)
 // ---------------------------------------------------------
 
@@ -635,6 +681,15 @@ function evaluateAll(candles, symbol, asset, htfCandles = null) {
     });
   }
 
+  const emaScalp = detectEmaCrossScalping(candles);
+  if (emaScalp.bullish || emaScalp.bearish) {
+    signals.push({
+      strategy: 'ema_cross_scalping', label: 'EMA Cross Scalping (RSI+MACD)',
+      direction: emaScalp.bullish ? 'long' : 'short', entry: emaScalp.entry, sl: emaScalp.sl, tp1: emaScalp.tp1,
+      details: emaScalp.details, independent: true
+    });
+  }
+
   return signals;
 }
 
@@ -644,6 +699,7 @@ module.exports = {
   detectPivotsBreakoutReversal,
   detectPriceActionRsiEma,
   detectSupplyDemand,
+  detectEmaCrossScalping,
   calculateRSISeries,
   calculateMACDSeries,
   calculateSMASeries
