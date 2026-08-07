@@ -11,13 +11,16 @@
 // - Cooldowns extendidos para rate limits (10min) y errores 402/403
 //
 // Cambios v4.1:
-// - Se integran 3 estrategias INDEPENDIENTES (custom-strategies.js):
-//   Zona de Caza (Kill Zone NY), Pivots Breakout & Reversal,
-//   Price Action + RSI + EMA. Corren en paralelo a las estrategias SMC
-//   (CHoCH, BOS, OB, FVG, Sweep, etc), NO pasan por evalSide() ni por
-//   los filtros globales de confluencia/premium-discount/HTF, y emiten
-//   su propia señal con su propio SL/TP cuando cumplen TODAS sus
-//   condiciones.
+// - Se integran las 7 estrategias INDEPENDIENTES de custom-strategies.js: Kill Zone
+//   Apertura NY (9:30 AM), Pivots Breakout & Reversal, Price Action + RSI + EMA,
+//   Supply and Demand, EMA Cross Scalping, Divergencia RSI y Bollinger Squeeze
+//   Breakout. Corren en paralelo a las estrategias SMC (CHoCH, BOS, OB, FVG, Sweep,
+//   etc), NO pasan por evalSide() ni por los filtros globales de confluencia/
+//   premium-discount/HTF, y emiten su propia señal con su propio SL/TP cuando
+//   cumplen TODAS sus condiciones. (Ver custom-strategies.js para el detalle de
+//   cada una — el conteo se corrigió acá porque los comentarios anteriores decían
+//   "3" y "5" en distintos lugares, ninguno actualizado desde que se agregaron las
+//   últimas estrategias.)
 
 const { sendPushToAll } = require('./subscriptions');
 const CustomStrategies = require('./custom-strategies');
@@ -164,7 +167,7 @@ let state = {
   patternStats: (() => { try { return JSON.parse(localStorage.getItem('pt_pattern_stats') || '{}'); } catch (e) { return {}; } })(),
   backtestPatternStats: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_pattern_stats') || '{}'); } catch (e) { return {}; } })(),
   backtestAutoTune: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_autotune') || '{}'); } catch (e) { return {}; } })(),
-  // Estadísticas de backtest de las 5 estrategias independientes (custom-strategies.js).
+  // Estadísticas de backtest de las 7 estrategias independientes (custom-strategies.js).
   // Separado de backtestPatternStats/backtestAutoTune porque estas estrategias no usan
   // confianza ni régimen (trending/ranging) como SMCEngine — solo gana/pierde por estrategia.
   backtestCustomStats: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_custom_stats') || '{}'); } catch (e) { return {}; } })(),
@@ -185,9 +188,14 @@ let state = {
 
 function getNow() { return new Date(); }
 
-// Ventana Kill Zone NY en hora Argentina (10:30-13:30), usada solo para decidir
-// la frecuencia de refresco del scheduler. Es independiente del cálculo que hace
-// CustomStrategies.detectKillZoneNY() sobre las velas (ese sigue intacto).
+// Ventana Kill Zone NY en hora Argentina (10:30-13:30), usada SOLO para decidir la
+// frecuencia de refresco del scheduler (más rápido durante la apertura de NY). Es un
+// cálculo aparte e independiente de CustomStrategies.detectNYOpenKillZone() (la
+// estrategia que genera la señal en sí, sobre las velas 9:30-9:45 en hora real de
+// Nueva York con DST) — esta función de acá usa un offset fijo Argentina/NY a
+// propósito, solo para dar una ventana más ancha de refresco rápido, no para detectar
+// la señal. Si algún día se vuelve más estricta la lógica de scheduling, conviene
+// migrarla también a America/New_York real para no depender del offset fijo.
 function isArgKillZoneWindow(nowMs = Date.now()) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Argentina/Buenos_Aires', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false
@@ -1500,7 +1508,7 @@ const BacktestEngine = {
     return stats;
   },
 
-  // Igual que simulate(), pero para las 5 estrategias independientes de custom-strategies.js
+  // Igual que simulate(), pero para las 7 estrategias independientes de custom-strategies.js
   // en vez de SMCEngine. No usan `confidence` ni `regime`, así que no pasan por
   // calibrateThreshold() — cada una solo suma gana/pierde por separado (aggregateCustomStats).
   // htfCandles se pasa null a propósito: en vivo (refreshAsset) sí hay HTF real, pero acá
@@ -1623,7 +1631,7 @@ const BacktestEngine = {
         state.backtestPatternStats = combinedPatternStats;
         localStorage.setItem('pt_backtest_pattern_stats', JSON.stringify(combinedPatternStats));
 
-        // Igual que arriba pero para las 5 estrategias independientes: se suman gana/pierde
+        // Igual que arriba pero para las 7 estrategias independientes: se suman gana/pierde
         // de los 4 símbolos x 2 timeframes en una sola tabla por estrategia.
         const combinedCustomStats = {};
         Object.values(results).forEach(r => {
@@ -1719,6 +1727,17 @@ function renderMarketBanner() {}
 function renderApiError(symbol, message) { if (message) console.warn(`[${symbol}] ${message}`); }
 function setLoading() {}
 function renderSignal(symbol, signalDisplay) { state.lastDisplay = state.lastDisplay || {}; state.lastDisplay[symbol] = signalDisplay; }
+
+// Antes refreshAsset() calculaba las señales de las 7 estrategias independientes
+// (resolveCustomSignal) y las notificaba por push, pero nunca las guardaba en ningún
+// lado que el panel pudiera leer — quedaban invisibles salvo por la notificación
+// puntual. Esto las deja en state.lastCustomDisplay[symbol][strategyKey], expuesto
+// luego vía /api/state.customSignals.
+function renderCustomSignal(symbol, strategyKey, display) {
+  state.lastCustomDisplay = state.lastCustomDisplay || {};
+  state.lastCustomDisplay[symbol] = state.lastCustomDisplay[symbol] || {};
+  state.lastCustomDisplay[symbol][strategyKey] = display || { type: 'no-signal' };
+}
 function renderConfidence() {}
 function pushSignalHistory(signal) {
   if (signal.type !== 'long' && signal.type !== 'short') return;
@@ -1869,8 +1888,9 @@ function resolveActiveSignal(symbol, quote, analysis) {
 }
 
 // ---------------------------------------------------------
-// Resolución de señales de las 3 estrategias independientes
-// (Kill Zone NY, Pivots Breakout & Reversal, Price Action+RSI+EMA)
+// Resolución de señales de las 7 estrategias independientes
+// (Kill Zone NY, Pivots Breakout & Reversal, Price Action+RSI+EMA,
+// Supply and Demand, EMA Cross Scalping, Divergencia RSI, Bollinger Squeeze)
 // Cada una tiene su propio cooldown por símbolo+estrategia, y NO
 // pisa ni se mezcla con las señales SMC de resolveActiveSignal().
 // ---------------------------------------------------------
@@ -1910,6 +1930,27 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
   const hitSL = isLong ? quote.last <= frozen.sl : quote.last >= frozen.sl;
   if (hitTP || hitSL) delete state.activeCustomSignals[key];
   return { type: frozen.type, frozen, currentPrice: quote.last, hitTP, hitSL };
+}
+
+// Las estrategias independientes solo aparecen en el resultado de evaluateAll() en la
+// vela exacta donde disparan (son patrones puntuales, no condiciones que se mantienen
+// vela a vela). Sin esto, una señal activa dejaba de refrescarse (TP/SL, precio actual)
+// en cuanto pasaba esa vela, y el panel quedaba mostrando un estado viejo hasta la
+// próxima vez que la misma estrategia volviera a disparar. Esto revisa, en cada ciclo,
+// todas las señales custom ya activas para el símbolo aunque evaluateAll no las haya
+// devuelto esta vez.
+function refreshActiveCustomSignalsDisplay(symbol, quote, skipStrategies = new Set()) {
+  Object.keys(state.activeCustomSignals).forEach(key => {
+    if (!key.startsWith(symbol + '_')) return;
+    const frozen = state.activeCustomSignals[key];
+    if (!frozen) return;
+    if (skipStrategies.has(frozen.strategyKeys[0])) return; // ya se renderizó arriba, en este mismo ciclo
+    const isLong = frozen.type === 'long';
+    const hitTP = isLong ? quote.last >= frozen.tp1 : quote.last <= frozen.tp1;
+    const hitSL = isLong ? quote.last <= frozen.sl : quote.last >= frozen.sl;
+    if (hitTP || hitSL) delete state.activeCustomSignals[key];
+    renderCustomSignal(symbol, frozen.strategyKeys[0], { type: frozen.type, frozen, currentPrice: quote.last, hitTP, hitSL });
+  });
 }
 
 async function refreshAsset(symbol, forceRefresh = false) {
@@ -1953,12 +1994,18 @@ async function refreshAsset(symbol, forceRefresh = false) {
     // Corren en paralelo, no pasan por evalSide() ni por los filtros SMC de arriba.
     try {
       const customSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles);
+      const firedThisCycle = new Set();
       customSignals.forEach(sig => {
         const customDisplay = resolveCustomSignal(symbol, quote, sig, asset);
+        renderCustomSignal(symbol, sig.strategy, customDisplay);
+        firedThisCycle.add(sig.strategy);
         if (customDisplay) {
           addLog(quote.source, `[${sig.label}] señal ${sig.direction === 'long' ? 'LONG' : 'SHORT'} independiente`, symbol);
         }
       });
+      // Refresca (TP/SL, precio actual) las señales custom que ya estaban activas de
+      // ciclos anteriores y que esta vuelta no volvieron a dispararse.
+      refreshActiveCustomSignalsDisplay(symbol, quote, firedThisCycle);
     } catch (e) {
       console.warn(`Estrategias independientes fallaron para ${symbol}:`, e.message);
     }
