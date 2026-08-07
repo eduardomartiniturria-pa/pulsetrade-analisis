@@ -73,7 +73,9 @@ const CONFIG = {
     BINANCE_SPOT: 'https://api.binance.com/api/v3',
     BINANCE_FUTURES: 'https://fapi.binance.com/fapi/v1',
     COINGECKO: 'https://api.coingecko.com/api/v3',
-    EXCHANGERATE: 'https://api.exchangerate-api.com/v4/latest',
+    // api.exchangerate-api.com/v4/latest quedó discontinuado por el proveedor; la URL
+    // vigente es open.er-api.com/v6/latest, con el mismo formato de respuesta (rates: {...}).
+    EXCHANGERATE: 'https://open.er-api.com/v6/latest',
     TWELVEDATA: 'https://api.twelvedata.com',
     FINNHUB: 'https://finnhub.io/api/v1',
     ALPHAVANTAGE: 'https://www.alphavantage.co/query',
@@ -111,17 +113,22 @@ const ASSETS = {
     symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', coingecko: 'bitcoin', metaapi: 'BTCUSD' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    // binanceSpot va primero: gratis, sin API key, sin límite de tasa estricto — ya estaba
-    // programado en PROVIDERS pero nunca se había agregado acá. Se saca metaapi (dado de baja).
-    providerPriority: ['binanceSpot', 'coingecko', 'twelveData', 'alphaVantage']
+    // binanceSpot se sacó de la prioridad en vivo: desde Render devuelve HTTP 451 SIEMPRE
+    // (bloqueo geográfico permanente de Binance, mismo motivo por el que BacktestEngine.
+    // fetchCandles más abajo ya lo saca del todo para el backtest). Dejarlo primero acá
+    // solo hacía perder un intento fallido + ~1.5s cada vez que salía del cooldown de 30min
+    // antes de caer a CoinGecko. El adaptador binanceSpot queda definido por si se despliega
+    // fuera de Render alguna vez. Se saca metaapi (dado de baja).
+    providerPriority: ['coingecko', 'twelveData', 'alphaVantage']
   },
   ETHUSD: {
     name: 'ETH/USD', market: 'crypto', type: 'crypto',
     symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', coingecko: 'ethereum', metaapi: 'ETHUSD' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    // Mismo cambio que BTCUSD: binanceSpot primero (gratis, sin key), se saca metaapi.
-    providerPriority: ['binanceSpot', 'coingecko', 'twelveData', 'alphaVantage']
+    // Mismo motivo que BTCUSD: binanceSpot siempre da 451 desde Render, se saca de la
+    // prioridad en vivo (se saca metaapi, dado de baja).
+    providerPriority: ['coingecko', 'twelveData', 'alphaVantage']
   },
   EURUSD: {
     name: 'EUR/USD', market: 'forex', type: 'forex',
