@@ -606,13 +606,19 @@ const ProviderAdapters = {
   // da velas de 30 min). Se usa como aproximación aceptable solo para este proveedor de
   // respaldo; los proveedores de arriba en la prioridad sí respetan el timeframe exacto.
   coingecko: {
-    name: 'CoinGecko', requiresKey: true, supports: ['BTCUSD','ETHUSD'],
+    // requiresKey: false a propósito — sin COINGECKO_API_KEY igual funciona con el nivel
+    // público de CoinGecko (más limitado en rate, pero gratis y sin registro). Antes esto
+    // decía requiresKey: true y ADEMÁS mandaba el header 'x-cg-demo-api-key' con el valor
+    // null cuando no había key configurada — CoinGecko devuelve 401 ante ese header
+    // literalmente "null", así que sin key el proveedor fallaba siempre en vez de degradar
+    // al nivel público como dice el README.
+    name: 'CoinGecko', requiresKey: false, supports: ['BTCUSD','ETHUSD'],
     async fetchQuote(symbol) {
       const asset = ASSETS[symbol];
       const id = asset.symbols.coingecko;
       const cacheKey = `cg_quote_${symbol}`;
       const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const headers = { 'x-cg-demo-api-key': state.apiKeys.coingecko };
+      const headers = state.apiKeys.coingecko ? { 'x-cg-demo-api-key': state.apiKeys.coingecko } : {};
       const url = `${CONFIG.ENDPOINTS.COINGECKO}/simple/price?ids=${id}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true&include_last_updated_at=true`;
       const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, { headers }, 'coingecko');
       if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -634,7 +640,7 @@ const ProviderAdapters = {
       const id = asset.symbols.coingecko;
       const cacheKey = `cg_ohlcv_${symbol}_${interval}`;
       const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const headers = { 'x-cg-demo-api-key': state.apiKeys.coingecko };
+      const headers = state.apiKeys.coingecko ? { 'x-cg-demo-api-key': state.apiKeys.coingecko } : {};
       const url = `${CONFIG.ENDPOINTS.COINGECKO}/coins/${id}/ohlc?vs_currency=usd&days=1`;
       const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, { headers }, 'coingecko');
       if (!res.ok) throw new Error('HTTP ' + res.status);
