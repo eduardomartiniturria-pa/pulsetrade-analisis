@@ -1,14 +1,16 @@
 require('dotenv').config();
 
 const { init } = require('./localStorage'); // ahora es async: hay que esperarlo antes de tocar engine.js
+const Subscriptions = require('./subscriptions'); // también async: ahora persiste en Supabase, no en disco
 
 (async () => {
   await init(); // conecta a Supabase y carga todo lo guardado en memoria (localStorage global)
+  await Subscriptions.init(); // carga las suscripciones push desde Supabase (o disco si no hay DATABASE_URL)
 
   // A partir de acá, todo sigue exactamente igual que antes.
   const express = require('express');
   const path = require('path');
-  const { addSubscription, removeSubscription, getCount } = require('./subscriptions');
+  const { addSubscription, removeSubscription, getCount } = Subscriptions;
 
   // engine.js declara ASSETS, CONFIG, state, refreshAllData, BacktestEngine, etc. como globales
   // de módulo (era un <script> de navegador). Lo cargamos aquí y usamos esas mismas funciones,
@@ -48,6 +50,11 @@ const { init } = require('./localStorage'); // ahora es async: hay que esperarlo
   app.get('/api/state', (req, res) => {
     res.json({
       signals: state.lastDisplay,
+      // Señales de las 7 estrategias independientes (Kill Zone NY, Pivots B&R, Price
+      // Action+RSI+EMA, Supply&Demand, EMA Cross Scalping, Divergencia RSI, Bollinger
+      // Squeeze). Antes se calculaban y se notificaban por push, pero nunca se exponían
+      // acá — el panel no tenía forma de mostrarlas mientras estaban activas.
+      customSignals: state.lastCustomDisplay || {},
       prices: state.livePrices || {},
       history: (state.signalHistory || []).slice(-50).reverse(),
       autoTune: {
@@ -64,15 +71,25 @@ const { init } = require('./localStorage'); // ahora es async: hay que esperarlo
     res.json({ key: process.env.VAPID_PUBLIC_KEY || null });
   });
 
-  app.post('/api/subscribe', (req, res) => {
+  app.post('/api/subscribe', async (req, res) => {
     if (!req.body || !req.body.endpoint) return res.status(400).json({ error: 'Suscripción inválida' });
-    addSubscription(req.body);
-    res.json({ ok: true });
+    try {
+      await addSubscription(req.body);
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('Error guardando suscripción:', e.message);
+      res.status(500).json({ error: 'No se pudo guardar la suscripción' });
+    }
   });
 
-  app.post('/api/unsubscribe', (req, res) => {
-    if (req.body && req.body.endpoint) removeSubscription(req.body.endpoint);
-    res.json({ ok: true });
+  app.post('/api/unsubscribe', async (req, res) => {
+    try {
+      if (req.body && req.body.endpoint) await removeSubscription(req.body.endpoint);
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('Error borrando suscripción:', e.message);
+      res.status(500).json({ error: 'No se pudo borrar la suscripción' });
+    }
   });
 
   // Disparo manual (por si quieres forzar un chequeo desde el panel, no depende del scheduler).
