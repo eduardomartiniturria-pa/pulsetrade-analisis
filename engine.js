@@ -111,28 +111,31 @@ const ASSETS = {
     symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', coingecko: 'bitcoin', metaapi: 'BTCUSD' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['metaapi', 'twelveData', 'coingecko', 'alphaVantage']
+    // binanceSpot va primero: gratis, sin API key, sin límite de tasa estricto — ya estaba
+    // programado en PROVIDERS pero nunca se había agregado acá. Se saca metaapi (dado de baja).
+    providerPriority: ['binanceSpot', 'coingecko', 'twelveData', 'alphaVantage']
   },
   ETHUSD: {
     name: 'ETH/USD', market: 'crypto', type: 'crypto',
     symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', coingecko: 'ethereum', metaapi: 'ETHUSD' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    providerPriority: ['metaapi', 'twelveData', 'coingecko', 'alphaVantage']
+    // Mismo cambio que BTCUSD: binanceSpot primero (gratis, sin key), se saca metaapi.
+    providerPriority: ['binanceSpot', 'coingecko', 'twelveData', 'alphaVantage']
   },
   EURUSD: {
     name: 'EUR/USD', market: 'forex', type: 'forex',
     symbols: { twelveData: 'EUR/USD', finnhub: 'OANDA:EUR_USD', alphaVantage: 'EURUSD', fmp: 'EURUSD', exchangerate: 'EUR', metaapi: 'EURUSD' },
     decimals: 5, pipSize: 0.0001, is24h: false, timezone: 'UTC',
     // CoinGecko no cubre forex (EUR/USD no es cripto), por eso no aparece en esta lista.
-    providerPriority: ['metaapi', 'exchangerate', 'twelveData', 'alphaVantage']
+    providerPriority: ['exchangerate', 'twelveData', 'alphaVantage']
   },
   XAUUSD: {
     name: 'XAU/USD (Oro)', market: 'forex', type: 'commodity',
     symbols: { twelveData: 'XAU/USD', finnhub: 'OANDA:XAU_USD', alphaVantage: 'XAU', fmp: 'GCUSD', metaapi: 'XAUUSD' },
     decimals: 2, pipSize: 0.1, is24h: false, timezone: 'UTC',
     // CoinGecko no cubre commodities (oro no es cripto), por eso no aparece en esta lista.
-    providerPriority: ['metaapi', 'twelveData', 'fmp', 'alphaVantage']
+    providerPriority: ['twelveData', 'fmp', 'alphaVantage']
   }
 };
 
