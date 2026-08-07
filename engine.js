@@ -132,7 +132,7 @@ const ASSETS = {
     symbols: { twelveData: 'XAU/USD', finnhub: 'OANDA:XAU_USD', alphaVantage: 'XAU', fmp: 'GCUSD', metaapi: 'XAUUSD' },
     decimals: 2, pipSize: 0.1, is24h: false, timezone: 'UTC',
     // CoinGecko no cubre commodities (oro no es cripto), por eso no aparece en esta lista.
-    providerPriority: ['metaapi', 'twelveData', 'alphaVantage']
+    providerPriority: ['metaapi', 'twelveData', 'fmp', 'alphaVantage']
   }
 };
 
@@ -330,7 +330,23 @@ function addLog(provider, action, symbol) {
 
 function getProviderCooldownMs(errorMessage) {
   const msg = (errorMessage || '').toLowerCase();
-  if (msg.includes('429') || msg.includes('rate limit')) return 10 * 60 * 1000;
+  // Endpoint que directamente no existe en el plan gratis (ej: Alpha Vantage
+  // "This is a premium endpoint") — reintentar antes no sirve de nada, nunca
+  // va a funcionar con esta key. Cooldown largo (24h) en vez de reintentar
+  // cada ciclo para siempre.
+  if (msg.includes('premium endpoint') || msg.includes('premium plan') || msg.includes('unlock all premium')) {
+    return 24 * 60 * 60 * 1000;
+  }
+  // Cupo diario agotado (ej: Alpha Vantage "25 requests per day", "rate limit is 25").
+  // No se resetea en minutos, se resetea al otro día — cooldown de 12h en vez de 10min.
+  if (msg.includes('requests per day') || msg.includes('per day') || msg.includes('daily rate limit')) {
+    return 12 * 60 * 60 * 1000;
+  }
+  // Rate limit genérico / burst (429, u otras variantes de texto que usan
+  // algunos proveedores sin devolver el código HTTP explícito).
+  if (msg.includes('429') || msg.includes('rate limit') || msg.includes('spreading out') || msg.includes('too many requests')) {
+    return 10 * 60 * 1000;
+  }
   if (msg.includes('451')) return 30 * 60 * 1000;
   if (msg.includes('402')) return 60 * 60 * 1000;
   if (msg.includes('403')) return 15 * 60 * 1000;
@@ -717,6 +733,8 @@ const MarketDataProvider = {
       if (!adapter) return false;
       if (!adapter.supports.includes(symbol)) return false;
       if (adapter.requiresKey && !state.apiKeys[providerName]) return false;
+      const usage = RequestTracker.getUsage(providerName);
+      if (usage.limit && usage.used >= usage.limit) return false; // cupo diario ya agotado, no tiene sentido intentar
       return true;
     });
 
@@ -763,7 +781,11 @@ const MarketDataProvider = {
     const providerList = asset.providerPriority || CONFIG.PROVIDER_PRIORITY;
     const eligible = providerList.filter(providerName => {
       const adapter = ProviderAdapters[providerName];
-      return adapter && adapter.fetchOHLCV && adapter.supports.includes(symbol) && !(adapter.requiresKey && !state.apiKeys[providerName]);
+      if (!adapter || !adapter.fetchOHLCV || !adapter.supports.includes(symbol)) return false;
+      if (adapter.requiresKey && !state.apiKeys[providerName]) return false;
+      const usage = RequestTracker.getUsage(providerName);
+      if (usage.limit && usage.used >= usage.limit) return false; // cupo diario ya agotado, no tiene sentido intentar
+      return true;
     });
 
     if (eligible.length > 0) {
@@ -1813,174 +1835,4 @@ function resolveActiveSignal(symbol, quote, analysis) {
   const lastAt = state.lastSignalAt[symbol] || 0;
   const cooldownRemainingMs = CONFIG.SIGNAL_COOLDOWN_MS - (Date.now() - lastAt);
   const inCooldown = isNewDirection && cooldownRemainingMs > 0;
-  if (isNewDirection && !inCooldown) {
-    const frozen = SignalEngine.build(symbol, quote, analysis);
-    frozen.source = 'smc';
-    frozen.detectedAt = Date.now();
-    state.activeSignals[symbol] = frozen;
-    state.lastSignalAt[symbol] = frozen.detectedAt;
-    pushSignalHistory(frozen);
-    notifyNewSignal(frozen);
-  }
-  if (!state.activeSignals[symbol]) return { type: 'no-signal', analysis, cooldownMinutesLeft: inCooldown ? Math.ceil(cooldownRemainingMs / 60000) : null };
-  const frozen = state.activeSignals[symbol];
-  const isLong = frozen.type === 'long';
-  const hitTP = isLong ? quote.last >= frozen.tp1 : quote.last <= frozen.tp1;
-  const hitSL = isLong ? quote.last <= frozen.sl : quote.last >= frozen.sl;
-  const result = { type: frozen.type, frozen, currentPrice: quote.last, hitTP, hitSL, isNewDirection: isNewDirection && !inCooldown };
-  if (hitTP || hitSL) delete state.activeSignals[symbol];
-  return result;
-}
-
-// ---------------------------------------------------------
-// Resolución de señales de las 3 estrategias independientes
-// (Kill Zone NY, Pivots Breakout & Reversal, Price Action+RSI+EMA)
-// Cada una tiene su propio cooldown por símbolo+estrategia, y NO
-// pisa ni se mezcla con las señales SMC de resolveActiveSignal().
-// ---------------------------------------------------------
-function resolveCustomSignal(symbol, quote, customSig, asset) {
-  const key = `${symbol}_${customSig.strategy}`;
-  const existing = state.activeCustomSignals[key];
-  const isNewDirection = !existing || existing.type !== customSig.direction;
-  const lastAt = state.lastCustomSignalAt[key] || 0;
-  const cooldownRemainingMs = CONFIG.SIGNAL_COOLDOWN_MS - (Date.now() - lastAt);
-  const inCooldown = isNewDirection && cooldownRemainingMs > 0;
-
-  if (isNewDirection && !inCooldown) {
-    const entry = customSig.entry || quote.last;
-    const sl = customSig.sl;
-    const tp1 = customSig.tp1;
-    const tp2 = customSig.tp2 || customSig.tp1;
-    const slPips = toPips(sl, entry, asset);
-    const tp1Pips = toPips(tp1, entry, asset);
-    const tp2Pips = toPips(tp2, entry, asset);
-    const frozen = {
-      type: customSig.direction, symbol, asset, entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips,
-      rr1: '1:2', rr2: tp2 !== tp1 ? '1:3' : '1:2', confidence: 100,
-      strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
-      details: customSig.details, source: customSig.strategy, regime: 'n/a',
-      timestamp: Date.now(), decimals: asset.decimals, detectedAt: Date.now()
-    };
-    state.activeCustomSignals[key] = frozen;
-    state.lastCustomSignalAt[key] = frozen.detectedAt;
-    pushSignalHistory(frozen);
-    notifyNewSignal(frozen);
-  }
-
-  const frozen = state.activeCustomSignals[key];
-  if (!frozen) return null;
-  const isLong = frozen.type === 'long';
-  const hitTP = isLong ? quote.last >= frozen.tp1 : quote.last <= frozen.tp1;
-  const hitSL = isLong ? quote.last <= frozen.sl : quote.last >= frozen.sl;
-  if (hitTP || hitSL) delete state.activeCustomSignals[key];
-  return { type: frozen.type, frozen, currentPrice: quote.last, hitTP, hitSL };
-}
-
-async function refreshAsset(symbol, forceRefresh = false) {
-  const asset = ASSETS[symbol];
-  renderMarketBanner(symbol); renderAssetHoursPill(symbol); renderApiError(symbol, null);
-  if (!isMarketOpenForAsset(symbol)) { renderSignal(symbol, { type: 'market-closed' }); return; }
-  try {
-    const [quote, ohlcv] = await Promise.all([
-      MarketDataProvider.getQuote(symbol, forceRefresh),
-      MarketDataProvider.getOHLCV(symbol, state.currentTF, 100, forceRefresh).catch(() => state.klineHistory[symbol] || new OHLCVData([]))
-    ]);
-    updatePriceUI(symbol, quote, asset);
-    const htfTF = CONFIG.HTF_MAP[state.currentTF] || null;
-    let htfCandles = null;
-    if (htfTF) {
-      try { const htfOhlcv = await MarketDataProvider.getOHLCV(symbol, htfTF, 60, forceRefresh); htfCandles = htfOhlcv.candles; }
-      catch (e) { htfCandles = null; }
-    }
-    const regimeForThreshold = detectMarketRegime(ohlcv.candles);
-    const analysis = SMCEngine.analyze(ohlcv.candles, state.strictMode, asset.type, htfCandles, getThresholdForSymbol(symbol, regimeForThreshold), getEffectivePatternStats());
-
-    if (analysis.filteredByConfidence) addLog(quote.source, `Señal bloqueada: confianza insuficiente (umbral ${analysis.confidenceThreshold})`, symbol);
-    if (analysis.filteredByVolume) addLog(quote.source, `Señal bloqueada: volumen no confirma (ratio ${analysis.volumeRatio ? analysis.volumeRatio.toFixed(2) : 'n/d'}x, se requiere 1.2x)`, symbol);
-    if (analysis.filteredByCandle) addLog(quote.source, 'Señal bloqueada: vela de confirmación no cumplida', symbol);
-    if (analysis.filteredByMitigation) addLog(quote.source, 'Señal bloqueada: mitigación de OB/FVG no confirmada (Modo Estricto)', symbol);
-    if (analysis.filteredByPremiumDiscount) addLog(quote.source, `Señal bloqueada: filtro Premium/Discount (zona: ${analysis.premiumDiscountZone})`, symbol);
-    if (analysis.filteredByHTF) addLog(quote.source, `Señal bloqueada: tendencia HTF contraria (${analysis.htfTrendDirection})`, symbol);
-
-    const spreadCheck = checkSpreadAnomaly(symbol, quote);
-    if (spreadCheck.anomalous && analysis.direction) {
-      addLog(quote.source, `Señal bloqueada por spread anómalo (${spreadCheck.ratio.toFixed(1)}x el promedio)`, symbol);
-      analysis.direction = null; analysis.filteredBySpread = true; analysis.spreadRatio = spreadCheck.ratio;
-    }
-
-    const display = resolveActiveSignal(symbol, quote, analysis);
-    if (display.cooldownMinutesLeft) addLog(quote.source, `Cambio de dirección bloqueado por cooldown (${display.cooldownMinutesLeft} min restantes)`, symbol);
-    renderSignal(symbol, display);
-    checkHistoryOutcomes(symbol, quote.last, ohlcv.candles);
-
-    // --- Estrategias independientes (Kill Zone NY, Pivots B&R, Price Action+RSI+EMA) ---
-    // Corren en paralelo, no pasan por evalSide() ni por los filtros SMC de arriba.
-    try {
-      const customSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles);
-      customSignals.forEach(sig => {
-        const customDisplay = resolveCustomSignal(symbol, quote, sig, asset);
-        if (customDisplay) {
-          addLog(quote.source, `[${sig.label}] señal ${sig.direction === 'long' ? 'LONG' : 'SHORT'} independiente`, symbol);
-        }
-      });
-    } catch (e) {
-      console.warn(`Estrategias independientes fallaron para ${symbol}:`, e.message);
-    }
-  } catch (error) {
-    if (error.message === 'MERCADO_CERRADO') renderSignal(symbol, { type: 'market-closed' });
-    else {
-      renderApiError(symbol, error.message || 'No se pudo obtener información de ningún proveedor. Revisa tu conexión o las claves de API en Ajustes.');
-      renderSignal(symbol, { type: 'no-data', reason: 'Todos los proveedores de datos fallaron para este activo.' });
-    }
-  }
-}
-
-async function refreshAllData(forceRefresh = false) {
-  renderTradingHoursBar();
-  if (forceRefresh) setLoading(true, 'Consultando proveedores de datos...');
-  try {
-    for (const symbol of Object.keys(ASSETS)) {
-      await refreshAsset(symbol, forceRefresh);
-      await sleep(8000); // ↑ delay entre activos aumentado a 8s (antes 4s)
-    }
-  } finally {
-    if (forceRefresh) setLoading(false);
-  }
-}
-
-async function requestWakeLock() {}
-
-// ---------------------------------------------------------
-// Scheduler autoajustable: reemplaza al setInterval fijo de server.js.
-// Corre refreshAllData() y programa la siguiente pasada según la hora:
-// cada 15 min normalmente, cada 1 min dentro de la ventana Kill Zone NY.
-// Llamar UNA sola vez desde server.js con: engine.startAutoRefreshLoop();
-// (y sacar de ahí cualquier setInterval(refreshAllData, ...) que hubiera).
-// ---------------------------------------------------------
-let autoRefreshTimer = null;
-
-async function autoRefreshTick() {
-  try {
-    await refreshAllData(false);
-  } catch (e) {
-    console.warn('autoRefreshTick: error en refreshAllData', e.message);
-  } finally {
-    const delay = getDynamicRefreshIntervalMs();
-    addLog('scheduler', `Próximo refresco en ${Math.round(delay / 1000)}s (${isArgKillZoneWindow() ? 'Kill Zone NY activa' : 'horario normal'})`, 'ALL');
-    autoRefreshTimer = setTimeout(autoRefreshTick, delay);
-  }
-}
-
-function startAutoRefreshLoop() {
-  if (autoRefreshTimer) return; // ya está corriendo, no duplicar
-  autoRefreshTick();
-}
-
-function stopAutoRefreshLoop() {
-  if (autoRefreshTimer) { clearTimeout(autoRefreshTimer); autoRefreshTimer = null; }
-}
-
-module.exports = {
-  state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
-  startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isArgKillZoneWindow
-};
+  if (isNewDi
