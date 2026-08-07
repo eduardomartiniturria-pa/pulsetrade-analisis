@@ -1,3 +1,4 @@
+[README.md](https://github.com/user-attachments/files/30840733/README.md)
 # PulseTrade PRO — backend (corre solo, sin celular abierto)
 
 Esto reemplaza la lógica que antes vivía en tu navegador. El motor de señales (SMCEngine,
@@ -20,9 +21,11 @@ Copia las dos claves que te da a tu archivo `.env` (`VAPID_PUBLIC_KEY` y `VAPID_
 
 ## 2. Configurar `.env`
 Copia `.env.example` a `.env` y completa al menos las claves VAPID. Las API keys de datos
-(TwelveData, Finnhub, etc.) son opcionales — BTC/ETH funcionan sin ninguna (Binance público),
-pero EUR/USD y XAU/USD necesitan al menos una key gratuita de TwelveData
-(https://twelvedata.com, plan free).
+(TwelveData, Finnhub, etc.) son opcionales — BTC/ETH funcionan sin ninguna gracias a
+CoinGecko (10.000 pedidos/mes gratis, sin key). Binance ya no se usa en vivo: desde
+Render responde HTTP 451 siempre (bloqueo geográfico), así que quedó fuera de la
+prioridad de proveedores. EUR/USD y XAU/USD sí necesitan al menos una key gratuita de
+TwelveData (https://twelvedata.com, plan free).
 
 ## 3. Probar en local
 ```bash
@@ -63,7 +66,9 @@ notificación aunque tengas la app cerrada o el celular bloqueado.
 - `public/` — el panel instalable (PWA) que ves en el celular.
 
 ## Nota sobre persistencia
-El historial se guarda en `data/store.json` dentro del servidor. En el plan free de Render el
-disco es efímero: si Render reinicia el contenedor (redeploy, o inactividad prolongada) podrías
-perder el historial acumulado. Si esto te preocupa, decime y armamos que guarde en una base de
-datos gratuita externa (Supabase, por ejemplo) que sí persiste siempre.
+El historial, el auto-tune y **las suscripciones push** ahora se guardan en Supabase
+(Postgres), no en disco — sobreviven a cualquier redeploy o reinicio del contenedor en
+Render, siempre que `DATABASE_URL` esté configurada en las variables de entorno. Si
+`DATABASE_URL` no está configurada, las suscripciones caen a un archivo en disco
+(`data/subscriptions.json`) como respaldo para correr local, pero en ese caso **sí se
+pierden en cada redeploy de Render** — para producción, configurá siempre `DATABASE_URL`.
