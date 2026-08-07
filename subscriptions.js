@@ -45,13 +45,20 @@ function removeSubscription(endpoint) {
 async function sendPushToAll(payload) {
   if (!process.env.VAPID_PUBLIC_KEY) return;
   const body = JSON.stringify(payload);
+  // Se fija la lista de destinatarios en "targets" ANTES de mandar. Si se usara
+  // "subscriptions[i]" directamente en el forEach de abajo, cada removeSubscription()
+  // reasigna esa variable (la filtra y achica) DURANTE el mismo loop — con más de una
+  // suscripción vencida en la misma tanda, los índices se desalinean y se termina
+  // borrando al suscriptor equivocado (uno válido) mientras el vencido queda vivo y
+  // sigue fallando en cada señal futura.
+  const targets = subscriptions;
   const results = await Promise.allSettled(
-    subscriptions.map(sub => webpush.sendNotification(sub, body))
+    targets.map(sub => webpush.sendNotification(sub, body))
   );
   results.forEach((r, i) => {
     if (r.status === 'rejected' && (r.reason.statusCode === 404 || r.reason.statusCode === 410)) {
       // La suscripción ya no es válida (el usuario desinstaló la app o revocó el permiso).
-      removeSubscription(subscriptions[i].endpoint);
+      removeSubscription(targets[i].endpoint);
     }
   });
 }
