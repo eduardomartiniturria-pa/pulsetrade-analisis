@@ -82,6 +82,15 @@
   .history-meta{font-size:0.68rem;color:#64748b;margin-top:6px}
   .history-empty{text-align:center;padding:20px;color:#64748b;font-size:0.8rem}
   .last-updated{font-size:0.65rem;color:#475569;text-align:center;margin:6px 0}
+  .custom-signals{margin:0 16px 8px;display:flex;flex-direction:column;gap:6px}
+  .custom-signal-card{border-radius:12px;padding:10px 12px;border:1px solid;font-size:0.75rem;display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .custom-signal-card.long{background:rgba(34,197,94,0.08);border-color:rgba(34,197,94,0.3)}
+  .custom-signal-card.short{background:rgba(239,68,68,0.08);border-color:rgba(239,68,68,0.3)}
+  .custom-signal-label{color:#94a3b8;font-weight:600}
+  .custom-signal-dir{font-weight:800}
+  .custom-signal-dir.long{color:#4ade80}
+  .custom-signal-dir.short{color:#f87171}
+  .custom-signal-levels{color:#64748b;font-family:'SF Mono',monospace;font-size:0.68rem}
   @media(max-width:380px){.signal-action{font-size:2rem}.price-value{font-size:1.3rem}.level-value{font-size:1rem}}
   ::-webkit-scrollbar{width:0;height:0}
 </style>
@@ -126,7 +135,17 @@ async function setupPush() {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) { btn.disabled = true; return; }
   const reg = await navigator.serviceWorker.register('/service-worker.js');
   const existing = await reg.pushManager.getSubscription();
-  if (existing) btn.classList.add('active');
+  if (existing) {
+    btn.classList.add('active');
+    // RE-SYNC: aunque el navegador ya tenga la suscripción guardada localmente, la
+    // volvemos a mandar al servidor cada vez que se abre la app. addSubscription() del
+    // lado del servidor es idempotente (no hace nada si el endpoint ya existe), así que
+    // esto no tiene costo — pero si el servidor perdió el registro (por ejemplo, un
+    // redeploy en Render que borró el disco antes de migrar a Supabase), esto lo repone
+    // solo, sin que el usuario tenga que notar que las notificaciones se cortaron y
+    // volver a tocar la campanita.
+    fetch('/api/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(existing) }).catch(() => {});
+  }
   btn.addEventListener('click', async () => {
     if (btn.classList.contains('active')) return;
     const perm = await Notification.requestPermission();
@@ -236,6 +255,26 @@ function renderSignalCard(symbol) {
   </div>`;
 }
 
+// Muestra las señales activas de las 7 estrategias independientes (Kill Zone NY,
+// Pivots B&R, Price Action+RSI+EMA, Supply&Demand, EMA Cross Scalping, Divergencia
+// RSI, Bollinger Squeeze) para este símbolo. Antes se calculaban y se notificaban por
+// push pero no aparecían en ningún lado del panel — quedaban invisibles salvo por la
+// notificación puntual del momento en que dispararon.
+function renderCustomSignals(symbol) {
+  const bySymbol = (lastState.customSignals && lastState.customSignals[symbol]) || {};
+  const active = Object.values(bySymbol).filter(d => d && d.frozen && !d.hitTP && !d.hitSL);
+  if (!active.length) return '';
+  return `<div class="custom-signals">${active.map(d => {
+    const s = d.frozen;
+    const isLong = s.type === 'long';
+    return `<div class="custom-signal-card ${isLong ? 'long' : 'short'}">
+      <span class="custom-signal-label">${(s.strategyLabels && s.strategyLabels[0]) || s.source}</span>
+      <span class="custom-signal-dir ${isLong ? 'long' : 'short'}">${isLong ? 'LONG' : 'SHORT'}</span>
+      <span class="custom-signal-levels">E ${fmt(s.entry, s.decimals)} · SL ${fmt(s.sl, s.decimals)} · TP1 ${fmt(s.tp1, s.decimals)}</span>
+    </div>`;
+  }).join('')}</div>`;
+}
+
 function renderAutoTune(symbol) {
   if (!lastState.autoTune || !lastState.autoTune.threshold) return '';
   const t = lastState.autoTune.threshold[symbol];
@@ -250,6 +289,7 @@ function renderAssetBlock(symbol) {
     <div class="asset-block-header"><span class="asset-block-title">${symbol}</span></div>
     ${renderPriceCard(symbol)}
     ${renderSignalCard(symbol)}
+    ${renderCustomSignals(symbol)}
     ${renderAutoTune(symbol)}
   </div>
   <div class="divider"></div>`;
