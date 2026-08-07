@@ -1,3 +1,4 @@
+[ESTRUCTURA_Y_DEPLOY.md](https://github.com/user-attachments/files/30840746/ESTRUCTURA_Y_DEPLOY.md)
 # Estructura correcta del repo + qué falta
 
 ## 1) Estructura de carpetas que necesita `server.js`
@@ -48,17 +49,22 @@ Revisando `server.js` y `subscriptions.js`, estas son las variables que
 tenés que cargar en el panel de Render (Environment):
 
 ```
+DATABASE_URL=...            (connection string de Supabase — sin esto, el historial
+                              y las suscripciones push no persisten entre redeploys)
 TWELVEDATA_API_KEY=...
 FINNHUB_API_KEY=...
 ALPHAVANTAGE_API_KEY=...
 FMP_API_KEY=...
+COINGECKO_API_KEY=...       (opcional, CoinGecko funciona sin key hasta 10.000 pedidos/mes)
 VAPID_PUBLIC_KEY=...
 VAPID_PRIVATE_KEY=...
 VAPID_SUBJECT=mailto:tu-email@ejemplo.com
-DATA_DIR=/data              (si configuraste un disco persistente)
-CRON_SCHEDULE=*/5 * * * *   (opcional, ya tiene default)
+DATA_DIR=/data              (solo si NO configuraste DATABASE_URL, como respaldo local)
 PORT=                       (Render lo inyecta solo, no hace falta)
 ```
+
+Nota: `CRON_SCHEDULE` ya no se usa — el refresco lo maneja el scheduler autoajustable
+de `engine.js` (`startAutoRefreshLoop`), no un cron fijo.
 
 Las claves VAPID las generás una sola vez corriendo localmente o en Render:
 ```
@@ -67,14 +73,19 @@ npm run vapid
 (ya está el script en tu `package.json`). Te va a tirar un par público/privado
 para pegar en esas dos variables.
 
-## 4) Disco persistente (recordatorio, importante)
+## 4) Base de datos persistente (recordatorio, importante)
 
-Sin esto, cada redeploy en Render borra `data/store.json` y
-`data/subscriptions.json`, y perdés historial, auto-tune calibrado y todas
-las suscripciones push registradas.
+Historial, auto-tune y suscripciones push ahora viven en Supabase (Postgres), no en
+disco — con `DATABASE_URL` configurada, sobreviven a cualquier redeploy o reinicio del
+contenedor en Render. **Sin `DATABASE_URL`, las suscripciones push caen a un archivo en
+disco** (`data/subscriptions.json`) que Render sí borra en cada redeploy — esto fue lo
+que probablemente causó el último corte de notificaciones sin ningún error visible.
 
-- Render: tu servicio → **Disks** → Add Disk → montalo en `/data`.
-- Luego seteá `DATA_DIR=/data` en las variables de entorno.
+- Asegurate de tener `DATABASE_URL` seteada en Render con la connection string de tu
+  proyecto de Supabase.
+- Si además querés un disco persistente como respaldo extra (no es necesario si ya
+  tenés Supabase): tu servicio → **Disks** → Add Disk → montalo en `/data`, y seteá
+  `DATA_DIR=/data`.
 
 ## 5) Chequeo rápido post-deploy
 
