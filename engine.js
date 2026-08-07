@@ -350,6 +350,10 @@ function getProviderCooldownMs(errorMessage) {
   if (msg.includes('429') || msg.includes('rate limit') || msg.includes('spreading out') || msg.includes('too many requests')) {
     return 10 * 60 * 1000;
   }
+  // Key inválida o vencida (ej: CoinGecko con la key rota) — nada que un reintento en
+  // el próximo ciclo (15 min) vaya a solucionar. Cooldown largo, igual que "premium
+  // endpoint": se resetea solo apenas el proveedor vuelva a responder 200.
+  if (msg.includes('401')) return 24 * 60 * 60 * 1000;
   if (msg.includes('451')) return 30 * 60 * 1000;
   if (msg.includes('402')) return 60 * 60 * 1000;
   if (msg.includes('403')) return 15 * 60 * 1000;
