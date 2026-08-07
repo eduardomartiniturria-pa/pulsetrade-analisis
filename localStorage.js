@@ -12,6 +12,17 @@ const pool = process.env.DATABASE_URL
   ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
   : null;
 
+// CRÍTICO: sin este listener, cualquier corte de red en un cliente inactivo del pool
+// (típico en Supabase, que cierra conexiones idle) tira un evento 'error' sin manejar
+// y Node mata el proceso entero — la app queda muda de golpe hasta que Render la
+// reinicie sola, sin ningún log claro de qué pasó. Con el listener, el error se loguea
+// y el pool sigue vivo (pg abre una conexión nueva la próxima vez que la necesita).
+if (pool) {
+  pool.on('error', (err) => {
+    console.error('Error inesperado en un cliente idle del pool de Supabase (contenido, no se cae el server):', err.message);
+  });
+}
+
 let store = {};
 
 async function ensureTable() {
