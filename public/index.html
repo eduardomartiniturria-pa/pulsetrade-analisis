@@ -203,6 +203,7 @@ function renderSignalCard(symbol) {
       <div class="signal-title">⏸️ Sin señal clara</div>
       <div class="signal-badges-row"><span class="badge-offline">Confianza ${conf}%</span></div>
       <div class="signal-reason">${reason}</div>
+      <div class="signal-footer"><span></span><span>Evaluado ${new Date(d.checkedAt || Date.now()).toLocaleTimeString('es-AR')}</span></div>
     </div>`;
   }
 
@@ -318,7 +319,7 @@ function renderHistory() {
         <span>TP1 <b>${fmt(h.tp1, dec)}</b></span>
         <span>TP2 <b>${fmt(h.tp2, dec)}</b></span>
       </div>
-      <div class="history-meta">Confianza ${fmtPct(h.confidence)}%${h.rMultiple !== null && h.rMultiple !== undefined ? ` · Resultado ${h.rMultiple > 0 ? '+' : ''}${h.rMultiple.toFixed(2)}R` : ''}</div>
+      <div class="history-meta">${(h.confidence !== null && h.confidence !== undefined) ? `Confianza ${fmtPct(h.confidence)}%` : 'Estrategia independiente (sin score de confianza)'}${h.rMultiple !== null && h.rMultiple !== undefined ? ` · Resultado ${h.rMultiple > 0 ? '+' : ''}${h.rMultiple.toFixed(2)}R` : ''}</div>
     </div>`;
   }).join('');
 }
