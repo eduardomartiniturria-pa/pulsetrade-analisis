@@ -82,16 +82,7 @@
   .history-meta{font-size:0.68rem;color:#64748b;margin-top:6px}
   .history-empty{text-align:center;padding:20px;color:#64748b;font-size:0.8rem}
   .last-updated{font-size:0.65rem;color:#475569;text-align:center;margin:6px 0}
-  .custom-signals{margin:0 16px 8px;display:flex;flex-direction:column;gap:6px}
-  .custom-signals-header{margin:10px 16px 4px;font-size:0.65rem;text-transform:uppercase;letter-spacing:0.04em;color:#64748b;font-weight:700}
-  .custom-signal-card{border-radius:12px;padding:10px 12px;border:1px solid;font-size:0.75rem;display:flex;justify-content:space-between;align-items:center;gap:8px}
-  .custom-signal-card.long{background:rgba(34,197,94,0.08);border-color:rgba(34,197,94,0.3)}
-  .custom-signal-card.short{background:rgba(239,68,68,0.08);border-color:rgba(239,68,68,0.3)}
-  .custom-signal-label{color:#94a3b8;font-weight:600}
-  .custom-signal-dir{font-weight:800}
-  .custom-signal-dir.long{color:#4ade80}
-  .custom-signal-dir.short{color:#f87171}
-  .custom-signal-levels{color:#64748b;font-family:'SF Mono',monospace;font-size:0.68rem}
+  .strategies-list{display:flex;flex-direction:column;gap:10px}
   @media(max-width:380px){.signal-action{font-size:2rem}.price-value{font-size:1.3rem}.level-value{font-size:1rem}}
   ::-webkit-scrollbar{width:0;height:0}
 </style>
@@ -172,28 +163,48 @@ function renderPriceCard(symbol) {
   </div>`;
 }
 
-function renderSignalCard(symbol) {
-  const d = lastState.signals && lastState.signals[symbol];
-  if (!d) return `<div class="signal-card no-data"><div class="signal-title">⏳ Esperando primer ciclo del motor...</div></div>`;
+// Antes SMC tenía su propia tarjeta grande (renderSignalCard) y las 7 estrategias
+// independientes compartían una versión chica aparte (renderCustomSignals), debajo de
+// esa. Daba la sensación de que SMC era "la principal" y las otras un anexo, cuando en
+// realidad son 8 sistemas de señales corriendo en paralelo con el mismo peso — cada uno
+// con sus propios parámetros, y cuando se cumplen, emite señal. Ahora hay una sola
+// función que arma la tarjeta, igual para las 8: el título cambia, los datos reales que
+// difieren (SMC calcula un score de confianza, las otras no) se muestran si existen y
+// se omiten si no, pero la estructura (entrada/SL/TP1/TP2/RR/estado) es idéntica.
+const CUSTOM_STRATEGY_LIST = [
+  { key: 'ny_open_kill_zone', label: 'Kill Zone Apertura NY' },
+  { key: 'pivots_breakout_reversal', label: 'Pivots Breakout & Reversal' },
+  { key: 'price_action_rsi_ema', label: 'Price Action + RSI + EMA' },
+  { key: 'supply_demand', label: 'Supply and Demand' },
+  { key: 'ema_cross_scalping', label: 'EMA Cross Scalping' },
+  { key: 'rsi_divergence', label: 'Divergencia RSI' },
+  { key: 'bollinger_squeeze', label: 'Bollinger Squeeze Breakout' }
+];
+
+function renderStrategySlot(title, d) {
+  if (!d) return `<div class="signal-card no-data"><div class="signal-title">⏳ ${title}</div><div class="signal-reason">Esperando que se cumplan sus condiciones.</div></div>`;
 
   if (d.type === 'market-closed') {
     return `<div class="signal-card market-closed-card">
-      <div class="signal-title">🌙 Mercado cerrado</div>
+      <div class="signal-title">🌙 ${title}</div>
       <div class="signal-badges-row"><span class="badge-closed">Fuera de horario</span></div>
       <div class="signal-reason">Este activo no cotiza en este momento.</div>
     </div>`;
   }
   if (d.type === 'no-data') {
     return `<div class="signal-card no-data">
-      <div class="signal-title">⚠️ Sin datos suficientes</div>
+      <div class="signal-title">⚠️ ${title}</div>
       <div class="signal-reason">${d.reason || 'No se pudieron obtener velas para este activo.'}</div>
     </div>`;
   }
   if (d.type === 'no-signal') {
-    const a = d.analysis;
-    const conf = fmtPct(a ? a.confidence : 0);
-    let reason = `El motor SMC no encontró un patrón por encima del umbral actual (${a ? fmtPct(a.confidenceThreshold) : 75}%).`;
+    const a = d.analysis; // solo existe en la señal SMC, las 7 independientes no calculan score
+    let badgesRow = '';
+    let reason = 'Esperando que se cumplan sus condiciones.';
     if (a) {
+      const conf = fmtPct(a.confidence);
+      badgesRow = `<div class="signal-badges-row"><span class="badge-offline">Confianza ${conf}%</span></div>`;
+      reason = `No encontró un patrón por encima del umbral actual (${fmtPct(a.confidenceThreshold)}%).`;
       if (a.filteredByVolume) reason = 'Se detectó un patrón, pero el volumen no confirmó el movimiento.';
       else if (a.filteredByCandle) reason = 'Se detectó un patrón, pero faltó una vela de confirmación en la dirección esperada.';
       else if (a.filteredByMitigation) reason = 'Se detectó un patrón, pero el nivel todavía no fue mitigado (modo estricto).';
@@ -201,12 +212,13 @@ function renderSignalCard(symbol) {
       else if (a.filteredByHTF) reason = 'Se detectó un patrón, pero contradice la tendencia del timeframe mayor.';
     }
     return `<div class="signal-card no-signal">
-      <div class="signal-title">⏸️ Sin señal clara</div>
-      <div class="signal-badges-row"><span class="badge-offline">Confianza ${conf}%</span></div>
+      <div class="signal-title">⏸️ ${title}</div>
+      ${badgesRow}
       <div class="signal-reason">${reason}</div>
     </div>`;
   }
 
+  // Señal activa — misma estructura para las 8, sea SMC o una de las independientes.
   const s = d.frozen;
   const isLong = s.type === 'long';
   const dec = s.decimals;
@@ -226,18 +238,21 @@ function renderSignalCard(symbol) {
     </div>`;
   }
 
+  // Estos 4 badges solo existen en la señal SMC (SignalEngine.build calcula tendencia,
+  // confluencia y kill zone; confianza es un score 0-100). Las 7 estrategias
+  // independientes no los calculan — cuando no existen, el badge simplemente no se
+  // muestra, en vez de forzar un valor falso.
+  const confBadge = s.confidence != null ? `<span class="badge-active">Confianza ${fmtPct(s.confidence)}%</span>` : '';
+  const trendBadge = s.trend ? `<span class="badge-trend ${s.trend === 'bullish' ? 'bullish' : 'bearish'}">${s.trend === 'bullish' ? '📈 Tendencia alcista' : '📉 Tendencia bajista'}</span>` : '';
+  const confluenceBadge = s.isConfluence !== undefined ? (s.isConfluence ? `<span class="badge-smc">🔗 Confluencia (${s.strategyLabels.length})</span>` : '<span class="badge-smc">🎯 Individual</span>') : '';
+  const killZoneBadge = s.killZone ? '<span class="badge-smc">🕐 Kill Zone</span>' : '';
+
   return `<div class="signal-card ${isLong ? 'long' : 'short'}">
-    <div class="signal-title">⚡ Señal SMC</div>
-    <div class="signal-badges-row">
-      <span class="badge-trend ${s.trend === 'bullish' ? 'bullish' : 'bearish'}">${s.trend === 'bullish' ? '📈 Tendencia alcista' : '📉 Tendencia bajista'}</span>
-      <span class="badge-active">Confianza ${fmtPct(s.confidence)}%</span>
-      ${s.isConfluence ? `<span class="badge-smc">🔗 Confluencia (${s.strategyLabels.length})</span>` : '<span class="badge-smc">🎯 Individual</span>'}
-      ${s.killZone ? '<span class="badge-smc">🕐 Kill Zone</span>' : ''}
-      ${resolvedBadge}
-    </div>
+    <div class="signal-title">⚡ ${title}</div>
+    <div class="signal-badges-row">${trendBadge}${confBadge}${confluenceBadge}${killZoneBadge}${resolvedBadge}</div>
     <div class="signal-action-row">
       <span class="signal-action ${isLong ? 'long' : 'short'}">${isLong ? 'LONG' : 'SHORT'}</span>
-      <span class="signal-pair">${s.asset.name}</span>
+      <span class="signal-pair">${s.asset ? s.asset.name : ''}</span>
     </div>
     <div class="signal-reason">${(s.details || []).join(' · ')}</div>
     <div class="levels-row">
@@ -245,36 +260,27 @@ function renderSignalCard(symbol) {
       <div class="level-box sl"><div class="level-label">Stop Loss</div><div class="level-value sl">${fmt(s.sl, dec)}</div><div class="level-diff">${fmtPips(s.slPips)}</div></div>
       <div class="level-box tp"><div class="level-label">TP1</div><div class="level-value tp">${fmt(s.tp1, dec)}</div><div class="level-diff">${fmtPips(s.tp1Pips)}</div></div>
     </div>
-    <div class="levels-row">
+    ${s.tp2 != null ? `<div class="levels-row">
       <div class="level-box tp"><div class="level-label">TP2</div><div class="level-value tp">${fmt(s.tp2, dec)}</div><div class="level-diff">${fmtPips(s.tp2Pips)}</div></div>
-    </div>
+    </div>` : ''}
     ${moveHtml}
     <div class="signal-footer">
-      <span>RR ${s.rr1 || ''} / ${s.rr2 || ''}</span>
+      <span>RR ${s.rr1 || '--'}${s.rr2 ? ' / ' + s.rr2 : ''}</span>
       <span>Detectada ${new Date(s.detectedAt || s.timestamp).toLocaleTimeString('es-AR')}</span>
     </div>
   </div>`;
 }
 
-// Muestra las señales activas de las 7 estrategias independientes (Kill Zone NY,
-// Pivots B&R, Price Action+RSI+EMA, Supply&Demand, EMA Cross Scalping, Divergencia
-// RSI, Bollinger Squeeze) para este símbolo. Antes se calculaban y se notificaban por
-// push pero no aparecían en ningún lado del panel — quedaban invisibles salvo por la
-// notificación puntual del momento en que dispararon.
-function renderCustomSignals(symbol) {
-  const bySymbol = (lastState.customSignals && lastState.customSignals[symbol]) || {};
-  const active = Object.values(bySymbol).filter(d => d && d.frozen && !d.hitTP && !d.hitSL);
-  if (!active.length) return '';
-  return `<div class="custom-signals-header">Estrategias independientes (no pasan por el filtro SMC de arriba)</div>
-    <div class="custom-signals">${active.map(d => {
-    const s = d.frozen;
-    const isLong = s.type === 'long';
-    return `<div class="custom-signal-card ${isLong ? 'long' : 'short'}">
-      <span class="custom-signal-label">${(s.strategyLabels && s.strategyLabels[0]) || s.source}</span>
-      <span class="custom-signal-dir ${isLong ? 'long' : 'short'}">${isLong ? 'LONG' : 'SHORT'}</span>
-      <span class="custom-signal-levels">E ${fmt(s.entry, s.decimals)} · SL ${fmt(s.sl, s.decimals)} · TP1 ${fmt(s.tp1, s.decimals)}</span>
-    </div>`;
-  }).join('')}</div>`;
+// Arma las 8 tarjetas (SMC + 7 independientes) en un único bloque, todas con el mismo
+// componente de arriba — nada de "principal arriba, anexo abajo".
+function renderAllStrategyCards(symbol) {
+  const smcDisplay = lastState.signals && lastState.signals[symbol];
+  const customBySymbol = (lastState.customSignals && lastState.customSignals[symbol]) || {};
+  const cards = [renderStrategySlot('Smart Money Concepts (SMC)', smcDisplay)];
+  CUSTOM_STRATEGY_LIST.forEach(strat => {
+    cards.push(renderStrategySlot(strat.label, customBySymbol[strat.key] || null));
+  });
+  return `<div class="strategies-list">${cards.join('')}</div>`;
 }
 
 function renderAutoTune(symbol) {
@@ -290,8 +296,7 @@ function renderAssetBlock(symbol) {
   return `<div class="asset-block" id="block-${symbol}">
     <div class="asset-block-header"><span class="asset-block-title">${symbol}</span></div>
     ${renderPriceCard(symbol)}
-    ${renderSignalCard(symbol)}
-    ${renderCustomSignals(symbol)}
+    ${renderAllStrategyCards(symbol)}
     ${renderAutoTune(symbol)}
   </div>
   <div class="divider"></div>`;
