@@ -1747,8 +1747,19 @@ function renderCustomSignal(symbol, strategyKey, display) {
 function renderConfidence() {}
 function pushSignalHistory(signal) {
   if (signal.type !== 'long' && signal.type !== 'short') return;
-  const last = state.signalHistory[0];
-  if (last && last.symbol === signal.symbol && last.type === signal.type && last.result === 'pending') return;
+  // Antes había acá un chequeo que descartaba la señal si `state.signalHistory[0]`
+  // (la ÚLTIMA entrada del historial COMPARTIDO entre las 8 fuentes: SMC + las 7
+  // estrategias independientes) coincidía en símbolo+dirección y seguía "pending".
+  // El problema: no distinguía de qué estrategia venía. Si, por ejemplo, ETHUSD LONG
+  // de SMC quedaba pendiente como última entrada y después una estrategia independiente
+  // (Bollinger Squeeze, Kill Zone NY, etc.) disparaba también ETHUSD LONG, esa señal
+  // nueva se descartaba del historial — aunque notifyNewSignal() ya hubiera mandado la
+  // notificación push. Resultado: llegaban avisos que después no aparecían en el panel.
+  // No hace falta ningún dedup acá: resolveActiveSignal()/resolveCustomSignal() ya
+  // garantizan que esta función solo se llama cuando isNewDirection && !inCooldown para
+  // ESA fuente puntual (state.activeSignals / state.activeCustomSignals + cooldown por
+  // symbol+estrategia), así que cualquier chequeo adicional acá es redundante y, como
+  // se vio, termina bloqueando señales legítimas de otras estrategias.
   const entry = {
     id: Date.now(), symbol: signal.symbol, name: signal.asset.name, type: signal.type,
     entry: signal.entry, sl: signal.sl, tp1: signal.tp1, tp2: signal.tp2,
@@ -1921,13 +1932,27 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     const slPips = toPips(sl, entry, asset);
     const tp1Pips = toPips(tp1, entry, asset);
     const tp2Pips = toPips(tp2, entry, asset);
+    // Antes: `rr1: '1:2'` y `rr2: '1:3'` fijos, sin importar la estrategia. Eso era
+    // correcto para Pivots, EMA Cross, RSI Divergence y Bollinger (que sí usan esos
+    // ratios exactos), pero mentía en Kill Zone NY (real: 1:1.5 y 1:2, no 1:2 y 1:3) y
+    // en Price Action / Supply&Demand, donde TP1/TP2 son niveles estructurales
+    // (próxima zona S/R u oferta/demanda opuesta), no un múltiplo fijo del riesgo —
+    // ahí el RR real puede ser cualquier valor (2.3, 3.8, lo que sea). Ahora se calcula
+    // el RR real a partir de entry/sl/tp en cada caso.
+    const risk = Math.abs(entry - sl);
+    const formatRR = tp => {
+      if (tp === null || !risk) return null;
+      const reward = Math.abs(tp - entry);
+      const ratio = reward / risk;
+      return `1:${ratio % 1 === 0 ? ratio.toFixed(0) : ratio.toFixed(1)}`;
+    };
     const frozen = {
       type: customSig.direction, symbol, asset, entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips,
       // Antes: `confidence: 100` fijo. Estas estrategias no calculan un score de
       // confianza real (a diferencia de SMCEngine) — poner 100 fijo mentía sobre una
       // certeza que nunca se calculó. Se deja `null`: el panel y el historial ahora
       // muestran "estrategia independiente, sin score" en vez de un 100% falso.
-      rr1: tp1 !== null ? '1:2' : null, rr2: tp2 !== null ? '1:3' : null, confidence: null,
+      rr1: formatRR(tp1), rr2: formatRR(tp2), confidence: null,
       strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
       details: customSig.details, source: customSig.strategy, regime: 'n/a',
       timestamp: Date.now(), decimals: asset.decimals, detectedAt: Date.now()
