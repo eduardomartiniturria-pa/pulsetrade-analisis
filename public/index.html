@@ -285,6 +285,7 @@ function renderCustomSignals(symbol) {
         <div class="level-box tp"><div class="level-label">TP1</div><div class="level-value tp">${fmt(s.tp1, dec)}</div></div>
         ${s.tp2 !== null && s.tp2 !== undefined ? `<div class="level-box tp"><div class="level-label">TP2</div><div class="level-value tp">${fmt(s.tp2, dec)}</div></div>` : ''}
       </div>
+      <div class="signal-footer"><span></span><span>Detectada ${new Date(s.detectedAt || s.timestamp).toLocaleTimeString('es-AR')}</span></div>
     </div>`;
   }).join('')}</div>`;
 }
