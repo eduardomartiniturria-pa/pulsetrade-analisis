@@ -1,11 +1,16 @@
 // ============================================================
 // ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4 (CORREGIDO)
 // ============================================================
-// Estas 5 estrategias NO pasan por SMCEngine.evalSide() ni por los
-// filtros globales de confluencia (premium/discount, HTF trend, etc).
-// Cada una se evalúa por sí sola, con su propia gestión de riesgo,
-// tal como fueron definidas. Corren en paralelo a las estrategias SMC
-// existentes (CHoCH, BOS, OB, FVG, Sweep, etc), sin mezclarse con ellas.
+// Estas 7 estrategias (Kill Zone Apertura NY, Pivots Breakout & Reversal,
+// Price Action + RSI + EMA, Supply and Demand, EMA Cross Scalping,
+// Divergencia RSI y Bollinger Squeeze) NO pasan por SMCEngine.evalSide()
+// ni por los filtros globales de confluencia (premium/discount, HTF
+// trend, etc). Cada una se evalúa por sí sola, con su propia gestión de
+// riesgo, tal como fueron definidas. Corren en paralelo a las estrategias
+// SMC existentes (CHoCH, BOS, OB, FVG, Sweep, etc), sin mezclarse con
+// ellas. (Nota: versiones anteriores de este comentario decían "5" — se
+// corrigió acá, no hay ninguna separación real entre las estrategias,
+// todas están al mismo nivel.)
 //
 // Cómo integrar en engine.js:
 //   const CustomStrategies = require('./custom-strategies');
@@ -888,12 +893,15 @@ module.exports = {
 //    ahora COMPRA busca soporte y VENTA busca resistencia (antes era al revés).
 // 2. [Price Action + RSI + EMA] Se eliminó la variable muerta `confirmBull`
 //    que se calculaba pero nunca se usaba.
-// 3. [Kill Zone NY] La ventana usada para calcular Techo/Piso ahora excluye
-//    siempre la vela actual, evitando la auto-referencia que impedía
-//    detectar rupturas mientras la ventana 10:30-11:00 seguía en curso.
-// 4. [Kill Zone NY] La búsqueda de la vela de apertura (10:30) ahora exige
-//    minute === 30 exacto, en vez de un rango 30-44 que en timeframes
-//    menores a 15m podía enganchar la vela equivocada.
+// 3. [Kill Zone NY — OBSOLETO, ver ítem 7] Este ítem describía la ventana
+//    "10:30-11:00" de la versión anterior en hora Argentina. Quedó huérfano:
+//    el ítem 7 de este mismo changelog reemplazó esa estrategia por
+//    completo, y la ventana real ahora es 9:30-9:45 hora de Nueva York.
+//    Se deja el texto original solo como referencia histórica de qué se
+//    corrigió en su momento, no describe el código actual.
+// 4. [Kill Zone NY — OBSOLETO, ver ítem 7] Mismo caso: mencionaba la vela
+//    de apertura "(10:30)", también de la versión anterior. La vela de
+//    apertura real ahora es 9:30 NY (ver detectNYOpenKillZone).
 // 5. [Integración] El ejemplo de llamada a evaluateAll() ahora incluye el
 //    parámetro htfCandles, necesario para que Supply and Demand aplique
 //    el filtro de tendencia mayor.
