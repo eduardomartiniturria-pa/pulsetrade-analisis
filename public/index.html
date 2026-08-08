@@ -271,16 +271,30 @@ function renderStrategySlot(title, d) {
   </div>`;
 }
 
-// Arma las 8 tarjetas (SMC + 7 independientes) en un único bloque, todas con el mismo
-// componente de arriba — nada de "principal arriba, anexo abajo".
+// Arma las tarjetas de las 8 estrategias (SMC + 7 independientes), pero solo
+// muestra las que tienen una señal activa lista para operar — ninguna se deja fija
+// en pantalla por default. Si ninguna de las 8 tiene señal, un único mensaje limpio
+// en vez de 8 tarjetas "esperando" ocupando lugar sin aportar nada operable.
 function renderAllStrategyCards(symbol) {
   const smcDisplay = lastState.signals && lastState.signals[symbol];
   const customBySymbol = (lastState.customSignals && lastState.customSignals[symbol]) || {};
-  const cards = [renderStrategySlot('Smart Money Concepts (SMC)', smcDisplay)];
-  CUSTOM_STRATEGY_LIST.forEach(strat => {
-    cards.push(renderStrategySlot(strat.label, customBySymbol[strat.key] || null));
-  });
-  return `<div class="strategies-list">${cards.join('')}</div>`;
+
+  const slots = [{ title: 'Smart Money Concepts (SMC)', d: smcDisplay }]
+    .concat(CUSTOM_STRATEGY_LIST.map(strat => ({ title: strat.label, d: customBySymbol[strat.key] || null })));
+
+  // Estados especiales (mercado cerrado / sin datos) sí se muestran siempre, aunque
+  // no sean una señal operable — el usuario necesita saber por qué no hay nada.
+  const specialSlot = slots.find(s => s.d && (s.d.type === 'market-closed' || s.d.type === 'no-data'));
+  if (specialSlot) return renderStrategySlot(specialSlot.title, specialSlot.d);
+
+  const activeSlots = slots.filter(s => s.d && s.d.frozen);
+  if (!activeSlots.length) {
+    return `<div class="signal-card no-signal">
+      <div class="signal-title">⏸️ Sin señales activas</div>
+      <div class="signal-reason">Ninguna de las 8 estrategias cargadas (SMC + las 7 independientes) encontró un patrón que cumpla todos sus parámetros todavía. El motor sigue analizando en cada ciclo.</div>
+    </div>`;
+  }
+  return `<div class="strategies-list">${activeSlots.map(s => renderStrategySlot(s.title, s.d)).join('')}</div>`;
 }
 
 function renderAutoTune(symbol) {
