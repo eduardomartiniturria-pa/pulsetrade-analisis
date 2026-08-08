@@ -82,16 +82,21 @@
   .history-meta{font-size:0.68rem;color:#64748b;margin-top:6px}
   .history-empty{text-align:center;padding:20px;color:#64748b;font-size:0.8rem}
   .last-updated{font-size:0.65rem;color:#475569;text-align:center;margin:6px 0}
-  .custom-signals{margin:0 16px 8px;display:flex;flex-direction:column;gap:6px}
-  .custom-signal-card{border-radius:12px;padding:10px 12px;border:1px solid;font-size:0.75rem;display:flex;justify-content:space-between;align-items:center;gap:8px}
-  .custom-signal-card.long{background:rgba(34,197,94,0.08);border-color:rgba(34,197,94,0.3)}
-  .custom-signal-card.short{background:rgba(239,68,68,0.08);border-color:rgba(239,68,68,0.3)}
-  .custom-signal-label{color:#94a3b8;font-weight:600}
-  .custom-signal-dir{font-weight:800}
-  .custom-signal-dir.long{color:#4ade80}
-  .custom-signal-dir.short{color:#f87171}
-  .custom-signal-levels{color:#64748b;font-family:'SF Mono',monospace;font-size:0.68rem}
-  @media(max-width:380px){.signal-action{font-size:2rem}.price-value{font-size:1.3rem}.level-value{font-size:1rem}}
+  .custom-signals{margin:0 16px 8px;display:flex;flex-direction:column;gap:10px}
+  .custom-signal-card{border-radius:20px;padding:16px;border:2px solid;position:relative;overflow:hidden}
+  .custom-signal-card.long{background:linear-gradient(180deg,rgba(34,197,94,0.08),rgba(34,197,94,0.02));border-color:rgba(34,197,94,0.35);box-shadow:0 0 20px rgba(34,197,94,0.08)}
+  .custom-signal-card.short{background:linear-gradient(180deg,rgba(239,68,68,0.08),rgba(239,68,68,0.02));border-color:rgba(239,68,68,0.35);box-shadow:0 0 20px rgba(239,68,68,0.08)}
+  .custom-signal-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:8px}
+  .custom-signal-label{font-size:0.85rem;font-weight:700;color:#cbd5e1;display:flex;align-items:center;gap:6px}
+  .custom-signal-label::before{content:'⚙️';font-size:0.8rem}
+  .custom-signal-dir{font-size:1.3rem;font-weight:800;letter-spacing:-0.5px}
+  .custom-signal-dir.long{color:#4ade80;text-shadow:0 0 16px rgba(74,222,128,0.3)}
+  .custom-signal-dir.short{color:#f87171;text-shadow:0 0 16px rgba(248,113,113,0.3)}
+  .custom-signal-levels{display:flex;gap:8px}
+  .custom-signal-levels .level-box{padding:10px 8px}
+  .custom-signal-levels .level-label{font-size:0.65rem}
+  .custom-signal-levels .level-value{font-size:0.95rem}
+  @media(max-width:380px){.signal-action{font-size:2rem}.price-value{font-size:1.3rem}.level-value{font-size:1rem}.custom-signal-dir{font-size:1.1rem}}
   ::-webkit-scrollbar{width:0;height:0}
 </style>
 </head>
@@ -268,10 +273,18 @@ function renderCustomSignals(symbol) {
   return `<div class="custom-signals">${active.map(d => {
     const s = d.frozen;
     const isLong = s.type === 'long';
+    const dec = s.decimals;
     return `<div class="custom-signal-card ${isLong ? 'long' : 'short'}">
-      <span class="custom-signal-label">${(s.strategyLabels && s.strategyLabels[0]) || s.source}</span>
-      <span class="custom-signal-dir ${isLong ? 'long' : 'short'}">${isLong ? 'LONG' : 'SHORT'}</span>
-      <span class="custom-signal-levels">E ${fmt(s.entry, s.decimals)} · SL ${fmt(s.sl, s.decimals)} · TP1 ${fmt(s.tp1, s.decimals)}</span>
+      <div class="custom-signal-top">
+        <span class="custom-signal-label">${(s.strategyLabels && s.strategyLabels[0]) || s.source}</span>
+        <span class="custom-signal-dir ${isLong ? 'long' : 'short'}">${isLong ? 'LONG' : 'SHORT'}</span>
+      </div>
+      <div class="levels-row custom-signal-levels">
+        <div class="level-box entry"><div class="level-label">Entrada</div><div class="level-value entry">${fmt(s.entry, dec)}</div></div>
+        <div class="level-box sl"><div class="level-label">Stop Loss</div><div class="level-value sl">${fmt(s.sl, dec)}</div></div>
+        <div class="level-box tp"><div class="level-label">TP1</div><div class="level-value tp">${fmt(s.tp1, dec)}</div></div>
+        ${s.tp2 !== null && s.tp2 !== undefined ? `<div class="level-box tp"><div class="level-label">TP2</div><div class="level-value tp">${fmt(s.tp2, dec)}</div></div>` : ''}
+      </div>
     </div>`;
   }).join('')}</div>`;
 }
