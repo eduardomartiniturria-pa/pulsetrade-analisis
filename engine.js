@@ -1859,7 +1859,8 @@ function showSignalAlertBanner() {}
 function notifyNewSignal(signal) {
   const asset = ASSETS[signal.symbol];
   const title = `${signal.type === 'long' ? '🟢 LONG' : '🔴 SHORT'} ${asset ? asset.name : signal.symbol}${signal.source && signal.source !== 'smc' ? ' · ' + signal.strategyLabels[0] : ''}`;
-  const body = `Entrada ${fmt(signal.entry, signal.decimals)} · SL ${fmt(signal.sl, signal.decimals)} · TP1 ${fmt(signal.tp1, signal.decimals)} · Confianza ${signal.confidence}%`;
+  const confPart = (signal.confidence !== null && signal.confidence !== undefined) ? ` · Confianza ${signal.confidence}%` : '';
+  const body = `Entrada ${fmt(signal.entry, signal.decimals)} · SL ${fmt(signal.sl, signal.decimals)} · TP1 ${fmt(signal.tp1, signal.decimals)}${confPart}`;
   sendPushToAll({ title, body, symbol: signal.symbol, signal }).catch(err => console.error('Error enviando push:', err.message));
 }
 
@@ -1868,7 +1869,7 @@ function toggleStrictMode() { state.strictMode = !state.strictMode; }
 
 function resolveActiveSignal(symbol, quote, analysis) {
   if (!analysis.valid) { delete state.activeSignals[symbol]; return { type: 'no-data', reason: analysis.reason }; }
-  if (!analysis.direction) { delete state.activeSignals[symbol]; return { type: 'no-signal', analysis }; }
+  if (!analysis.direction) { delete state.activeSignals[symbol]; return { type: 'no-signal', analysis, checkedAt: Date.now() }; }
   const existing = state.activeSignals[symbol];
   const isNewDirection = !existing || existing.type !== analysis.direction;
   const lastAt = state.lastSignalAt[symbol] || 0;
@@ -1883,7 +1884,7 @@ function resolveActiveSignal(symbol, quote, analysis) {
     pushSignalHistory(frozen);
     notifyNewSignal(frozen);
   }
-  if (!state.activeSignals[symbol]) return { type: 'no-signal', analysis, cooldownMinutesLeft: inCooldown ? Math.ceil(cooldownRemainingMs / 60000) : null };
+  if (!state.activeSignals[symbol]) return { type: 'no-signal', analysis, cooldownMinutesLeft: inCooldown ? Math.ceil(cooldownRemainingMs / 60000) : null, checkedAt: Date.now() };
   const frozen = state.activeSignals[symbol];
   const isLong = frozen.type === 'long';
   const hitTP = isLong ? quote.last >= frozen.tp1 : quote.last <= frozen.tp1;
@@ -1912,13 +1913,21 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     const entry = customSig.entry || quote.last;
     const sl = customSig.sl;
     const tp1 = customSig.tp1;
-    const tp2 = customSig.tp2 || customSig.tp1;
+    // Antes: `customSig.tp2 || customSig.tp1` — si la estrategia no definía TP2, se
+    // mostraba el mismo valor que TP1 como si fueran dos niveles reales (confuso en el
+    // panel). Ahora se deja `null` cuando no hay un TP2 real, y `fmt()`/`toPips()` en el
+    // front-end ya saben mostrar "--" para null.
+    const tp2 = (customSig.tp2 !== undefined && customSig.tp2 !== null) ? customSig.tp2 : null;
     const slPips = toPips(sl, entry, asset);
     const tp1Pips = toPips(tp1, entry, asset);
     const tp2Pips = toPips(tp2, entry, asset);
     const frozen = {
       type: customSig.direction, symbol, asset, entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips,
-      rr1: '1:2', rr2: tp2 !== tp1 ? '1:3' : '1:2', confidence: 100,
+      // Antes: `confidence: 100` fijo. Estas estrategias no calculan un score de
+      // confianza real (a diferencia de SMCEngine) — poner 100 fijo mentía sobre una
+      // certeza que nunca se calculó. Se deja `null`: el panel y el historial ahora
+      // muestran "estrategia independiente, sin score" en vez de un 100% falso.
+      rr1: tp1 !== null ? '1:2' : null, rr2: tp2 !== null ? '1:3' : null, confidence: null,
       strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
       details: customSig.details, source: customSig.strategy, regime: 'n/a',
       timestamp: Date.now(), decimals: asset.decimals, detectedAt: Date.now()
