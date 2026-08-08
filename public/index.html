@@ -291,7 +291,7 @@ function renderAllStrategyCards(symbol) {
   if (!activeSlots.length) {
     return `<div class="signal-card no-signal">
       <div class="signal-title">⏸️ Sin señales activas</div>
-      <div class="signal-reason">Ninguna de las 8 estrategias cargadas (SMC + las 7 independientes) encontró un patrón que cumpla todos sus parámetros todavía. El motor sigue analizando en cada ciclo.</div>
+      <div class="signal-reason">Ninguna de las 8 estrategias cargadas encontró un patrón que cumpla todos sus parámetros todavía. El motor sigue analizando en cada ciclo.</div>
     </div>`;
   }
   return `<div class="strategies-list">${activeSlots.map(s => renderStrategySlot(s.title, s.d)).join('')}</div>`;
