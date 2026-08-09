@@ -505,20 +505,34 @@ function isEngulfing(prev, last, direction) {
     last.open >= prev.close && last.close <= prev.open;
 }
 
+function calculateATR(candleSet, period = 14) {
+  const trueRanges = [];
+  for (let i = 1; i < candleSet.length; i++) {
+    const h = candleSet[i].high, l = candleSet[i].low, pc = candleSet[i - 1].close;
+    trueRanges.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+  }
+  return trueRanges.length ? trueRanges.slice(-period).reduce((a, b) => a + b, 0) / Math.min(period, trueRanges.length) : null;
+}
+
 function detectSupplyDemand(candles, htfCandles) {
   const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null };
   if (!candles || candles.length < 15) return result;
 
-  const trueRanges = [];
-  for (let i = 1; i < candles.length; i++) {
-    const h = candles[i].high, l = candles[i].low, pc = candles[i - 1].close;
-    trueRanges.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
-  }
-  const atr = trueRanges.length ? trueRanges.slice(-14).reduce((a, b) => a + b, 0) / Math.min(14, trueRanges.length) : null;
+  // ATR del timeframe de entrada (M15/M5): se usa para el colchón del SL, que es
+  // relativo al precio actual, no a la formación de la zona.
+  const atr = calculateATR(candles);
   if (!atr) return result;
 
+  // CORREGIDO: antes se usaba el ATR de entrada también para calificar qué cuenta
+  // como "impulso" en findImpulseZones, aunque la zona se busque en htfCandles
+  // (H1/H4). Un ATR de M15 es mucho más chico que uno de H1, así que casi
+  // cualquier vela de H1 superaba el umbral de 1.5x y calificaba como impulso,
+  // inflando la cantidad de zonas detectadas. Ahora el ATR usado para detectar
+  // impulsos se calcula sobre el mismo set de velas donde se buscan las zonas.
   const zoneSource = (htfCandles && htfCandles.length >= 15) ? htfCandles : candles;
-  const zones = findImpulseZones(zoneSource, atr);
+  const zoneAtr = (zoneSource === candles) ? atr : calculateATR(zoneSource);
+  if (!zoneAtr) return result;
+  const zones = findImpulseZones(zoneSource, zoneAtr);
   if (!zones.length) return result;
 
   const last = candles[candles.length - 1];
