@@ -334,7 +334,13 @@ function renderHistory() {
   const el = document.getElementById('history');
   const hist = lastState.history || [];
   if (!hist.length) { el.innerHTML = '<div class="history-empty">Todavía no hay historial.</div>'; return; }
-  el.innerHTML = hist.slice(0, 15).map(h => {
+  // Bug encontrado 9/8: el array llega desde el servidor ordenado de la señal más
+  // vieja a la más nueva (no al revés como se asumía). slice(0,15) agarraba siempre
+  // las 15 PRIMERAS, es decir las más viejas del array completo — por eso el panel
+  // se veía "clavado" en señales de hace días aunque el motor siguiera generando
+  // señales nuevas normalmente. Fix: tomar las últimas 15 (las más recientes) y
+  // darlas vuelta para mostrar la más nueva arriba de todo.
+  el.innerHTML = hist.slice(-15).reverse().map(h => {
     const dec = h.decimals ?? 2;
     const resultBadge = h.result === 'win' ? '✅ Ganó' : h.result === 'loss' ? '🛑 Perdió' : '⏳ Pendiente';
     const resultClass = h.result === 'win' ? 'win' : h.result === 'loss' ? 'loss' : '';
