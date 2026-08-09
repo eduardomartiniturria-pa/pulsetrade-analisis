@@ -70,6 +70,12 @@
   .autotune-bar{margin:0 16px 12px;padding:10px 14px;border-radius:12px;background:#151d2b;border:1px solid #232f42;display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:0.72rem}
   .autotune-label{font-weight:700;color:#38bdf8}
   .autotune-detail{color:#94a3b8}
+  .strategy-stats{margin:0 16px 12px;padding:10px 14px;border-radius:12px;background:#151d2b;border:1px solid #232f42;font-size:0.72rem}
+  .strategy-stats-title{font-weight:700;color:#38bdf8;margin-bottom:8px}
+  .strategy-stats-row{display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-top:1px solid #1e293b}
+  .strategy-stats-row:first-of-type{border-top:none}
+  .strategy-stats-label{color:#cbd5e1}
+  .strategy-stats-value{color:#94a3b8;white-space:nowrap}
   .divider{height:1px;background:#1a2332;margin:8px 16px}
   .section-label-hist{font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:1px;font-weight:700;margin:20px 16px 8px}
   .history-card{background:#1a2332;border-radius:14px;padding:14px;margin:0 16px 8px;border:1px solid #2d3a4f}
@@ -236,6 +242,35 @@ const CUSTOM_STRATEGY_LIST = [
   { key: 'bollinger_squeeze', label: 'Bollinger Squeeze Breakout' }
 ];
 
+// Mismas 7 + SMC, para la tabla de ganadas/perdidas por estrategia (ver
+// renderStrategyStatsTable). 'smc' es la key que usa entry.source cuando la señal
+// no viene de ninguna de las 7 independientes (ver pushSignalHistory en engine.js).
+const ALL_STRATEGY_LIST = [{ key: 'smc', label: 'Smart Money Concepts (SMC)' }].concat(CUSTOM_STRATEGY_LIST);
+
+// Tabla comparativa de % de ganadas por estrategia, para UN activo. Los números
+// "(base backtest)" son los que arrancó seedStrategyStatsFromBacktest (engine.js) la
+// primera vez que corrió el backtest — a partir de ahí, cada vez que una señal en vivo
+// se resuelve (gana o pierde), se suma sobre esa misma base. No se distingue en el
+// contador cuál parte es backtest y cuál es en vivo porque se van sumando juntos: son
+// la misma cuenta, el backtest solo evita arrancar de cero.
+function renderStrategyStatsTable(symbol) {
+  const stats = (lastState.strategyStatsBySymbol && lastState.strategyStatsBySymbol[symbol]) || {};
+  const rows = ALL_STRATEGY_LIST.map(strat => {
+    const s = stats[strat.key];
+    const total = s ? s.wins + s.losses : 0;
+    const pct = total ? Math.round((s.wins / total) * 100) : null;
+    return { label: strat.label, total, pct, wins: s ? s.wins : 0, losses: s ? s.losses : 0 };
+  }).sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1));
+
+  return `<div class="strategy-stats">
+    <div class="strategy-stats-title">📊 Ganadas / perdidas por estrategia — ${symbol}</div>
+    ${rows.map(r => `<div class="strategy-stats-row">
+      <span class="strategy-stats-label">${r.label}</span>
+      <span class="strategy-stats-value">${r.total ? `${r.pct}% (${r.wins}G / ${r.losses}P)` : 'Sin datos todavía'}</span>
+    </div>`).join('')}
+  </div>`;
+}
+
 function renderStrategySlot(title, d) {
   if (!d) return `<div class="signal-card no-data"><div class="signal-title">⏳ ${title}</div><div class="signal-reason">Esperando que se cumplan sus condiciones.</div></div>`;
 
@@ -367,6 +402,7 @@ function renderAssetBlock(symbol) {
     ${renderPriceCard(symbol)}
     ${renderAllStrategyCards(symbol)}
     ${renderAutoTune(symbol)}
+    ${renderStrategyStatsTable(symbol)}
   </div>
   <div class="divider"></div>`;
 }
