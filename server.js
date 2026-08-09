@@ -1,6 +1,6 @@
 require('dotenv').config();
 
-const { init } = require('./localStorage'); // ahora es async: hay que esperarlo antes de tocar engine.js
+const { init, onBeforeShutdown } = require('./localStorage'); // ahora es async: hay que esperarlo antes de tocar engine.js
 const Subscriptions = require('./subscriptions'); // también async: ahora persiste en Supabase, no en disco
 
 (async () => {
@@ -17,7 +17,15 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
   // sin haber tocado su lógica de señales/aprendizaje.
   // startAutoRefreshLoop reemplaza al cron fijo de 5 min: corre solo, y decide internamente
   // cada cuánto refrescar (15 min normal, 1 min dentro de la ventana Kill Zone NY 10:30-13:30 ARG).
-  const { state, ASSETS, CONFIG, refreshAllData, BacktestEngine, startAutoRefreshLoop } = require('./engine.js');
+  const { state, ASSETS, CONFIG, refreshAllData, BacktestEngine, startAutoRefreshLoop, stopAutoRefreshLoop } = require('./engine.js');
+
+  // Se registra ACÁ (no en localStorage.js, que se carga antes y no conoce a engine.js)
+  // para que, apenas llegue SIGTERM (redeploy en Render), el motor deje de arrancar
+  // ciclos nuevos ANTES de que localStorage.js empiece a esperar las escrituras
+  // pendientes. Esto es lo que le faltaba al fix anterior: sin esto, una señal podía
+  // generarse y empezar a guardarse DESPUÉS de que ya se había tomado la foto de "qué
+  // hay que esperar", y se perdía igual pese a que el flush en sí funcionaba bien.
+  onBeforeShutdown(stopAutoRefreshLoop);
 
   // El motor original leía las API keys desde localStorage (las cargaba el usuario a mano en el
   // navegador). Aquí vienen del .env del servidor, una sola vez para todos.
