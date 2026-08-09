@@ -83,6 +83,13 @@
   .history-empty{text-align:center;padding:20px;color:#64748b;font-size:0.8rem}
   .last-updated{font-size:0.65rem;color:#475569;text-align:center;margin:6px 0}
   .strategies-list{display:flex;flex-direction:column;gap:10px}
+  .sessions-bar{display:flex;gap:8px;padding:14px 16px 4px;overflow-x:auto}
+  .session-pill{flex:1;min-width:0;padding:10px 6px;border-radius:12px;text-align:center;background:#131a25;border:1px solid #232f42;opacity:0.4;transition:opacity 0.2s}
+  .session-pill.open{opacity:1;background:linear-gradient(180deg,rgba(6,182,212,0.15),rgba(6,182,212,0.03));border-color:rgba(6,182,212,0.4);box-shadow:0 0 14px rgba(6,182,212,0.15)}
+  .session-name{font-size:0.72rem;font-weight:700;color:#94a3b8;white-space:nowrap;display:block}
+  .session-pill.open .session-name{color:#67e8f9}
+  .session-dot{width:7px;height:7px;border-radius:50%;background:#475569;display:inline-block;margin-right:5px}
+  .session-pill.open .session-dot{background:#22d3ee;box-shadow:0 0 6px #22d3ee}
   @media(max-width:380px){.signal-action{font-size:2rem}.price-value{font-size:1.3rem}.level-value{font-size:1rem}}
   ::-webkit-scrollbar{width:0;height:0}
 </style>
@@ -162,6 +169,40 @@ async function setupPush() {
     await fetch('/api/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sub) });
     btn.classList.add('active');
   });
+}
+
+// Sesiones de mercado forex: Sídney, Tokio, Londres, Nueva York. Horarios estándar
+// definidos en UTC (así se referencian siempre en la industria financiera, sin importar
+// desde qué país se mire), pero el chequeo usa la hora UTC real del dispositivo/servidor
+// para determinar abierto/cerrado — el resultado (abierto o cerrado) es el mismo sin
+// importar en qué huso horario esté quien lo mira, porque "las 14 UTC" son el mismo
+// instante en todo el mundo. Incluye el cierre completo de fin de semana: el mercado
+// forex global cierra el viernes ~22:00 UTC y no vuelve a abrir hasta el domingo
+// ~22:00 UTC (cuando arranca Sídney) — sin este chequeo, un domingo a la tarde
+// mostraría sesiones "abiertas" solo porque la hora del día coincide con su rango
+// habitual, aunque el mercado real todavía no haya operado nada esa semana.
+const FOREX_SESSIONS = [
+  { name: 'Sídney', openUTC: 22, closeUTC: 7 },
+  { name: 'Tokio', openUTC: 0, closeUTC: 9 },
+  { name: 'Londres', openUTC: 8, closeUTC: 17 },
+  { name: 'Nueva York', openUTC: 13, closeUTC: 22 }
+];
+function isSessionOpen(s) {
+  const now = new Date();
+  const day = now.getUTCDay(); // 0=domingo, 6=sábado
+  const h = now.getUTCHours();
+  const weekendClosed = (day === 6) || (day === 0 && h < 22) || (day === 5 && h >= 22);
+  if (weekendClosed) return false;
+  if (s.openUTC < s.closeUTC) return h >= s.openUTC && h < s.closeUTC;
+  return h >= s.openUTC || h < s.closeUTC; // Sídney cruza medianoche UTC
+}
+function renderSessionsBar() {
+  return `<div class="sessions-bar">${FOREX_SESSIONS.map(s => {
+    const open = isSessionOpen(s);
+    return `<div class="session-pill ${open ? 'open' : ''}">
+      <span class="session-name"><span class="session-dot"></span>${s.name}</span>
+    </div>`;
+  }).join('')}</div>`;
 }
 
 function renderPriceCard(symbol) {
@@ -365,7 +406,7 @@ function renderHistory() {
 }
 
 function render() {
-  document.getElementById('app').innerHTML = ASSET_ORDER.map(sym => renderAssetBlock(sym)).join('');
+  document.getElementById('app').innerHTML = renderSessionsBar() + ASSET_ORDER.map(sym => renderAssetBlock(sym)).join('');
   renderHistory();
 }
 
