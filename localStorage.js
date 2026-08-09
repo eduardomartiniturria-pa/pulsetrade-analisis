@@ -100,18 +100,44 @@ global.localStorage = {
 // Espera a que terminen todas las escrituras pendientes, con un tope de tiempo por si
 // alguna quedó colgada (por ejemplo, Supabase no responde) — así el proceso no queda
 // trabado para siempre esperando algo que nunca va a terminar.
+//
+// FIX (loss residual encontrado con evidencia real: señal de las 10:50 AM perdida en
+// un redeploy de las 10:51 AM, a pesar de que este mismo fix de SIGTERM ya estaba
+// activo desde la noche anterior): la versión anterior tomaba una ÚNICA foto fija de
+// `pendingWrites` (`[...pendingWrites]`) al arrancar a esperar. El motor (engine.js)
+// sigue corriendo durante el apagado — no se detiene solo porque llegó SIGTERM — así
+// que si justo en esa ventana se generaba una señal nueva, esa escritura entraba al
+// Set DESPUÉS de la foto, y esta función nunca la esperaba: el proceso moría sin
+// haberla guardado, aunque para todo lo que ya estaba en curso ANTES de la foto sí
+// funcionaba. Ahora espera en bucle: cada vuelta vuelve a mirar qué hay pendiente
+// (incluyendo lo que se haya agregado mientras tanto) hasta vaciar el Set del todo o
+// hasta agotar el timeout total.
 async function flushPending(timeoutMs = 8000) {
-  if (!pendingWrites.size) return;
-  console.log(`Esperando ${pendingWrites.size} escritura(s) pendiente(s) a Supabase antes de apagar...`);
-  const all = Promise.allSettled([...pendingWrites]);
-  const timeout = new Promise(resolve => setTimeout(resolve, timeoutMs));
-  await Promise.race([all, timeout]);
+  const deadline = Date.now() + timeoutMs;
+  while (pendingWrites.size && Date.now() < deadline) {
+    console.log(`Esperando ${pendingWrites.size} escritura(s) pendiente(s) a Supabase antes de apagar...`);
+    const snapshot = [...pendingWrites];
+    const remaining = Math.max(deadline - Date.now(), 0);
+    await Promise.race([
+      Promise.allSettled(snapshot),
+      new Promise(resolve => setTimeout(resolve, remaining))
+    ]);
+  }
   if (pendingWrites.size) {
     console.warn(`Se apagó el proceso con ${pendingWrites.size} escritura(s) todavía sin confirmar (timeout de ${timeoutMs}ms alcanzado).`);
   } else {
     console.log('Todas las escrituras pendientes se guardaron correctamente.');
   }
 }
+
+// Server.js puede registrar acá una función para llamar ANTES de esperar las
+// escrituras pendientes — típicamente `stopAutoRefreshLoop()` de engine.js, para que
+// el motor deje de generar señales nuevas apenas llega la señal de apagado, en vez de
+// seguir corriendo en paralelo mientras este módulo espera. localStorage.js no conoce
+// a engine.js directamente (se carga antes), por eso es un hook registrable en vez de
+// un require circular.
+let beforeShutdownHook = null;
+function onBeforeShutdown(fn) { beforeShutdownHook = fn; }
 
 // Render manda SIGTERM cuando va a matar el proceso viejo en un redeploy (le da unos
 // segundos de gracia antes de forzar el apagado). Ese es el momento de asegurarse de
@@ -121,6 +147,9 @@ async function gracefulShutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`Señal ${signal} recibida, cerrando de forma prolija...`);
+  if (beforeShutdownHook) {
+    try { await beforeShutdownHook(); } catch (e) { console.error('Error al frenar el motor antes de apagar:', e.message); }
+  }
   await flushPending();
   if (pool) await pool.end().catch(() => {});
   process.exit(0);
@@ -142,4 +171,4 @@ async function init() {
   console.log(`Supabase conectado — ${Object.keys(store).length} claves cargadas.`);
 }
 
-module.exports = { init };
+module.exports = { init, onBeforeShutdown };
