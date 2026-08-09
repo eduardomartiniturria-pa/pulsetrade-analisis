@@ -82,11 +82,7 @@ const CONFIG = {
     TWELVEDATA: 'https://api.twelvedata.com',
     FINNHUB: 'https://finnhub.io/api/v1',
     ALPHAVANTAGE: 'https://www.alphavantage.co/query',
-    FMP: 'https://financialmodelingprep.com/stable',
-    // Región de tu cuenta MetaApi (se arma sola desde la variable de entorno
-    // METAAPI_REGION que cargues en Render — la ves en el panel de MetaApi al
-    // conectar tu cuenta: new-york, london, singapore, etc.)
-    METAAPI_MARKET_DATA: `https://mt-market-data-client-api-v1.${process.env.METAAPI_REGION || 'new-york'}.agiliumtrade.ai`
+    FMP: 'https://financialmodelingprep.com/stable'
   }
 };
 
@@ -113,7 +109,7 @@ class OHLCVData {
 const ASSETS = {
   BTCUSD: {
     name: 'BTC/USD', market: 'crypto', type: 'crypto',
-    symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', coingecko: 'bitcoin', metaapi: 'BTCUSD' },
+    symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', coingecko: 'bitcoin' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
     // binanceSpot se sacó de la prioridad en vivo: desde Render devuelve HTTP 451 SIEMPRE
@@ -121,28 +117,28 @@ const ASSETS = {
     // fetchCandles más abajo ya lo saca del todo para el backtest). Dejarlo primero acá
     // solo hacía perder un intento fallido + ~1.5s cada vez que salía del cooldown de 30min
     // antes de caer a CoinGecko. El adaptador binanceSpot queda definido por si se despliega
-    // fuera de Render alguna vez. Se saca metaapi (dado de baja).
+    // fuera de Render alguna vez.
     providerPriority: ['coingecko', 'twelveData', 'alphaVantage']
   },
   ETHUSD: {
     name: 'ETH/USD', market: 'crypto', type: 'crypto',
-    symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', coingecko: 'ethereum', metaapi: 'ETHUSD' },
+    symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', coingecko: 'ethereum' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
     // Mismo motivo que BTCUSD: binanceSpot siempre da 451 desde Render, se saca de la
-    // prioridad en vivo (se saca metaapi, dado de baja).
+    // prioridad en vivo.
     providerPriority: ['coingecko', 'twelveData', 'alphaVantage']
   },
   EURUSD: {
     name: 'EUR/USD', market: 'forex', type: 'forex',
-    symbols: { twelveData: 'EUR/USD', finnhub: 'OANDA:EUR_USD', alphaVantage: 'EURUSD', fmp: 'EURUSD', exchangerate: 'EUR', metaapi: 'EURUSD' },
+    symbols: { twelveData: 'EUR/USD', finnhub: 'OANDA:EUR_USD', alphaVantage: 'EURUSD', fmp: 'EURUSD', exchangerate: 'EUR' },
     decimals: 5, pipSize: 0.0001, is24h: false, timezone: 'UTC',
     // CoinGecko no cubre forex (EUR/USD no es cripto), por eso no aparece en esta lista.
     providerPriority: ['exchangerate', 'twelveData', 'alphaVantage']
   },
   XAUUSD: {
     name: 'XAU/USD (Oro)', market: 'forex', type: 'commodity',
-    symbols: { twelveData: 'XAU/USD', finnhub: 'OANDA:XAU_USD', alphaVantage: 'XAU', fmp: 'GCUSD', metaapi: 'XAUUSD' },
+    symbols: { twelveData: 'XAU/USD', finnhub: 'OANDA:XAU_USD', alphaVantage: 'XAU', fmp: 'GCUSD' },
     decimals: 2, pipSize: 0.1, is24h: false, timezone: 'UTC',
     // CoinGecko no cubre commodities (oro no es cripto), por eso no aparece en esta lista.
     providerPriority: ['twelveData', 'fmp', 'alphaVantage']
@@ -177,8 +173,10 @@ let state = {
   })(),
   autoTuneStats: (() => { try { return JSON.parse(localStorage.getItem('pt_auto_stats_v2') || '{}'); } catch (e) { return {}; } })(),
   patternStats: (() => { try { return JSON.parse(localStorage.getItem('pt_pattern_stats') || '{}'); } catch (e) { return {}; } })(),
-  // Ganadas/perdidas por símbolo + estrategia (las 8: 'smc' y las 7 keys de
-  // custom-strategies.js), para comparar qué estrategia rinde mejor en qué activo.
+  // Ganadas/perdidas + R-multiple acumulado (totalR) por símbolo + estrategia (las 8:
+  // 'smc' y las 7 keys de custom-strategies.js), para comparar qué estrategia rinde
+  // mejor en qué activo — no solo por % de aciertos, sino por cuánto rinde en relación
+  // al riesgo (R promedio = totalR / (wins+losses)).
   // Separado de patternStats a propósito: patternStats agrupa por tipo de patrón interno
   // de SMC (choch/bos/ob/...) mezclando los 4 símbolos, y alimenta el auto-tune de
   // confianza — no sirve para esta comparación y no se toca. Se arranca (seedStrategyStatsFromBacktest)
@@ -199,10 +197,8 @@ let state = {
     twelveData: localStorage.getItem('pt_api_twelve') || null,
     finnhub: localStorage.getItem('pt_api_finnhub') || null,
     alphaVantage: localStorage.getItem('pt_api_alpha') || null,
-    fmp: localStorage.getItem('pt_api_fmp') || null,
-    metaapi: localStorage.getItem('pt_api_metaapi') || null
+    fmp: localStorage.getItem('pt_api_fmp') || null
   },
-  metaapiAccountId: localStorage.getItem('pt_metaapi_account_id') || null,
   refreshPaused: false, wakeLock: null
 };
 
@@ -232,6 +228,26 @@ function getDynamicRefreshIntervalMs() {
   return isArgKillZoneWindow() ? CONFIG.DYNAMIC_REFRESH.killZoneIntervalMs : CONFIG.DYNAMIC_REFRESH.normalIntervalMs;
 }
 
+// Orden exacto de fallback para decidir qué umbral de confianza usar (de más específico
+// y confiable a más genérico), sin tocar la lógica de abajo:
+//   1º. Si se pasa un régimen (trending/ranging) y el auto-tune EN VIVO ya tiene muestra
+//       suficiente para ese símbolo+régimen (sampleSize >= minSampleSize), se usa ese
+//       umbral — es el más afinado posible, calibrado con operaciones reales de ESE
+//       símbolo en ESE tipo de mercado.
+//   2º. Si hay régimen pero el en vivo todavía no tiene muestra suficiente, se usa el
+//       umbral calibrado por el BACKTEST para ese símbolo+régimen (si existe).
+//   3º. Si no hay régimen (o ninguna de las dos anteriores devolvió nada), se mira el
+//       auto-tune EN VIVO general del símbolo (sin distinguir régimen): si tiene muestra
+//       suficiente, se salta directo al paso 5 (se usa el umbral ya guardado para el
+//       símbolo, que es justamente el que ese auto-tune en vivo fue ajustando).
+//   4º. Si el en vivo general tampoco tiene muestra suficiente, se prueba el umbral
+//       calibrado por el BACKTEST general del símbolo (sin régimen).
+//   5º. Si nada de lo anterior aplicó, cae al umbral guardado en
+//       state.autoConfidenceThreshold[symbol] (el último valor conocido, en vivo o no) o,
+//       en último caso, al default fijo CONFIG.CONFIDENCE_THRESHOLD (70).
+// En criollo: primero se confía en lo más reciente y específico (en vivo por régimen),
+// después en el backtest por régimen, después en lo en vivo general, después en el
+// backtest general, y solo si no hay nada de nada, en el número fijo de config.
 function getThresholdForSymbol(symbol, regime = null) {
   const cfg = CONFIG.AUTO_TUNE;
   if (regime && regime !== 'unknown') {
@@ -419,44 +435,6 @@ const ResponseCache = {
 };
 
 const ProviderAdapters = {
-  metaapi: {
-    name: 'MetaApi (MT5)', requiresKey: true, supports: ['BTCUSD','ETHUSD','EURUSD','XAUUSD'],
-    async fetchQuote(symbol) {
-      if (!state.apiKeys.metaapi || !state.metaapiAccountId) throw new Error('MetaApi no configurado (falta token o accountId)');
-      const asset = ASSETS[symbol];
-      const cacheKey = `ma_quote_${symbol}`;
-      const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const url = `${CONFIG.ENDPOINTS.METAAPI_MARKET_DATA}/users/current/accounts/${state.metaapiAccountId}/symbols/${asset.symbols.metaapi}/current-price`;
-      const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, { headers: { 'auth-token': state.apiKeys.metaapi } }, 'metaapi');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const d = await res.json();
-      // MetaApi devuelve bid/ask reales del broker conectado (a diferencia de la mayoría
-      // de los proveedores gratuitos de arriba, que estiman el spread con ±0.05%).
-      const bid = d.bid, ask = d.ask, last = (bid + ask) / 2;
-      const data = new MarketData({
-        bid, ask, last, open: d.open || last, high: d.high || last, low: d.low || last, close: last,
-        volume: 0, timestamp: Date.now(), timeframe: '1d', marketStatus: 'open',
-        spread: calculateSpread(bid, ask, asset.pipSize), source: 'MetaApi (MT5)', symbol, estimatedSpread: false
-      });
-      ResponseCache.set(cacheKey, data); return data;
-    },
-    async fetchOHLCV(symbol, interval, limit = 100) {
-      if (!state.apiKeys.metaapi || !state.metaapiAccountId) throw new Error('MetaApi no configurado (falta token o accountId)');
-      const asset = ASSETS[symbol];
-      const cacheKey = `ma_ohlcv_${symbol}_${interval}`;
-      const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const tfMap = { '5m': '5m', '15m': '15m', '1h': '1h' };
-      const url = `${CONFIG.ENDPOINTS.METAAPI_MARKET_DATA}/users/current/accounts/${state.metaapiAccountId}/historical-market-data/symbols/${asset.symbols.metaapi}/timeframes/${tfMap[interval] || '15m'}/candles?limit=${limit}`;
-      const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, { headers: { 'auth-token': state.apiKeys.metaapi } }, 'metaapi');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      const result = new OHLCVData(data.map(k => ({
-        time: new Date(k.time).getTime(), open: k.open, high: k.high, low: k.low, close: k.close, volume: k.tickVolume || 0
-      })));
-      ResponseCache.set(cacheKey, result); return result;
-    }
-  },
-
   binanceSpot: {
     name: 'Binance Spot', requiresKey: false, supports: ['BTCUSD','ETHUSD'],
     async fetchQuote(symbol) {
@@ -1492,7 +1470,10 @@ const BacktestEngine = {
         if (hitTP) { result = 'win'; break; }
       }
       if (result) {
-        events.push({ index: i, direction: analysis.direction, confidence: analysis.confidence, strategyKeys: analysis.strategyKeys, regime: analysis.regime, result });
+        // rMultiple exacto, no aproximado: tp1 se arma siempre como entry ± risk*2 (arriba),
+        // así que una señal ganadora vale matemáticamente 2R y una perdedora -1R, sin
+        // excepción — no depende de estimar nada.
+        events.push({ index: i, direction: analysis.direction, confidence: analysis.confidence, strategyKeys: analysis.strategyKeys, regime: analysis.regime, result, rMultiple: result === 'win' ? 2 : -1 });
         lastSignalIndex = i; lastDirection = analysis.direction;
       }
     }
@@ -1568,7 +1549,14 @@ const BacktestEngine = {
           if (hitTP) { result = 'win'; break; }
         }
         if (result) {
-          events.push({ index: i, strategy: sig.strategy, direction: sig.direction, result });
+          // A diferencia de SMC (siempre 2R fijo), acá el RR sí cambia entre estrategias
+          // (algunas usan 1:2, otras 1:3, otras niveles variables de SL/TP) — con
+          // entry/sl/tp1 ya disponibles en este mismo loop, se calcula el R real de la
+          // señal en vez de asumir un valor fijo.
+          const risk = Math.abs(entry - sl);
+          const reward = Math.abs(tp1 - entry);
+          const rMultiple = result === 'win' ? (risk > 0 ? +(reward / risk).toFixed(2) : 2) : -1;
+          events.push({ index: i, strategy: sig.strategy, direction: sig.direction, result, rMultiple });
           lastSignalIndexByStrategy[sig.strategy] = i;
         }
       }
@@ -1579,14 +1567,18 @@ const BacktestEngine = {
   aggregateCustomStats(events) {
     const stats = {};
     events.forEach(e => {
-      if (!stats[e.strategy]) stats[e.strategy] = { wins: 0, losses: 0 };
+      if (!stats[e.strategy]) stats[e.strategy] = { wins: 0, losses: 0, totalR: 0 };
       if (e.result === 'win') stats[e.strategy].wins++; else stats[e.strategy].losses++;
+      // e.rMultiple ya viene calculado en simulateCustom (real, no aproximado); por las dudas
+      // se cae al mismo criterio de siempre (2R win / -1R loss) si algún evento no lo trae.
+      stats[e.strategy].totalR += (e.rMultiple != null ? e.rMultiple : (e.result === 'win' ? 2 : -1));
     });
     Object.keys(stats).forEach(key => {
       const s = stats[key];
       const total = s.wins + s.losses;
       s.sampleSize = total;
       s.winRate = total ? s.wins / total : 0;
+      s.totalR = +s.totalR.toFixed(2);
     });
     return stats;
   },
@@ -1617,6 +1609,9 @@ const BacktestEngine = {
     const patternStats = this.aggregatePatternStats(allEvents);
     const customStats = this.aggregateCustomStats(allCustomEvents);
     const wins = allEvents.filter(e => e.result === 'win').length;
+    // Igual que en aggregateCustomStats: rMultiple ya viene exacto desde simulate() (2R/-1R
+    // por construcción de SMC), se suma directo en vez de volver a asumirlo acá.
+    const totalR = +allEvents.reduce((sum, e) => sum + (e.rMultiple != null ? e.rMultiple : (e.result === 'win' ? 2 : -1)), 0).toFixed(2);
     const regimeCalibration = {};
     ['trending', 'ranging'].forEach(regime => {
       const regimeEvents = allEvents.filter(e => e.regime === regime);
@@ -1626,7 +1621,7 @@ const BacktestEngine = {
     });
     return {
       symbol, candlesAnalyzed,
-      totalSignals: allEvents.length, winRate: allEvents.length ? wins / allEvents.length : 0,
+      totalSignals: allEvents.length, winRate: allEvents.length ? wins / allEvents.length : 0, totalR,
       calibratedThreshold: threshold, calibratedStats: stats, regimeCalibration, patternStats,
       customStats
     };
@@ -1819,14 +1814,21 @@ function updateStrategyStatsBySymbol(entry) {
   const symbol = entry.symbol, key = entry.source || 'smc';
   if (!symbol || !key) return;
   state.strategyStatsBySymbol[symbol] = state.strategyStatsBySymbol[symbol] || {};
-  if (!state.strategyStatsBySymbol[symbol][key]) state.strategyStatsBySymbol[symbol][key] = { wins: 0, losses: 0 };
-  if (entry.result === 'win') state.strategyStatsBySymbol[symbol][key].wins++;
-  else state.strategyStatsBySymbol[symbol][key].losses++;
+  if (!state.strategyStatsBySymbol[symbol][key]) state.strategyStatsBySymbol[symbol][key] = { wins: 0, losses: 0, totalR: 0 };
+  const stats = state.strategyStatsBySymbol[symbol][key];
+  if (entry.result === 'win') stats.wins++;
+  else stats.losses++;
+  // entry.rMultiple ya viene calculado en checkHistoryOutcomes: el R real de la señal
+  // (tp1Pips/slPips) en victorias, -1 en pérdidas. Si no vino seteado, se cae al mismo
+  // criterio de siempre (2R win / -1R loss) que ya usa runAutoTuneForKey más abajo.
+  const r = entry.rMultiple != null ? entry.rMultiple : (entry.result === 'win' ? 2 : -1);
+  stats.totalR = +((stats.totalR || 0) + r).toFixed(2);
   localStorage.setItem('pt_strategy_stats_by_symbol', JSON.stringify(state.strategyStatsBySymbol));
 }
 
 // Se corre una sola vez, la primera vez que arranca el servidor con esta feature
-// (strategyStatsBySymbol vacío): toma los resultados ya calculados por símbolo en el
+// (strategyStatsBySymbol vacío): toma los resultados ya calculados por símbolo (incluye
+// wins/losses y totalR, el R-multiple acumulado) en el
 // backtest más reciente (runAll ya los tiene en `results` antes de combinarlos, ver
 // abajo) para no arrancar el contador de señales en vivo desde cero — el backtest corre
 // sobre 1000 velas x 2 timeframes por símbolo, así que da una base estadística que en
@@ -1840,11 +1842,17 @@ function seedStrategyStatsFromBacktest(resultsBySymbol) {
     // como una sola de las 8 estrategias.
     if (r.totalSignals && !state.strategyStatsBySymbol[symbol].smc) {
       const wins = Math.round(r.winRate * r.totalSignals);
-      state.strategyStatsBySymbol[symbol].smc = { wins, losses: r.totalSignals - wins, seeded: true };
+      const losses = r.totalSignals - wins;
+      // r.totalR ya viene exacto desde runSymbol (2R/-1R por construcción de SMC); si por
+      // algún motivo faltara (backtest viejo persistido antes de este cambio), se aproxima
+      // igual que en el resto del archivo.
+      const totalR = r.totalR != null ? r.totalR : (wins * 2 - losses);
+      state.strategyStatsBySymbol[symbol].smc = { wins, losses, totalR, seeded: true };
     }
     Object.entries(r.customStats || {}).forEach(([key, s]) => {
       if (!state.strategyStatsBySymbol[symbol][key]) {
-        state.strategyStatsBySymbol[symbol][key] = { wins: s.wins, losses: s.losses, seeded: true };
+        const totalR = s.totalR != null ? s.totalR : (s.wins * 2 - s.losses);
+        state.strategyStatsBySymbol[symbol][key] = { wins: s.wins, losses: s.losses, totalR, seeded: true };
       }
     });
   });
