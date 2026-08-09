@@ -83,13 +83,6 @@
   .history-empty{text-align:center;padding:20px;color:#64748b;font-size:0.8rem}
   .last-updated{font-size:0.65rem;color:#475569;text-align:center;margin:6px 0}
   .strategies-list{display:flex;flex-direction:column;gap:10px}
-  .sessions-bar{display:flex;gap:8px;padding:14px 16px 4px;overflow-x:auto}
-  .session-pill{flex:1;min-width:0;padding:10px 6px;border-radius:12px;text-align:center;background:#131a25;border:1px solid #232f42;opacity:0.45;transition:opacity 0.2s}
-  .session-pill.open{opacity:1;background:linear-gradient(180deg,rgba(6,182,212,0.15),rgba(6,182,212,0.03));border-color:rgba(6,182,212,0.4);box-shadow:0 0 14px rgba(6,182,212,0.15)}
-  .session-name{font-size:0.72rem;font-weight:700;color:#94a3b8;white-space:nowrap}
-  .session-pill.open .session-name{color:#67e8f9}
-  .session-dot{width:7px;height:7px;border-radius:50%;background:#475569;display:inline-block;margin-right:5px}
-  .session-pill.open .session-dot{background:#22d3ee;box-shadow:0 0 6px #22d3ee}
   @media(max-width:380px){.signal-action{font-size:2rem}.price-value{font-size:1.3rem}.level-value{font-size:1rem}}
   ::-webkit-scrollbar{width:0;height:0}
 </style>
@@ -169,32 +162,6 @@ async function setupPush() {
     await fetch('/api/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sub) });
     btn.classList.add('active');
   });
-}
-
-// Sesiones de mercado forex (Sídney, Tokio, Londres, Nueva York) — horarios estándar en
-// UTC. No contempla el cambio de horario de verano de cada ciudad en detalle (varía
-// según el hemisferio y la fecha exacta), así que puede desfasarse una hora en algunas
-// épocas del año — suficiente para uso informativo, no para ejecutar operaciones exactas
-// al segundo. Cada sesión se define por su hora de apertura y cierre en UTC; algunas
-// cruzan la medianoche (ej. Sídney), por eso el chequeo contempla ese caso.
-const FOREX_SESSIONS = [
-  { name: 'Sídney', openUTC: 22, closeUTC: 7 },
-  { name: 'Tokio', openUTC: 0, closeUTC: 9 },
-  { name: 'Londres', openUTC: 8, closeUTC: 17 },
-  { name: 'Nueva York', openUTC: 13, closeUTC: 22 }
-];
-function isSessionOpen(s) {
-  const h = new Date().getUTCHours();
-  if (s.openUTC < s.closeUTC) return h >= s.openUTC && h < s.closeUTC;
-  return h >= s.openUTC || h < s.closeUTC; // cruza medianoche (Sídney)
-}
-function renderSessionsBar() {
-  return `<div class="sessions-bar">${FOREX_SESSIONS.map(s => {
-    const open = isSessionOpen(s);
-    return `<div class="session-pill ${open ? 'open' : ''}">
-      <span class="session-name"><span class="session-dot"></span>${s.name}</span>
-    </div>`;
-  }).join('')}</div>`;
 }
 
 function renderPriceCard(symbol) {
@@ -398,7 +365,7 @@ function renderHistory() {
 }
 
 function render() {
-  document.getElementById('app').innerHTML = renderSessionsBar() + ASSET_ORDER.map(sym => renderAssetBlock(sym)).join('');
+  document.getElementById('app').innerHTML = ASSET_ORDER.map(sym => renderAssetBlock(sym)).join('');
   renderHistory();
 }
 
