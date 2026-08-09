@@ -154,8 +154,20 @@ let state = {
   lastPrice: null, prevPrice: null, klineHistory: {},
   signalHistory: (() => { try { return JSON.parse(localStorage.getItem('pt_v4_signals') || '[]'); } catch (e) { return []; } })(),
   providers: {}, providerStats: {}, currentProvider: null, autoRefresh: null,
-  lastFetchTime: null, currentData: null, logs: [], activeSignals: {}, lastSignalAt: {},
-  activeCustomSignals: {}, lastCustomSignalAt: {},
+  lastFetchTime: null, currentData: null, logs: [],
+  activeSignals: (() => { try { return JSON.parse(localStorage.getItem('pt_active_signals') || '{}'); } catch (e) { return {}; } })(),
+  lastSignalAt: (() => { try { return JSON.parse(localStorage.getItem('pt_last_signal_at') || '{}'); } catch (e) { return {}; } })(),
+  // FIX (duplicados por reinicio): antes, activeCustomSignals/lastCustomSignalAt vivían
+  // solo en memoria — cualquier reinicio del proceso (redeploy, o el plan free de Render
+  // reiniciando el servicio) los reseteaba a {} sin avisar. Si el patrón que había
+  // disparado una señal seguía vigente en el próximo ciclo (la misma vela de ruptura
+  // todavía dentro de la ventana de análisis), el motor la volvía a tratar como "señal
+  // nueva" — resultado: la misma señal (mismo entry/SL/TP) quedaba duplicada en el
+  // historial. Confirmado con evidencia real: BTCUSD y ETHUSD (Pivots Breakout &
+  // Reversal) duplicados exactos, 74 segundos apartados, coincidiendo con un reinicio.
+  // Ahora se persisten igual que signalHistory, así sobreviven a un reinicio.
+  activeCustomSignals: (() => { try { return JSON.parse(localStorage.getItem('pt_active_custom_signals') || '{}'); } catch (e) { return {}; } })(),
+  lastCustomSignalAt: (() => { try { return JSON.parse(localStorage.getItem('pt_last_custom_signal_at') || '{}'); } catch (e) { return {}; } })(),
   spreadHistory: (() => { try { return JSON.parse(localStorage.getItem('pt_spread_history') || '{}'); } catch (e) { return {}; } })(),
   autoConfidenceThreshold: (() => {
     try { const v2 = JSON.parse(localStorage.getItem('pt_auto_threshold_v2') || 'null'); if (v2 && typeof v2 === 'object') return v2; } catch (e) {}
@@ -1892,6 +1904,10 @@ function resolveActiveSignal(symbol, quote, analysis) {
     frozen.detectedAt = Date.now();
     state.activeSignals[symbol] = frozen;
     state.lastSignalAt[symbol] = frozen.detectedAt;
+    // Mismo fix que activeCustomSignals: persistir de inmediato para que un reinicio
+    // no "olvide" que esta señal SMC ya estaba activa y la duplique en el historial.
+    try { localStorage.setItem('pt_active_signals', JSON.stringify(state.activeSignals)); } catch (e) {}
+    try { localStorage.setItem('pt_last_signal_at', JSON.stringify(state.lastSignalAt)); } catch (e) {}
     pushSignalHistory(frozen);
     notifyNewSignal(frozen);
   }
@@ -1901,7 +1917,10 @@ function resolveActiveSignal(symbol, quote, analysis) {
   const hitTP = isLong ? quote.last >= frozen.tp1 : quote.last <= frozen.tp1;
   const hitSL = isLong ? quote.last <= frozen.sl : quote.last >= frozen.sl;
   const result = { type: frozen.type, frozen, currentPrice: quote.last, hitTP, hitSL, isNewDirection: isNewDirection && !inCooldown };
-  if (hitTP || hitSL) delete state.activeSignals[symbol];
+  if (hitTP || hitSL) {
+    delete state.activeSignals[symbol];
+    try { localStorage.setItem('pt_active_signals', JSON.stringify(state.activeSignals)); } catch (e) {}
+  }
   return result;
 }
 
@@ -1959,6 +1978,10 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     };
     state.activeCustomSignals[key] = frozen;
     state.lastCustomSignalAt[key] = frozen.detectedAt;
+    // Persistir de inmediato — así si el proceso se reinicia un segundo después de
+    // detectar la señal, el próximo arranque sabe que ya está activa y no la duplica.
+    try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
+    try { localStorage.setItem('pt_last_custom_signal_at', JSON.stringify(state.lastCustomSignalAt)); } catch (e) {}
     pushSignalHistory(frozen);
     notifyNewSignal(frozen);
   }
@@ -1968,7 +1991,10 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
   const isLong = frozen.type === 'long';
   const hitTP = isLong ? quote.last >= frozen.tp1 : quote.last <= frozen.tp1;
   const hitSL = isLong ? quote.last <= frozen.sl : quote.last >= frozen.sl;
-  if (hitTP || hitSL) delete state.activeCustomSignals[key];
+  if (hitTP || hitSL) {
+    delete state.activeCustomSignals[key];
+    try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
+  }
   return { type: frozen.type, frozen, currentPrice: quote.last, hitTP, hitSL };
 }
 
@@ -1988,7 +2014,10 @@ function refreshActiveCustomSignalsDisplay(symbol, quote, skipStrategies = new S
     const isLong = frozen.type === 'long';
     const hitTP = isLong ? quote.last >= frozen.tp1 : quote.last <= frozen.tp1;
     const hitSL = isLong ? quote.last <= frozen.sl : quote.last >= frozen.sl;
-    if (hitTP || hitSL) delete state.activeCustomSignals[key];
+    if (hitTP || hitSL) {
+      delete state.activeCustomSignals[key];
+      try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
+    }
     renderCustomSignal(symbol, frozen.strategyKeys[0], { type: frozen.type, frozen, currentPrice: quote.last, hitTP, hitSL });
   });
 }
