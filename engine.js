@@ -177,6 +177,14 @@ let state = {
   })(),
   autoTuneStats: (() => { try { return JSON.parse(localStorage.getItem('pt_auto_stats_v2') || '{}'); } catch (e) { return {}; } })(),
   patternStats: (() => { try { return JSON.parse(localStorage.getItem('pt_pattern_stats') || '{}'); } catch (e) { return {}; } })(),
+  // Ganadas/perdidas por símbolo + estrategia (las 8: 'smc' y las 7 keys de
+  // custom-strategies.js), para comparar qué estrategia rinde mejor en qué activo.
+  // Separado de patternStats a propósito: patternStats agrupa por tipo de patrón interno
+  // de SMC (choch/bos/ob/...) mezclando los 4 símbolos, y alimenta el auto-tune de
+  // confianza — no sirve para esta comparación y no se toca. Se arranca (seedStrategyStatsFromBacktest)
+  // con los resultados del backtest y después se suma cada señal en vivo que se resuelve
+  // (ver checkHistoryOutcomes/updateStrategyStatsBySymbol).
+  strategyStatsBySymbol: (() => { try { return JSON.parse(localStorage.getItem('pt_strategy_stats_by_symbol') || '{}'); } catch (e) { return {}; } })(),
   backtestPatternStats: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_pattern_stats') || '{}'); } catch (e) { return {}; } })(),
   backtestAutoTune: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_autotune') || '{}'); } catch (e) { return {}; } })(),
   // Estadísticas de backtest de las 7 estrategias independientes (custom-strategies.js).
@@ -1639,6 +1647,13 @@ const BacktestEngine = {
         await sleep(6000); // espacio entre activos, mismo motivo que arriba
       }
       if (Object.keys(results).length) {
+        // Alimenta strategyStatsBySymbol con la base del backtest, símbolo por símbolo,
+        // antes de que el resto de este bloque combine todo en un solo objeto agregado
+        // (combinedPatternStats/combinedCustomStats) donde ya no se puede distinguir
+        // el símbolo. Solo escribe si todavía no hay datos para ese símbolo+estrategia
+        // (no pisa contadores ya acumulados con señales reales en vivo).
+        seedStrategyStatsFromBacktest(results);
+
         const combinedPatternStats = {};
         Object.values(results).forEach(r => {
           Object.entries(r.patternStats).forEach(([key, s]) => {
@@ -1785,6 +1800,57 @@ function pushSignalHistory(signal) {
   localStorage.setItem('pt_v4_signals', JSON.stringify(state.signalHistory));
 }
 
+function updatePatternStats(entry) {
+  if (!entry.strategyKeys || !entry.strategyKeys.length) return;
+  entry.strategyKeys.forEach(key => {
+    if (!state.patternStats[key]) state.patternStats[key] = { wins: 0, losses: 0 };
+    if (entry.result === 'win') state.patternStats[key].wins++;
+    else if (entry.result === 'loss') state.patternStats[key].losses++;
+  });
+  localStorage.setItem('pt_pattern_stats', JSON.stringify(state.patternStats));
+}
+
+// `entry.source` ya es exactamente la granularidad que se quiere: 'smc' para las
+// señales de Smart Money Concepts (pushSignalHistory pone 'smc' por default cuando
+// no viene otro source) y la key de la estrategia (ny_open_kill_zone, bollinger_squeeze,
+// etc.) para las 7 independientes (resolveCustomSignal pone source: customSig.strategy).
+function updateStrategyStatsBySymbol(entry) {
+  if (entry.result !== 'win' && entry.result !== 'loss') return;
+  const symbol = entry.symbol, key = entry.source || 'smc';
+  if (!symbol || !key) return;
+  state.strategyStatsBySymbol[symbol] = state.strategyStatsBySymbol[symbol] || {};
+  if (!state.strategyStatsBySymbol[symbol][key]) state.strategyStatsBySymbol[symbol][key] = { wins: 0, losses: 0 };
+  if (entry.result === 'win') state.strategyStatsBySymbol[symbol][key].wins++;
+  else state.strategyStatsBySymbol[symbol][key].losses++;
+  localStorage.setItem('pt_strategy_stats_by_symbol', JSON.stringify(state.strategyStatsBySymbol));
+}
+
+// Se corre una sola vez, la primera vez que arranca el servidor con esta feature
+// (strategyStatsBySymbol vacío): toma los resultados ya calculados por símbolo en el
+// backtest más reciente (runAll ya los tiene en `results` antes de combinarlos, ver
+// abajo) para no arrancar el contador de señales en vivo desde cero — el backtest corre
+// sobre 1000 velas x 2 timeframes por símbolo, así que da una base estadística que en
+// vivo tardaría meses en juntarse sola (Kill Zone NY, por ejemplo, dispara como mucho
+// una vez por día hábil).
+function seedStrategyStatsFromBacktest(resultsBySymbol) {
+  Object.entries(resultsBySymbol).forEach(([symbol, r]) => {
+    state.strategyStatsBySymbol[symbol] = state.strategyStatsBySymbol[symbol] || {};
+    // SMC: r.winRate / r.totalSignals ya son el agregado del símbolo completo (los 8
+    // subtipos de patrón de SMC juntos), que es el nivel al que el usuario piensa "SMC"
+    // como una sola de las 8 estrategias.
+    if (r.totalSignals && !state.strategyStatsBySymbol[symbol].smc) {
+      const wins = Math.round(r.winRate * r.totalSignals);
+      state.strategyStatsBySymbol[symbol].smc = { wins, losses: r.totalSignals - wins, seeded: true };
+    }
+    Object.entries(r.customStats || {}).forEach(([key, s]) => {
+      if (!state.strategyStatsBySymbol[symbol][key]) {
+        state.strategyStatsBySymbol[symbol][key] = { wins: s.wins, losses: s.losses, seeded: true };
+      }
+    });
+  });
+  localStorage.setItem('pt_strategy_stats_by_symbol', JSON.stringify(state.strategyStatsBySymbol));
+}
+
 function checkHistoryOutcomes(symbol, currentPrice, candles) {
   let changed = false;
   const resolvedEntries = [];
@@ -1813,19 +1879,9 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
   });
   if (changed) {
     localStorage.setItem('pt_v4_signals', JSON.stringify(state.signalHistory));
-    resolvedEntries.forEach(updatePatternStats);
+    resolvedEntries.forEach(entry => { updatePatternStats(entry); updateStrategyStatsBySymbol(entry); });
     runAutoTune(symbol);
   }
-}
-
-function updatePatternStats(entry) {
-  if (!entry.strategyKeys || !entry.strategyKeys.length) return;
-  entry.strategyKeys.forEach(key => {
-    if (!state.patternStats[key]) state.patternStats[key] = { wins: 0, losses: 0 };
-    if (entry.result === 'win') state.patternStats[key].wins++;
-    else if (entry.result === 'loss') state.patternStats[key].losses++;
-  });
-  localStorage.setItem('pt_pattern_stats', JSON.stringify(state.patternStats));
 }
 
 function runAutoTuneForKey(key, closedEntries) {
