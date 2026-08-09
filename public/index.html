@@ -116,6 +116,20 @@ function fmtPips(p) { return (p === null || p === undefined) ? '' : Math.abs(p).
 // Redondea porcentajes de confianza a un entero — antes se mostraban con hasta 14 decimales.
 function fmtPct(p) { return (p === null || p === undefined || isNaN(p)) ? '0' : Math.round(p); }
 
+// Antes: new Date(x).toLocaleTimeString('es-AR') / .toLocaleString('es-AR') sin opciones.
+// Bug detectado: en algunos navegadores/Android, 'es-AR' se resuelve igual con formato
+// de 12 horas y sin mostrar "a.m./p.m.", así que cualquier hora de la tarde/noche (PM)
+// aparecía mostrando la hora "menos 12" sin ningún indicador — ej: 19:49 (7:49 PM) se
+// veía como "07:49", indistinguible de las 7:49 de la mañana. Esto hacía parecer que el
+// historial y las señales activas estaban desactualizados o mal fechados, cuando en
+// realidad el dato guardado (epoch ms) siempre fue correcto — era solo un problema de
+// cómo se mostraba en pantalla. Fix: forzar explícitamente hourCycle:'h23' (24 horas,
+// 00-23) en vez de confiar en que el navegador lo infiera solo del locale.
+const TIME_OPTS = { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' };
+const DATETIME_OPTS = { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' };
+function fmtTime(ts) { return new Date(ts).toLocaleTimeString('es-AR', TIME_OPTS); }
+function fmtDateTime(ts) { return new Date(ts).toLocaleString('es-AR', DATETIME_OPTS); }
+
 async function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - base64String.length % 4) % 4);
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
@@ -266,7 +280,7 @@ function renderStrategySlot(title, d) {
     ${moveHtml}
     <div class="signal-footer">
       <span>RR ${s.rr1 || '--'}${s.rr2 ? ' / ' + s.rr2 : ''}</span>
-      <span>Detectada ${new Date(s.detectedAt || s.timestamp).toLocaleTimeString('es-AR')}</span>
+      <span>Detectada ${fmtTime(s.detectedAt || s.timestamp)}</span>
     </div>
   </div>`;
 }
@@ -329,7 +343,7 @@ function renderHistory() {
       <div class="history-top">
         <div>
           <div class="history-left">${h.symbol} <span style="color:${h.type === 'long' ? '#4ade80' : '#f87171'}">${(h.type || '').toUpperCase()}</span></div>
-          <div class="history-detail">${new Date(h.timestamp).toLocaleString('es-AR')}</div>
+          <div class="history-detail">${fmtDateTime(h.timestamp)}</div>
         </div>
         <div class="badge-resolved ${resultClass}">${resultBadge}</div>
       </div>
@@ -353,7 +367,7 @@ async function refresh() {
   try {
     lastState = await fetch('/api/state').then(r => r.json());
     render();
-    document.getElementById('status').textContent = `Actualizado ${new Date(lastState.updatedAt).toLocaleTimeString('es-AR')} · ${lastState.subscriberCount} dispositivo(s) recibiendo notificaciones`;
+    document.getElementById('status').textContent = `Actualizado ${fmtTime(lastState.updatedAt)} · ${lastState.subscriberCount} dispositivo(s) recibiendo notificaciones`;
   } catch (e) {
     document.getElementById('status').textContent = 'No se pudo conectar con el servidor.';
   }
