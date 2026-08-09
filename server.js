@@ -39,14 +39,8 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     // CoinGecko Demo (gratis, 10.000 pedidos/mes) — respaldo de cripto (BTC/ETH) para cuando
     // TwelveData se queda sin cupo. Reemplaza a CryptoCompare, discontinuada en mayo 2026.
     // Se saca gratis en https://www.coingecko.com/en/developers/dashboard
-    coingecko: process.env.COINGECKO_API_KEY || null,
-    // MetaApi (datos reales del bróker vía MT5) — token de API generado en el panel
-    // de metaapi.cloud. La región (METAAPI_REGION) se usa en engine.js para armar
-    // la URL correcta del servidor de datos.
-    metaapi: process.env.METAAPI_TOKEN || null
+    coingecko: process.env.COINGECKO_API_KEY || null
   };
-  // Id de la cuenta MT5 conectada en MetaApi (se ve en el panel, junto a la cuenta).
-  state.metaapiAccountId = process.env.METAAPI_ACCOUNT_ID || null;
   state.lastDisplay = state.lastDisplay || {};
 
   const app = express();
@@ -65,6 +59,10 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
       customSignals: state.lastCustomDisplay || {},
       prices: state.livePrices || {},
       history: (state.signalHistory || []).slice(-50).reverse(),
+      // Ganadas/perdidas (y R promedio) por símbolo + estrategia, para la tabla comparativa
+      // del panel (renderStrategyStatsTable en index.html). Faltaba exponerlo acá — el campo
+      // ya existía en engine.js (state.strategyStatsBySymbol) pero nunca llegaba al frontend.
+      strategyStatsBySymbol: state.strategyStatsBySymbol || {},
       autoTune: {
         threshold: state.autoConfidenceThreshold,
         stats: state.autoTuneStats
