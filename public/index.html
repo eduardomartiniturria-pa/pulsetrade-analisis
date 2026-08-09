@@ -259,14 +259,19 @@ function renderStrategyStatsTable(symbol) {
     const s = stats[strat.key];
     const total = s ? s.wins + s.losses : 0;
     const pct = total ? Math.round((s.wins / total) * 100) : null;
-    return { label: strat.label, total, pct, wins: s ? s.wins : 0, losses: s ? s.losses : 0 };
-  }).sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1));
+    // totalR ya viene de engine.js (exacto desde backtest/en vivo); fallback 2R/-1R por si
+    // hay datos guardados de antes de agregar este campo.
+    const totalR = s ? (s.totalR != null ? s.totalR : (s.wins * 2 - s.losses)) : 0;
+    const avgR = total ? +(totalR / total).toFixed(2) : null;
+    return { label: strat.label, total, pct, avgR, wins: s ? s.wins : 0, losses: s ? s.losses : 0 };
+  }).sort((a, b) => (b.avgR ?? -999) - (a.avgR ?? -999)); // orden por R promedio: es lo que
+  // realmente conviene mirar para decidir qué estrategia dejar prendida, no el % de aciertos.
 
   return `<div class="strategy-stats">
     <div class="strategy-stats-title">📊 Ganadas / perdidas por estrategia — ${symbol}</div>
     ${rows.map(r => `<div class="strategy-stats-row">
       <span class="strategy-stats-label">${r.label}</span>
-      <span class="strategy-stats-value">${r.total ? `${r.pct}% (${r.wins}G / ${r.losses}P)` : 'Sin datos todavía'}</span>
+      <span class="strategy-stats-value">${r.total ? `${r.avgR >= 0 ? '+' : ''}${r.avgR}R prom. · ${r.pct}% (${r.wins}G / ${r.losses}P)` : 'Sin datos todavía'}</span>
     </div>`).join('')}
   </div>`;
 }
