@@ -48,6 +48,45 @@ let store = {};
 // cualquier momento este Set refleja exactamente lo que falta esperar antes de apagar.
 const pendingWrites = new Set();
 
+// FIX (race de escrituras concurrentes sobre la misma key): antes, persistKey lanzaba
+// una query nueva a Supabase por cada setItem() sin esperar a que la anterior (para esa
+// misma key) hubiera terminado. Si el motor escribía la misma key dos veces seguidas muy
+// rápido (ej. pt_v4_signals se reescribe entero cada vez que se resuelve una señal, y en
+// un mismo ciclo puede pasar más de una vez), salían dos INSERT...ON CONFLICT en paralelo
+// sobre la misma fila. Postgres serializa a nivel de fila, pero el ORDEN DE LLEGADA de esas
+// dos queries a la base depende de la red, no del orden en que el código las lanzó — si la
+// escritura más vieja llegaba después que la más nueva, la base terminaba con el valor
+// viejo aunque en memoria (store) ya estuviera el nuevo. El bug es invisible en caliente
+// (todo lo que lee el motor viene de `store`, siempre correcto) y solo se nota tras un
+// reinicio, al recargar desde Supabase un valor desactualizado.
+//
+// Ahora cada key tiene su propia cadena de promesas (writeQueues): toda escritura nueva
+// para una key se encadena DESPUÉS de la anterior para esa MISMA key, así llegan a
+// Supabase en el mismo orden en que se generaron. Escrituras de keys DISTINTAS siguen
+// yendo en paralelo entre sí — no hay motivo para serializarlas, y serializar TODO
+// (una sola cola global) sería mucho más lento sin necesidad.
+const writeQueues = new Map();
+
+function enqueueWrite(key, task) {
+  const prior = writeQueues.get(key) || Promise.resolve();
+  // .catch(()=>{}) sobre `prior`: si la escritura anterior de esta key falló, no
+  // queremos que ese fallo bloquee/rechace la cadena y con eso impida las siguientes
+  // escrituras de la misma key — cada tarea ya loguea su propio error (ver
+  // persistKey/deleteKey), acá solo importa el ORDEN, no si la anterior salió bien.
+  const next = prior.catch(() => {}).then(task);
+  writeQueues.set(key, next);
+  pendingWrites.add(next);
+  next.finally(() => {
+    pendingWrites.delete(next);
+    // Si nadie encoló nada más para esta key mientras corría esta escritura, se libera
+    // la entrada del Map — si no, la próxima escritura de una key ya inactiva
+    // arrancaría encadenada sobre una promesa vieja que ya resolvió hace rato (no es
+    // un bug, pero deja crecer el Map sin necesidad).
+    if (writeQueues.get(key) === next) writeQueues.delete(key);
+  });
+  return next;
+}
+
 async function ensureTable() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS kv_store (
@@ -64,23 +103,30 @@ async function loadAll() {
 
 function persistKey(key, value) {
   if (!pool) return;
-  const p = pool
-    .query(
-      'INSERT INTO kv_store (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2',
-      [key, value]
-    )
-    .catch(e => console.error(`No se pudo guardar "${key}" en Supabase:`, e.message))
-    .finally(() => pendingWrites.delete(p));
-  pendingWrites.add(p);
+  // Antes: se armaba y lanzaba la query acá mismo, con el `value` de ESTE momento
+  // capturado en el closure. Ahora la tarea se define pero no se ejecuta hasta que le
+  // toca el turno en la cola de esa key (enqueueWrite) — importante: se relee
+  // `store[key]` DENTRO de la tarea (no se usa el `value` recibido acá) para que, si
+  // esta escritura queda esperando en la cola y mientras tanto llega un setItem más
+  // nuevo para la misma key, lo que finalmente se guarde sea el valor más reciente en
+  // memoria y no un valor ya viejo para cuando le toque el turno.
+  enqueueWrite(key, () =>
+    pool
+      .query(
+        'INSERT INTO kv_store (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2',
+        [key, store[key]]
+      )
+      .catch(e => console.error(`No se pudo guardar "${key}" en Supabase:`, e.message))
+  );
 }
 
 function deleteKey(key) {
   if (!pool) return;
-  const p = pool
-    .query('DELETE FROM kv_store WHERE key = $1', [key])
-    .catch(e => console.error(`No se pudo borrar "${key}" en Supabase:`, e.message))
-    .finally(() => pendingWrites.delete(p));
-  pendingWrites.add(p);
+  enqueueWrite(key, () =>
+    pool
+      .query('DELETE FROM kv_store WHERE key = $1', [key])
+      .catch(e => console.error(`No se pudo borrar "${key}" en Supabase:`, e.message))
+  );
 }
 
 global.localStorage = {
