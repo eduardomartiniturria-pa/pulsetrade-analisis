@@ -75,7 +75,9 @@
   .strategy-stats-row{display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-top:1px solid #1e293b}
   .strategy-stats-row:first-of-type{border-top:none}
   .strategy-stats-label{color:#cbd5e1}
-  .strategy-stats-value{color:#94a3b8;white-space:nowrap}
+  .strategy-stats-value{color:#94a3b8;white-space:nowrap;font-weight:600}
+  .strategy-stats-value.positive{color:#4ade80}
+  .strategy-stats-value.negative{color:#f87171}
   .divider{height:1px;background:#1a2332;margin:8px 16px}
   .section-label-hist{font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:1px;font-weight:700;margin:20px 16px 8px}
   .history-card{background:#1a2332;border-radius:14px;padding:14px;margin:0 16px 8px;border:1px solid #2d3a4f}
@@ -272,7 +274,7 @@ function renderStrategyStatsTable(symbol) {
     <div class="strategy-stats-title">📊 Ganadas / perdidas por estrategia — ${symbol}</div>
     ${rows.map(r => `<div class="strategy-stats-row">
       <span class="strategy-stats-label">${r.label}</span>
-      <span class="strategy-stats-value">${r.total ? `${r.avgR >= 0 ? '+' : ''}${r.avgR}R prom. · ${r.pct}% (${r.wins}G / ${r.losses}P)` : 'Sin datos todavía'}</span>
+      <span class="strategy-stats-value ${r.total ? (r.avgR >= 0 ? 'positive' : 'negative') : ''}">${r.total ? `${r.avgR >= 0 ? '+' : ''}${r.avgR}R prom. · ${r.pct}% (${r.wins}G / ${r.losses}P)` : 'Sin datos todavía'}</span>
     </div>`).join('')}
   </div>`;
 }
@@ -425,7 +427,7 @@ function renderHistory() {
   // darlas vuelta para mostrar la más nueva arriba de todo.
   el.innerHTML = hist.slice(-15).reverse().map(h => {
     const dec = h.decimals ?? 2;
-    const resultBadge = h.result === 'win' ? '✅ Ganó' : h.result === 'loss' ? '🛑 Perdió' : '⏳ Pendiente';
+    const resultBadge = h.result === 'win' ? '✅ Ganó' : h.result === 'loss' ? '🛑 Perdió' : '⏳ En curso';
     const resultClass = h.result === 'win' ? 'win' : h.result === 'loss' ? 'loss' : '';
     return `
     <div class="history-card">
