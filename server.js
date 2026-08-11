@@ -104,6 +104,30 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     res.json({ ok: true, started: true });
   });
 
+  // NUEVO: dispara BacktestEngine.runAll(true) a demanda, con force=true (recalibración
+  // completa de autoConfidenceThreshold/patternStats/strategyStatsBySymbol). Se agregó tras
+  // el fix de ATR (Wilder, ronda de custom-strategies.js/engine.js): el auto-tune runAll(false)
+  // que corre solo al arrancar el server NO fuerza recalibración, así que el cambio de ATR
+  // nunca se reflejaba en los umbrales de confianza hasta correr esto manualmente. Es un GET
+  // (no POST) a propósito, para poder dispararlo abriendo la URL directo desde el navegador
+  // sin necesitar curl ni Postman. isRunning evita que se pise con otra corrida en simultáneo.
+  let recalibrateRunning = false;
+  app.get('/api/recalibrate', async (req, res) => {
+    if (recalibrateRunning) {
+      return res.status(409).json({ ok: false, error: 'Ya hay una recalibración en curso, esperá a que termine.' });
+    }
+    recalibrateRunning = true;
+    res.json({ ok: true, started: true, message: 'Recalibración iniciada, revisá los logs de Render para ver el progreso.' });
+    try {
+      await BacktestEngine.runAll(true);
+      console.log('[recalibrate] BacktestEngine.runAll(true) terminó OK');
+    } catch (e) {
+      console.error('[recalibrate] Error corriendo BacktestEngine.runAll(true):', e.message);
+    } finally {
+      recalibrateRunning = false;
+    }
+  });
+
   // Usado por el "pinger" externo (cron-job.org) para mantener despierto el server gratuito
   // Y como probe de salud.
   app.get('/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }));
