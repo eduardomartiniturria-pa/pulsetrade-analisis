@@ -81,10 +81,11 @@
   .history-card{background:#1a2332;border-radius:14px;padding:14px;margin:0 16px 8px;border:1px solid #2d3a4f}
   .history-top{display:flex;justify-content:space-between;align-items:center}
   .history-left{font-size:0.85rem;color:#f8fafc;font-weight:600}
-  .history-detail{font-size:0.7rem;color:#64748b;margin-top:2px}
-  .history-levels{display:flex;gap:10px;margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.05);font-size:0.72rem;font-family:'SF Mono',monospace}
-  .history-levels span{color:#64748b}
-  .history-levels b{color:#e2e8f0;font-weight:700}
+  .history-detail{font-size:0.85rem;color:#94a3b8;font-weight:600;margin-top:2px}
+  .history-levels{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.05)}
+  .history-level-item{display:flex;flex-direction:column}
+  .history-level-label{font-size:0.62rem;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px}
+  .history-level-value{font-size:0.85rem;font-weight:700;font-family:'SF Mono',monospace;color:#e2e8f0}
   .history-meta{font-size:0.68rem;color:#64748b;margin-top:6px}
   .history-empty{text-align:center;padding:20px;color:#64748b;font-size:0.8rem}
   .last-updated{font-size:0.65rem;color:#475569;text-align:center;margin:6px 0}
@@ -436,10 +437,10 @@ function renderHistory() {
         <div class="badge-resolved ${resultClass}">${resultBadge}</div>
       </div>
       <div class="history-levels">
-        <span>Entrada <b>${fmt(h.entry, dec)}</b></span>
-        <span>SL <b>${fmt(h.sl, dec)}</b></span>
-        <span>TP1 <b>${fmt(h.tp1, dec)}</b></span>
-        <span>TP2 <b>${fmt(h.tp2, dec)}</b></span>
+        <div class="history-level-item"><span class="history-level-label">Entrada</span><span class="history-level-value">${fmt(h.entry, dec)}</span></div>
+        <div class="history-level-item"><span class="history-level-label">SL</span><span class="history-level-value">${fmt(h.sl, dec)}</span></div>
+        <div class="history-level-item"><span class="history-level-label">TP1</span><span class="history-level-value">${fmt(h.tp1, dec)}</span></div>
+        <div class="history-level-item"><span class="history-level-label">TP2</span><span class="history-level-value">${fmt(h.tp2, dec)}</span></div>
       </div>
       <div class="history-meta">Confianza ${fmtPct(h.confidence)}%${h.rMultiple !== null && h.rMultiple !== undefined ? ` · Resultado ${h.rMultiple > 0 ? '+' : ''}${h.rMultiple.toFixed(2)}R` : ''}</div>
     </div>`;
