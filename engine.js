@@ -1024,6 +1024,12 @@ class SMCEngine {
     return { bullish, bearish, score: (bullish || bearish) ? 15 : 0, details, level };
   }
 
+  // CORREGIDO: antes era promedio simple de las últimas `period` True Range.
+  // Ahora es Wilder/RMA real (igual a TradingView/MT4/MT5): semilla = promedio
+  // simple de los primeros `period` TR, y de ahí en adelante suavizado
+  // exponencial atr = (atr*(period-1) + TR) / period. Mismo cambio aplicado
+  // en custom-strategies.js para que las 7 estrategias independientes y el
+  // motor SMC calculen el mismo ATR.
   static calculateATR(candles, period = 14) {
     if (!candles || candles.length < period + 1) return null;
     const trueRanges = [];
@@ -1031,8 +1037,12 @@ class SMCEngine {
       const high = candles[i].high, low = candles[i].low, prevClose = candles[i - 1].close;
       trueRanges.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
     }
-    const recent = trueRanges.slice(-period);
-    return recent.reduce((a, b) => a + b, 0) / recent.length;
+    if (trueRanges.length < period) return null;
+    let atr = trueRanges.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    for (let i = period; i < trueRanges.length; i++) {
+      atr = (atr * (period - 1) + trueRanges[i]) / period;
+    }
+    return atr;
   }
 
   static calculateEMA(candles, period) {
