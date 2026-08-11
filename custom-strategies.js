@@ -16,8 +16,8 @@
 //   const CustomStrategies = require('./custom-strategies');
 //   ... dentro de refreshAsset(), después de calcular `analysis`:
 //   const customSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfOhlcv?.candles);
-//   customSignals.forEach(sig => resolveCustomSignal(symbol, sig, quote));
-// (ver función resolveCustomSignal de ejemplo al final de este archivo)
+//   customSignals.forEach(sig => resolveCustomSignal(symbol, quote, sig, asset));
+// (resolveCustomSignal vive en engine.js, no en este archivo)
 //
 // NOTA: htfCandles es opcional, pero si no se pasa, "Supply and Demand"
 // pierde el filtro de tendencia mayor (EMA20/EMA50 en HTF) y arma sus
@@ -372,7 +372,7 @@ function findBrokenSRZones(candles, lookback = 40) {
 }
 
 function detectPriceActionRsiEma(candles) {
-  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, tp3: null };
+  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null };
   if (!candles || candles.length < 60) return result;
 
   const ema20 = calculateEMASeries(candles, 20);
@@ -505,13 +505,23 @@ function isEngulfing(prev, last, direction) {
     last.open >= prev.close && last.close <= prev.open;
 }
 
+// CORREGIDO: antes era promedio simple de las últimas `period` True Range.
+// Ahora es Wilder/RMA real (igual a TradingView/MT4/MT5): semilla = promedio
+// simple de los primeros `period` TR, y de ahí en adelante suavizado
+// exponencial atr = (atr*(period-1) + TR) / period.
 function calculateATR(candleSet, period = 14) {
+  if (!candleSet || candleSet.length < period + 1) return null;
   const trueRanges = [];
   for (let i = 1; i < candleSet.length; i++) {
     const h = candleSet[i].high, l = candleSet[i].low, pc = candleSet[i - 1].close;
     trueRanges.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
   }
-  return trueRanges.length ? trueRanges.slice(-period).reduce((a, b) => a + b, 0) / Math.min(period, trueRanges.length) : null;
+  if (trueRanges.length < period) return null;
+  let atr = trueRanges.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < trueRanges.length; i++) {
+    atr = (atr * (period - 1) + trueRanges[i]) / period;
+  }
+  return atr;
 }
 
 function detectSupplyDemand(candles, htfCandles) {
@@ -544,6 +554,12 @@ function detectSupplyDemand(candles, htfCandles) {
     const ema50 = calculateEMASeries(htfCandles, 50);
     const i = htfCandles.length - 1;
     if (ema20[i] !== null && ema50[i] !== null) htfTrend = ema20[i] > ema50[i] ? 'bullish' : (ema20[i] < ema50[i] ? 'bearish' : 'neutral');
+  } else if (htfCandles && htfCandles.length > 0) {
+    // CORREGIDO: antes esto caía en 'neutral' en silencio. Distinto del caso
+    // "no me pasaron HTF" (sigue sin loguear nada): acá SÍ me pasaron HTF
+    // pero la muestra no alcanza para EMA50, y el filtro de tendencia mayor
+    // queda desactivado sin que se note desde afuera.
+    console.warn(`[supply_demand] htfCandles insuficiente (${htfCandles.length} velas, se necesitan >=50) — filtro de tendencia mayor desactivado`);
   }
 
   const demandZones = zones.filter(z => z.type === 'demand').sort((a, b) => b.high - a.high);
@@ -815,10 +831,23 @@ function detectBollingerSqueeze(candles) {
 // EVALUACIÓN CONJUNTA (independiente, sin pasar por evalSide)
 // ---------------------------------------------------------
 
+// CORREGIDO: antes cada detectX() se llamaba directo. Si una explotaba
+// (dato faltante, undefined.high, etc.), se perdían las señales de las 7
+// estrategias de ese ciclo para ese símbolo, no solo la que falló. safeRun
+// aísla cada llamada: si una tira excepción, se loguea y las otras 6 siguen.
+function safeRun(strategyName, fn, ...args) {
+  try {
+    return fn(...args);
+  } catch (err) {
+    console.warn(`[custom-strategies] ${strategyName} falló, se omite este ciclo: ${err.message}`);
+    return { bullish: false, bearish: false, details: [] };
+  }
+}
+
 function evaluateAll(candles, symbol, asset, htfCandles = null) {
   const signals = [];
 
-  const kz = detectNYOpenKillZone(candles);
+  const kz = safeRun('ny_open_kill_zone', detectNYOpenKillZone, candles);
   if (kz.bullish || kz.bearish) {
     signals.push({
       strategy: 'ny_open_kill_zone', label: 'Kill Zone Apertura NY (9:30 AM)',
@@ -827,7 +856,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null) {
     });
   }
 
-  const piv = detectPivotsBreakoutReversal(candles);
+  const piv = safeRun('pivots_breakout_reversal', detectPivotsBreakoutReversal, candles);
   if (piv.bullish || piv.bearish) {
     signals.push({
       strategy: 'pivots_breakout_reversal', label: 'Pivots Breakout & Reversal',
@@ -836,7 +865,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null) {
     });
   }
 
-  const pa = detectPriceActionRsiEma(candles);
+  const pa = safeRun('price_action_rsi_ema', detectPriceActionRsiEma, candles);
   if (pa.bullish || pa.bearish) {
     signals.push({
       strategy: 'price_action_rsi_ema', label: 'Price Action + RSI + EMA',
@@ -845,7 +874,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null) {
     });
   }
 
-  const sd = detectSupplyDemand(candles, htfCandles);
+  const sd = safeRun('supply_demand', detectSupplyDemand, candles, htfCandles);
   if (sd.bullish || sd.bearish) {
     signals.push({
       strategy: 'supply_demand', label: 'Supply and Demand',
@@ -854,7 +883,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null) {
     });
   }
 
-  const emaScalp = detectEmaCrossScalping(candles);
+  const emaScalp = safeRun('ema_cross_scalping', detectEmaCrossScalping, candles);
   if (emaScalp.bullish || emaScalp.bearish) {
     signals.push({
       strategy: 'ema_cross_scalping', label: 'EMA Cross Scalping (RSI+MACD)',
@@ -863,7 +892,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null) {
     });
   }
 
-  const rsiDiv = detectRsiDivergence(candles);
+  const rsiDiv = safeRun('rsi_divergence', detectRsiDivergence, candles);
   if (rsiDiv.bullish || rsiDiv.bearish) {
     signals.push({
       strategy: 'rsi_divergence', label: 'Divergencia RSI',
@@ -872,7 +901,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null) {
     });
   }
 
-  const bbSqueeze = detectBollingerSqueeze(candles);
+  const bbSqueeze = safeRun('bollinger_squeeze', detectBollingerSqueeze, candles);
   if (bbSqueeze.bullish || bbSqueeze.bearish) {
     signals.push({
       strategy: 'bollinger_squeeze', label: 'Bollinger Squeeze Breakout',
