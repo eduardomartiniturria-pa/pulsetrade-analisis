@@ -21,6 +21,22 @@
 //   cada una — el conteo se corrigió acá porque los comentarios anteriores decían
 //   "3" y "5" en distintos lugares, ninguno actualizado desde que se agregaron las
 //   últimas estrategias.)
+//
+// FIX (timezone Kill Zone NY / velas corridas de horario):
+// - Las peticiones a Twelve Data (/time_series) para OHLCV no llevaban el parámetro
+//   `timezone=UTC`. Sin ese parámetro, Twelve Data devuelve `datetime` en la zona
+//   horaria de la plaza del activo (para XAUUSD, hora de Nueva York), como una cadena
+//   sin sufijo `Z` (ej. "2026-08-11 09:30:00"). Al hacer `new Date(k.datetime)` sobre
+//   esa cadena en un proceso corriendo en UTC (como en Render), JS la interpretaba
+//   como si YA fuera UTC — desfasando cada vela ~4-5hs (según DST) respecto al
+//   instante real. detectNYOpenKillZone() volvía a convertir ese timestamp corrupto a
+//   hora NY con Intl.DateTimeFormat, aplicando el offset una segunda vez sobre un dato
+//   ya corrido — resultado: la ventana 9:30-9:45 NY caía en otro horario del día,
+//   generando señales de Kill Zone de madrugada en hora Argentina.
+// - Se agregó `&timezone=UTC` a las dos URLs de Twelve Data que arman velas
+//   (ProviderAdapters.twelveData.fetchOHLCV y BacktestEngine.fetchCandlesTwelveData),
+//   así `datetime` viene ya en UTC real y no hay doble conversión.
+// ============================================================
 
 const { sendPushToAll } = require('./subscriptions');
 const CustomStrategies = require('./custom-strategies');
@@ -545,6 +561,11 @@ const ProviderAdapters = {
       });
       ResponseCache.set(cacheKey, data); return data;
     },
+    // FIX: se agrega &timezone=UTC. Sin este parámetro, Twelve Data devuelve `datetime`
+    // en la hora local de la plaza del activo (para XAUUSD, hora de Nueva York), como
+    // cadena sin sufijo `Z`. `new Date(k.datetime)` en un proceso corriendo en UTC (Render)
+    // interpretaba esa cadena como si ya fuera UTC, desfasando cada vela varias horas y
+    // rompiendo la ventana 9:30-9:45 NY de detectNYOpenKillZone() en custom-strategies.js.
     async fetchOHLCV(symbol, interval, limit = 100) {
       if (!state.apiKeys.twelveData) throw new Error('API key no configurada');
       const asset = ASSETS[symbol];
@@ -552,7 +573,7 @@ const ProviderAdapters = {
       const cached = ResponseCache.get(cacheKey); if (cached) return cached;
       const tfMap = { '5m': '5min', '15m': '15min', '1h': '1h' };
       const headers = new Headers(); headers.append('Authorization', `apikey ${state.apiKeys.twelveData}`);
-      const res = await fetchWithTimeout(`${CONFIG.ENDPOINTS.TWELVEDATA}/time_series?symbol=${asset.symbols.twelveData}&interval=${tfMap[interval]||'15min'}&outputsize=${limit}`, CONFIG.REQUEST_TIMEOUT, { headers }, 'twelveData');
+      const res = await fetchWithTimeout(`${CONFIG.ENDPOINTS.TWELVEDATA}/time_series?symbol=${asset.symbols.twelveData}&interval=${tfMap[interval]||'15min'}&outputsize=${limit}&timezone=UTC`, CONFIG.REQUEST_TIMEOUT, { headers }, 'twelveData');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       if (data.status === 'error') throw new Error(data.message || 'Error de Twelve Data');
@@ -1435,12 +1456,16 @@ const BacktestEngine = {
     return this.fetchCandlesTwelveData(symbol, interval);
   },
 
+  // FIX: se agrega &timezone=UTC, mismo motivo que en ProviderAdapters.twelveData.fetchOHLCV
+  // — sin este parámetro, `datetime` viene en hora local de la plaza (NY para XAUUSD) sin
+  // sufijo `Z`, y `new Date(v.datetime)` en un proceso en UTC lo interpreta mal, corriendo
+  // cada vela del backtest varias horas.
   async fetchCandlesTwelveData(symbol, interval) {
     if (!state.apiKeys.twelveData) return null;
     const asset = ASSETS[symbol];
     const tfMap = { '15m': '15min', '1h': '1h' };
     const headers = { 'Authorization': `apikey ${state.apiKeys.twelveData}` };
-    const url = `${CONFIG.ENDPOINTS.TWELVEDATA}/time_series?symbol=${asset.symbols.twelveData}&interval=${tfMap[interval] || '15min'}&outputsize=${CONFIG.BACKTEST.TWELVEDATA_CANDLE_LIMIT}`;
+    const url = `${CONFIG.ENDPOINTS.TWELVEDATA}/time_series?symbol=${asset.symbols.twelveData}&interval=${tfMap[interval] || '15min'}&outputsize=${CONFIG.BACKTEST.TWELVEDATA_CANDLE_LIMIT}&timezone=UTC`;
     const res = await fetchWithTimeout(url, 10000, { headers }, 'twelveData');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
