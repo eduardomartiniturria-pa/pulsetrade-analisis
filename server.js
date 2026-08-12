@@ -128,6 +128,75 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     }
   });
 
+  // ---------------------------------------------------------
+  // Historial navegable por día/semana/mes (solo lectura, para el panel).
+  // Lee los keys `closed_signals:YYYY-MM-DD` que engine.js escribe cada vez que una
+  // señal se resuelve win/loss (ver appendClosedSignal en engine.js). No toca
+  // pt_v4_signals ni ninguna lógica de trading/auto-tune.
+  // ---------------------------------------------------------
+  function localDayKeyFromDate(d) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  function getClosedSignalsForDay(dayKey) {
+    try { return JSON.parse(localStorage.getItem(`closed_signals:${dayKey}`) || '[]'); }
+    catch (e) { return []; }
+  }
+
+  function summarizeClosedSignals(entries) {
+    const wins = entries.filter(e => e.result === 'win').length;
+    const losses = entries.filter(e => e.result === 'loss').length;
+    const total = wins + losses;
+    const winRate = total ? +((wins / total) * 100).toFixed(1) : null;
+    const byStrategy = {};
+    entries.forEach(e => { const key = e.source || 'smc'; byStrategy[key] = (byStrategy[key] || 0) + 1; });
+    const strategyBreakdown = Object.entries(byStrategy)
+      .map(([key, count]) => ({ key, count, pct: total ? +((count / total) * 100).toFixed(1) : 0 }))
+      .sort((a, b) => b.count - a.count);
+    return { wins, losses, total, winRate, strategyBreakdown };
+  }
+
+  // Lista de días que tienen al menos una señal cerrada — así el panel arma la lista
+  // cronológica sin tener que adivinar fechas ni barrer keys a ciegas.
+  app.get('/api/history/days', (req, res) => {
+    let days;
+    try { days = JSON.parse(localStorage.getItem('closed_signals_days') || '[]'); }
+    catch (e) { days = []; }
+    res.json({ days });
+  });
+
+  // :period = day | week | month. :date = YYYY-MM-DD, cualquier día dentro del
+  // período que se quiere consultar (para 'week' y 'month' se calcula el rango
+  // completo a partir de esa fecha ancla).
+  app.get('/api/history/:period/:date', (req, res) => {
+    const { period, date } = req.params;
+    const anchor = new Date(`${date}T00:00:00`);
+    if (isNaN(anchor.getTime())) return res.status(400).json({ error: 'Fecha inválida, formato esperado YYYY-MM-DD' });
+
+    let days = [];
+    if (period === 'day') {
+      days = [anchor];
+    } else if (period === 'week') {
+      // Semana de lunes a domingo, calculada a partir de la fecha ancla.
+      const dow = anchor.getDay(); // 0=domingo
+      const diffToMonday = dow === 0 ? -6 : 1 - dow;
+      const monday = new Date(anchor);
+      monday.setDate(anchor.getDate() + diffToMonday);
+      days = Array.from({ length: 7 }, (_, i) => { const d = new Date(monday); d.setDate(monday.getDate() + i); return d; });
+    } else if (period === 'month') {
+      const year = anchor.getFullYear(), month = anchor.getMonth();
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+      days = Array.from({ length: daysInMonth }, (_, i) => new Date(year, month, i + 1));
+    } else {
+      return res.status(400).json({ error: "period debe ser 'day', 'week' o 'month'" });
+    }
+
+    const dayKeys = days.map(localDayKeyFromDate);
+    const entries = dayKeys.flatMap(getClosedSignalsForDay);
+    const summary = summarizeClosedSignals(entries);
+    res.json({ period, anchor: date, days: dayKeys, ...summary });
+  });
+
   // Usado por el "pinger" externo (cron-job.org) para mantener despierto el server gratuito
   // Y como probe de salud.
   app.get('/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }));
