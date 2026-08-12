@@ -24,6 +24,25 @@
 // pendientes terminen antes de dejar morir el proceso. Así, un redeploy normal ya no
 // pierde nada — solo un crash abrupto (que no manda SIGTERM) podría seguir perdiendo
 // la última escritura, pero eso es mucho más raro que un redeploy común.
+//
+// FIX (race condition en escrituras concurrentes sobre la misma key): antes, persistKey
+// lanzaba una query nueva a Supabase por cada setItem() sin esperar a que la anterior
+// (para esa misma key) hubiera terminado. Si el motor escribía la misma key dos veces
+// seguidas muy rápido (ej. pt_v4_signals se reescribe entero cada vez que se resuelve
+// una señal, y en un mismo ciclo puede pasar más de una vez), salían dos
+// INSERT...ON CONFLICT en paralelo sobre la misma fila. Postgres serializa a nivel de
+// fila, pero el ORDEN DE LLEGADA de esas dos queries a la base depende de la red, no
+// del orden en que el código las lanzó — si la escritura más vieja llegaba después que
+// la más nueva, la base terminaba con el valor viejo aunque en memoria (store) ya
+// estuviera el nuevo. El bug es invisible en caliente (todo lo que lee el motor viene
+// de `store`, siempre correcto) y solo se nota tras un reinicio, al recargar desde
+// Supabase un valor desactualizado.
+//
+// Ahora cada key tiene su propia cadena de promesas (writeQueues): toda escritura nueva
+// para una key se encadena DESPUÉS de la anterior para esa MISMA key, así llegan a
+// Supabase en el mismo orden en que se generaron. Escrituras de keys DISTINTAS siguen
+// yendo en paralelo entre sí — no hay motivo para serializarlas, y serializar TODO
+// (una sola cola global) sería mucho más lento sin necesidad.
 const { Pool } = require('pg');
 
 const pool = process.env.DATABASE_URL
@@ -48,23 +67,7 @@ let store = {};
 // cualquier momento este Set refleja exactamente lo que falta esperar antes de apagar.
 const pendingWrites = new Set();
 
-// FIX (race de escrituras concurrentes sobre la misma key): antes, persistKey lanzaba
-// una query nueva a Supabase por cada setItem() sin esperar a que la anterior (para esa
-// misma key) hubiera terminado. Si el motor escribía la misma key dos veces seguidas muy
-// rápido (ej. pt_v4_signals se reescribe entero cada vez que se resuelve una señal, y en
-// un mismo ciclo puede pasar más de una vez), salían dos INSERT...ON CONFLICT en paralelo
-// sobre la misma fila. Postgres serializa a nivel de fila, pero el ORDEN DE LLEGADA de esas
-// dos queries a la base depende de la red, no del orden en que el código las lanzó — si la
-// escritura más vieja llegaba después que la más nueva, la base terminaba con el valor
-// viejo aunque en memoria (store) ya estuviera el nuevo. El bug es invisible en caliente
-// (todo lo que lee el motor viene de `store`, siempre correcto) y solo se nota tras un
-// reinicio, al recargar desde Supabase un valor desactualizado.
-//
-// Ahora cada key tiene su propia cadena de promesas (writeQueues): toda escritura nueva
-// para una key se encadena DESPUÉS de la anterior para esa MISMA key, así llegan a
-// Supabase en el mismo orden en que se generaron. Escrituras de keys DISTINTAS siguen
-// yendo en paralelo entre sí — no hay motivo para serializarlas, y serializar TODO
-// (una sola cola global) sería mucho más lento sin necesidad.
+// Cola de promesas por key — ver el comentario de "FIX (race condition...)" más arriba.
 const writeQueues = new Map();
 
 function enqueueWrite(key, task) {
