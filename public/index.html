@@ -322,9 +322,14 @@ function renderStrategySlot(title, d) {
   const isLong = s.type === 'long';
   const dec = s.decimals;
   const cur = d.currentPrice;
+  // FIX (badge TP2 distinto): engine.js ahora manda hitTP2 además de hitTP/hitTP1.
+  // Prioridad de badges cuando hay más de uno true: SL primero (la señal falló, incluso
+  // si había tocado TP1 antes), después TP2 (objetivo completo), después TP1 (objetivo
+  // parcial, para las estrategias con tp2 la señal sigue activa esperando TP2).
   let resolvedBadge = '';
-  if (d.hitTP) resolvedBadge = '<span class="badge-resolved win">✅ TP1 alcanzado</span>';
-  else if (d.hitSL) resolvedBadge = '<span class="badge-resolved loss">🛑 SL alcanzado</span>';
+  if (d.hitSL) resolvedBadge = '<span class="badge-resolved loss">🛑 SL alcanzado</span>';
+  else if (d.hitTP2) resolvedBadge = '<span class="badge-resolved win">🎯 TP2 alcanzado</span>';
+  else if (d.hitTP || d.hitTP1) resolvedBadge = '<span class="badge-resolved win">✅ TP1 alcanzado</span>';
 
   let moveHtml = '';
   if (cur !== undefined && cur !== null) {
