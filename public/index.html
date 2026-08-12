@@ -102,6 +102,24 @@
   .session-pill.open .session-dot{background:#22d3ee;box-shadow:0 0 6px #22d3ee}
   @media(max-width:380px){.signal-action{font-size:2rem}.price-value{font-size:1.3rem}.level-value{font-size:1rem}}
   ::-webkit-scrollbar{width:0;height:0}
+  .period-tabs{display:flex;gap:8px;margin:0 16px 10px}
+  .period-tab{flex:1;padding:9px 0;border-radius:10px;text-align:center;font-size:0.8rem;font-weight:700;background:#151d2b;border:1px solid #232f42;color:#94a3b8;cursor:pointer}
+  .period-tab.active{background:linear-gradient(135deg,#06b6d4,#0891b2);border-color:transparent;color:#fff}
+  .period-list{display:flex;flex-direction:column;gap:8px;margin:0 16px 8px}
+  .period-item{background:#1a2332;border-radius:12px;padding:12px 14px;border:1px solid #2d3a4f;cursor:pointer}
+  .period-item-top{display:flex;justify-content:space-between;align-items:center}
+  .period-item-label{font-size:0.85rem;font-weight:700;color:#f8fafc}
+  .period-item-wr{font-size:0.78rem;font-weight:700}
+  .period-item-wr.positive{color:#4ade80}
+  .period-item-wr.negative{color:#f87171}
+  .period-item-sub{font-size:0.72rem;color:#64748b;margin-top:2px}
+  .period-detail{background:#151d2b;border-radius:12px;border:1px solid #232f42;padding:12px 14px;margin-top:6px}
+  .period-detail-title{font-size:0.8rem;font-weight:700;color:#38bdf8;margin-bottom:8px}
+  .period-strategy-row{display:flex;justify-content:space-between;padding:4px 0;font-size:0.75rem;border-top:1px solid #1e293b}
+  .period-strategy-row:first-of-type{border-top:none}
+  .period-strategy-label{color:#cbd5e1}
+  .period-strategy-value{color:#94a3b8;font-weight:600}
+  .period-empty{text-align:center;padding:16px;color:#64748b;font-size:0.8rem}
 </style>
 </head>
 <body>
@@ -122,6 +140,16 @@
 
 <div class="section-label-hist">Historial reciente</div>
 <div id="history"></div>
+
+<div class="section-label-hist">Historial por período</div>
+<div class="period-tabs" id="periodTabs">
+  <div class="period-tab active" data-period="day">Día</div>
+  <div class="period-tab" data-period="week">Semana</div>
+  <div class="period-tab" data-period="month">Mes</div>
+</div>
+<div class="period-list" id="periodList"></div>
+<div id="periodDetail"></div>
+
 <div class="last-updated" id="status">Cargando...</div>
 
 <script>
@@ -469,6 +497,137 @@ async function refresh() {
     document.getElementById('status').textContent = 'No se pudo conectar con el servidor.';
   }
 }
+
+// ---------------------------------------------------------
+// Historial navegable por día/semana/mes. Solo lectura: consume
+// /api/history/days y /api/history/:period/:date (server.js), que a su vez leen
+// los keys closed_signals:YYYY-MM-DD que engine.js escribe cuando una señal se
+// resuelve win/loss. Arranca vacío desde que se desplegó este cambio — los días
+// anteriores no tienen datos, es esperado.
+// ---------------------------------------------------------
+let currentPeriod = 'day';
+let closedDays = []; // YYYY-MM-DD ascendente, viene de /api/history/days
+
+function mondayOf(dateStr) {
+  const d = new Date(`${dateStr}T00:00:00`);
+  const dow = d.getDay();
+  const diffToMonday = dow === 0 ? -6 : 1 - dow;
+  d.setDate(d.getDate() + diffToMonday);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function monthOf(dateStr) { return dateStr.slice(0, 7); } // YYYY-MM
+
+function fmtDayLabel(dateStr) {
+  return new Date(`${dateStr}T00:00:00`).toLocaleDateString('es-AR', { weekday: 'short', day: '2-digit', month: 'short' });
+}
+function fmtWeekLabel(mondayStr) {
+  const d = new Date(`${mondayStr}T00:00:00`);
+  const sunday = new Date(d); sunday.setDate(d.getDate() + 6);
+  const fmtShort = x => x.toLocaleDateString('es-AR', { day: '2-digit', month: 'short' });
+  return `Semana del ${fmtShort(d)} al ${fmtShort(sunday)}`;
+}
+function fmtMonthLabel(monthStr) {
+  const [y, m] = monthStr.split('-');
+  return new Date(`${y}-${m}-01T00:00:00`).toLocaleDateString('es-AR', { month: 'long', year: 'numeric' });
+}
+
+function strategyLabel(key) {
+  const found = ALL_STRATEGY_LIST.find(s => s.key === key);
+  return found ? found.label : key;
+}
+
+async function fetchPeriodSummary(period, anchorDate) {
+  return fetch(`/api/history/${period}/${anchorDate}`).then(r => r.json());
+}
+
+function renderPeriodDetail(summary) {
+  const el = document.getElementById('periodDetail');
+  if (!summary || !summary.total) {
+    el.innerHTML = '<div class="period-detail"><div class="period-empty">Sin señales cerradas en este período.</div></div>';
+    return;
+  }
+  const rows = summary.strategyBreakdown.map(s => `<div class="period-strategy-row">
+    <span class="period-strategy-label">${strategyLabel(s.key)}</span>
+    <span class="period-strategy-value">${s.count} señal(es) · ${s.pct}%</span>
+  </div>`).join('');
+  el.innerHTML = `<div class="period-detail">
+    <div class="period-detail-title">✅ ${summary.wins} ganadas · 🛑 ${summary.losses} perdidas · Winrate ${summary.winRate}%</div>
+    ${rows}
+  </div>`;
+}
+
+async function selectPeriodItem(period, anchorDate) {
+  const summary = await fetchPeriodSummary(period, anchorDate);
+  renderPeriodDetail(summary);
+}
+
+function renderPeriodList() {
+  const listEl = document.getElementById('periodList');
+  document.getElementById('periodDetail').innerHTML = '';
+  if (!closedDays.length) {
+    listEl.innerHTML = '<div class="period-empty">Todavía no hay señales cerradas registradas para el historial por período.</div>';
+    return;
+  }
+  let groups; // array de { anchorDate, label }
+  if (currentPeriod === 'day') {
+    groups = [...closedDays].reverse().map(d => ({ anchorDate: d, label: fmtDayLabel(d) }));
+  } else if (currentPeriod === 'week') {
+    const seen = new Set();
+    groups = [];
+    [...closedDays].reverse().forEach(d => {
+      const monday = mondayOf(d);
+      if (seen.has(monday)) return;
+      seen.add(monday);
+      groups.push({ anchorDate: monday, label: fmtWeekLabel(monday) });
+    });
+  } else {
+    const seen = new Set();
+    groups = [];
+    [...closedDays].reverse().forEach(d => {
+      const month = monthOf(d);
+      if (seen.has(month)) return;
+      seen.add(month);
+      groups.push({ anchorDate: `${month}-01`, label: fmtMonthLabel(month) });
+    });
+  }
+
+  listEl.innerHTML = groups.map((g, i) => `<div class="period-item" data-idx="${i}">
+    <div class="period-item-top">
+      <span class="period-item-label">${g.label}</span>
+    </div>
+  </div>`).join('');
+
+  Array.from(listEl.children).forEach((child, i) => {
+    child.addEventListener('click', () => selectPeriodItem(currentPeriod, groups[i].anchorDate));
+  });
+
+  // Auto-selecciona el más reciente para no dejar la lista vacía de contexto.
+  if (groups.length) selectPeriodItem(currentPeriod, groups[0].anchorDate);
+}
+
+function setupPeriodTabs() {
+  document.getElementById('periodTabs').addEventListener('click', (e) => {
+    const tab = e.target.closest('.period-tab');
+    if (!tab) return;
+    document.querySelectorAll('.period-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    currentPeriod = tab.dataset.period;
+    renderPeriodList();
+  });
+}
+
+async function loadClosedDaysAndRenderPeriodList() {
+  try {
+    const data = await fetch('/api/history/days').then(r => r.json());
+    closedDays = data.days || [];
+  } catch (e) {
+    closedDays = [];
+  }
+  renderPeriodList();
+}
+
+setupPeriodTabs();
+loadClosedDaysAndRenderPeriodList();
 
 setupPush();
 refresh();
