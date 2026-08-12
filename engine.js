@@ -1979,7 +1979,7 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
   });
   if (changed) {
     localStorage.setItem('pt_v4_signals', JSON.stringify(state.signalHistory));
-    resolvedEntries.forEach(entry => { updatePatternStats(entry); updateStrategyStatsBySymbol(entry); });
+    resolvedEntries.forEach(entry => { updatePatternStats(entry); updateStrategyStatsBySymbol(entry); appendClosedSignal(entry); });
     runAutoTune(symbol);
   }
 }
@@ -2020,6 +2020,39 @@ function renderAutoTuneStatus() {}
 function localDayKey(timestamp) {
   const d = new Date(timestamp);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// ---------------------------------------------------------
+// Historial navegable por día/semana/mes (solo lectura para el panel — no
+// interviene en la lógica de trading ni en auto-tune, se agrega al costado).
+// ---------------------------------------------------------
+// pt_v4_signals (state.signalHistory) está recortado a CONFIG.HISTORY_LIMIT (50)
+// entradas TOTALES entre las 8 estrategias — insuficiente para navegar semanas o
+// meses. Acá se guarda cada señal ya resuelta (win/loss, no 'expired') en un key
+// aparte POR DÍA (closed_signals:YYYY-MM-DD), sin límite de cantidad, así día/semana/
+// mes se pueden reconstruir sin depender del recorte de 50. Arranca vacío desde el
+// momento en que se despliega este cambio — decisión explícita del usuario, no se
+// reconstruye retroactivo desde pt_v4_signals.
+function appendClosedSignal(entry) {
+  if (entry.result !== 'win' && entry.result !== 'loss') return; // igual que updatePatternStats/updateStrategyStatsBySymbol
+  const dayKey = localDayKey(entry.timestamp);
+  const storageKey = `closed_signals:${dayKey}`;
+  let dayList;
+  try { dayList = JSON.parse(localStorage.getItem(storageKey) || '[]'); } catch (e) { dayList = []; }
+  dayList.push({
+    symbol: entry.symbol, type: entry.type, source: entry.source || 'smc',
+    result: entry.result, rMultiple: entry.rMultiple, timestamp: entry.timestamp
+  });
+  localStorage.setItem(storageKey, JSON.stringify(dayList));
+  // Índice de qué días tienen datos — sin esto, el panel no tiene forma de saber
+  // qué fechas mostrar en la lista cronológica sin adivinar o barrer keys a ciegas.
+  let daysIndex;
+  try { daysIndex = JSON.parse(localStorage.getItem('closed_signals_days') || '[]'); } catch (e) { daysIndex = []; }
+  if (!daysIndex.includes(dayKey)) {
+    daysIndex.push(dayKey);
+    daysIndex.sort();
+    localStorage.setItem('closed_signals_days', JSON.stringify(daysIndex));
+  }
 }
 
 function historyCardHtml() { return ''; }
