@@ -873,6 +873,17 @@ const MarketDataProvider = {
         try {
           const data = await ProviderAdapters[providerName].fetchOHLCV(symbol, tf, limit);
           if (!data.isValid) throw new Error('Datos insuficientes');
+          // DIAGNÓSTICO (Punto D, sesión 12/8): antes, un fetch exitoso no dejaba ningún
+          // rastro en el log — solo se veían los FALLO. Eso hacía imposible saber qué
+          // proveedor entregó las velas cuando detectSupplyDemand se quejaba de HTF
+          // insuficiente (ej. "48 velas, se necesitan >=50"), porque no había forma de ver
+          // si ese proveedor devolvió de por sí menos velas de las pedidas en `limit`.
+          // Esta línea es solo instrumentación (no cambia ningún comportamiento): loguea
+          // proveedor + symbol + timeframe + velas pedidas vs. recibidas, únicamente
+          // cuando hay diferencia entre lo pedido y lo recibido.
+          if (data.candles.length < limit) {
+            console.warn(`OHLCV ${providerName} ÉXITO pero incompleto: ${symbol} ${tf} — pidió ${limit}, recibió ${data.candles.length}`);
+          }
           state.klineHistory[symbol] = data; return data;
         } catch (error) {
           markProviderCooldown(providerName, error.message);
