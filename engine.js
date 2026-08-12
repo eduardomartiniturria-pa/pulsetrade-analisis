@@ -36,6 +36,26 @@
 // - Se agregó `&timezone=UTC` a las dos URLs de Twelve Data que arman velas
 //   (ProviderAdapters.twelveData.fetchOHLCV y BacktestEngine.fetchCandlesTwelveData),
 //   así `datetime` viene ya en UTC real y no hay doble conversión.
+//
+// FIX v4.3 (señales custom congeladas en el feed + badge TP2 distinto, sesión 12/8):
+// - BUG: para las 7 estrategias independientes, state.lastCustomDisplay (lo que expone
+//   /api/state y pinta el panel) solo se actualizaba mientras la señal seguía en
+//   state.activeCustomSignals. Al resolverse (tocar SL o TP1) se borraba de
+//   activeCustomSignals, y como refreshActiveCustomSignalsDisplay() solo recorre esa
+//   lista, nadie volvía a tocar lastCustomDisplay — quedaba congelado (badge, precio,
+//   flecha) para siempre, hasta la próxima señal nueva de esa estrategia+activo. SMC no
+//   tenía este problema (renderSignal() se llama en cada ciclo sin importar el resultado).
+// - FIX: nueva función evaluateCustomSignalOutcome() centraliza el chequeo de
+//   SL/TP1/TP2, y al cerrar una señal marca su key en
+//   state.pendingCustomDisplayReset — en el siguiente ciclo,
+//   refreshActiveCustomSignalsDisplay() usa esa marca para resetear el display a
+//   "no-signal", así el badge resuelto se ve un ciclo completo y después se limpia solo.
+// - Se agrega además soporte real de TP2: antes hitTP solo comparaba contra tp1. Ahora,
+//   si la estrategia define tp2, la señal sigue activa tras tocar TP1 (badge "TP1
+//   alcanzado") hasta que también toque TP2 (badge "TP2 alcanzado") o SL. Si no hay tp2
+//   definido, se cierra igual que antes al tocar TP1. Mismo campo hitTP2 agregado
+//   también a la resolución de señales SMC (resolveActiveSignal) para que el badge se
+//   comporte igual en las 8 estrategias.
 // ============================================================
 
 const { sendPushToAll } = require('./subscriptions');
@@ -2041,7 +2061,13 @@ function resolveActiveSignal(symbol, quote, analysis) {
   const isLong = frozen.type === 'long';
   const hitTP = isLong ? quote.last >= frozen.tp1 : quote.last <= frozen.tp1;
   const hitSL = isLong ? quote.last <= frozen.sl : quote.last >= frozen.sl;
-  const result = { type: frozen.type, frozen, currentPrice: quote.last, hitTP, hitSL, isNewDirection: isNewDirection && !inCooldown };
+  // FIX (badge TP2 distinto, mismo pedido que en las señales custom): SMC ya se
+  // autolimpia cada ciclo (no tenía el bug de congelamiento), pero seguía sin distinguir
+  // TP2 de TP1 en el resultado — si el precio saltó directo a TP2 antes del próximo
+  // refresco, igual se mostraba "TP1 alcanzado". Con este campo, el front-end puede
+  // mostrar el badge correcto en el único ciclo en que esta señal queda expuesta.
+  const hitTP2 = frozen.tp2 != null && (isLong ? quote.last >= frozen.tp2 : quote.last <= frozen.tp2);
+  const result = { type: frozen.type, frozen, currentPrice: quote.last, hitTP, hitTP1: hitTP, hitTP2, hitSL, isNewDirection: isNewDirection && !inCooldown };
   if (hitTP || hitSL) {
     delete state.activeSignals[symbol];
     try { localStorage.setItem('pt_active_signals', JSON.stringify(state.activeSignals)); } catch (e) {}
@@ -2099,7 +2125,10 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
       rr1: formatRR(tp1), rr2: formatRR(tp2), confidence: null,
       strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
       details: customSig.details, source: customSig.strategy, regime: 'n/a',
-      timestamp: Date.now(), decimals: asset.decimals, detectedAt: Date.now()
+      timestamp: Date.now(), decimals: asset.decimals, detectedAt: Date.now(),
+      // FIX (badge TP2 distinto): recuerda si TP1 ya se tocó en un ciclo anterior, para
+      // no "deshacerlo" si el precio retrocede por debajo de TP1 antes de llegar a TP2.
+      tp1HitAt: null
     };
     state.activeCustomSignals[key] = frozen;
     state.lastCustomSignalAt[key] = frozen.detectedAt;
@@ -2113,14 +2142,52 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
 
   const frozen = state.activeCustomSignals[key];
   if (!frozen) return null;
+  return evaluateCustomSignalOutcome(symbol, key, quote, frozen);
+}
+
+// FIX (bug: señales custom visibles en el feed mucho tiempo después de tocar SL/TP,
+// con precio y flecha congelados — más el pedido de un badge "TP2 alcanzado" distinto):
+//
+// Antes, resolveCustomSignal() y refreshActiveCustomSignalsDisplay() repetían el mismo
+// chequeo de hitTP/hitSL cada una por su lado, comparando solo contra tp1, y en cuanto
+// se resolvía la señal la borraban de state.activeCustomSignals. El problema: una vez
+// borrada de ahí, refreshActiveCustomSignalsDisplay() (que recorre justamente
+// activeCustomSignals) dejaba de tocarla — así que renderCustomSignal() nunca se volvía
+// a llamar para esa estrategia+activo, y state.lastCustomDisplay quedaba congelado con
+// el último estado (badge, precio, flecha) para siempre, hasta la próxima señal nueva.
+// SMC no tenía este problema porque renderSignal() se llama en cada ciclo sin importar
+// el resultado — acá, en cambio, solo se llamaba mientras la señal seguía "activa".
+//
+// Fix en dos partes:
+//  1. evaluateCustomSignalOutcome() ahora también compara contra tp2 (si la estrategia
+//     define uno). Si toca TP1 pero hay TP2 sin tocar todavía, la señal sigue activa
+//     (se ve el badge "TP1 alcanzado" pero se sigue vigilando) — recién se cierra al
+//     tocar TP2, tocar SL, o tocar TP1 cuando no hay TP2 definido.
+//  2. Al cerrarse una señal, además de borrarla de activeCustomSignals, se marca su key
+//     en state.pendingCustomDisplayReset. En el PRÓXIMO ciclo (arranque de
+//     refreshActiveCustomSignalsDisplay para ese símbolo), esa marca se usa para
+//     resetear el display a "no-signal" — así el badge resuelto se ve durante un ciclo
+//     completo (igual que en SMC) y después se limpia solo, en vez de quedar pegado.
+function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
   const isLong = frozen.type === 'long';
-  const hitTP = isLong ? quote.last >= frozen.tp1 : quote.last <= frozen.tp1;
   const hitSL = isLong ? quote.last <= frozen.sl : quote.last >= frozen.sl;
-  if (hitTP || hitSL) {
+  const hitTP1Now = isLong ? quote.last >= frozen.tp1 : quote.last <= frozen.tp1;
+  const hitTP2 = frozen.tp2 != null && (isLong ? quote.last >= frozen.tp2 : quote.last <= frozen.tp2);
+
+  // Una vez tocado TP1, se recuerda (frozen.tp1HitAt) para no "deshacerlo" si el precio
+  // retrocede por debajo de TP1 mientras se espera a TP2.
+  if (hitTP1Now && !frozen.tp1HitAt) frozen.tp1HitAt = Date.now();
+  const hitTP1 = hitTP1Now || !!frozen.tp1HitAt;
+
+  const shouldClose = hitSL || hitTP2 || (hitTP1 && frozen.tp2 == null);
+  if (shouldClose) {
     delete state.activeCustomSignals[key];
     try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
+    state.pendingCustomDisplayReset = state.pendingCustomDisplayReset || {};
+    state.pendingCustomDisplayReset[key] = true;
   }
-  return { type: frozen.type, frozen, currentPrice: quote.last, hitTP, hitSL };
+
+  return { type: frozen.type, frozen, currentPrice: quote.last, hitTP: hitTP1, hitTP1, hitTP2, hitSL };
 }
 
 // Las estrategias independientes solo aparecen en el resultado de evaluateAll() en la
@@ -2131,19 +2198,25 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
 // todas las señales custom ya activas para el símbolo aunque evaluateAll no las haya
 // devuelto esta vez.
 function refreshActiveCustomSignalsDisplay(symbol, quote, skipStrategies = new Set()) {
+  // Limpieza (ver evaluateCustomSignalOutcome): cualquier señal de este símbolo que se
+  // haya cerrado en el ciclo ANTERIOR ya se mostró resuelta un ciclo completo — ahora se
+  // resetea su display a "no-signal" para que no quede congelada para siempre.
+  if (state.pendingCustomDisplayReset) {
+    Object.keys(state.pendingCustomDisplayReset).forEach(pendingKey => {
+      if (!pendingKey.startsWith(symbol + '_')) return;
+      const stratKey = pendingKey.slice(symbol.length + 1);
+      if (state.lastCustomDisplay[symbol]) state.lastCustomDisplay[symbol][stratKey] = { type: 'no-signal' };
+      delete state.pendingCustomDisplayReset[pendingKey];
+    });
+  }
+
   Object.keys(state.activeCustomSignals).forEach(key => {
     if (!key.startsWith(symbol + '_')) return;
     const frozen = state.activeCustomSignals[key];
     if (!frozen) return;
     if (skipStrategies.has(frozen.strategyKeys[0])) return; // ya se renderizó arriba, en este mismo ciclo
-    const isLong = frozen.type === 'long';
-    const hitTP = isLong ? quote.last >= frozen.tp1 : quote.last <= frozen.tp1;
-    const hitSL = isLong ? quote.last <= frozen.sl : quote.last >= frozen.sl;
-    if (hitTP || hitSL) {
-      delete state.activeCustomSignals[key];
-      try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
-    }
-    renderCustomSignal(symbol, frozen.strategyKeys[0], { type: frozen.type, frozen, currentPrice: quote.last, hitTP, hitSL });
+    const display = evaluateCustomSignalOutcome(symbol, key, quote, frozen);
+    renderCustomSignal(symbol, frozen.strategyKeys[0], display);
   });
 }
 
