@@ -50,6 +50,16 @@ const CONFIG = {
   CACHE_TTL: 30000,
   CONFIDENCE_THRESHOLD: 70,
   SIGNAL_COOLDOWN_MS: 15 * 60 * 1000,
+  // Ventana máxima que una señal puede quedar 'pending' sin resolverse. checkHistoryOutcomes()
+  // solo revisa contra las últimas ~100 velas fetcheadas en cada ciclo (ver refreshAsset,
+  // MarketDataProvider.getOHLCV(symbol, state.currentTF, 100, ...)) — con TF de 15min eso es
+  // apenas ~25hs de ventana. Una señal más vieja que esta ventana, si el precio cruzó su SL/TP
+  // en algún momento fuera de esa franja y luego se movió de nuevo dentro del rango, nunca
+  // vuelve a aparecer en los datos que se comparan y queda 'pending' para siempre — es lo que
+  // se veía como señales "en curso" desde el sábado. Pasado este umbral sin poder confirmar
+  // resultado con los datos disponibles, se marca 'expired' en vez de dejarla eternamente
+  // pendiente (no cuenta como win ni loss en las estadísticas por estrategia).
+  SIGNAL_EXPIRATION_MS: 72 * 60 * 60 * 1000,
   // Refresco dinámico: cada 15 min en horario normal (para no saturar rate limits),
   // pero cada 1 min dentro de la ventana Kill Zone NY (10:30-13:30 hora Argentina),
   // para no perderse el detalle de la vela de apertura ni la Bala de Plata.
@@ -1910,14 +1920,30 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
         if (hitSL) { outcome = 'loss'; break; }
         if (hitTP) { outcome = 'win'; break; }
       }
-    } else {
+    }
+    // FIX: antes este chequeo contra currentPrice solo corría en el `else` (cuando
+    // relevantCandles.length === 0), caso que casi nunca se da — con solo que UNA vela
+    // reciente exista en el fetch (siempre hay alguna), el filtro por timestamp entraba
+    // ahí y el fallback nunca se ejecutaba para señales viejas. Ahora corre siempre que
+    // el loop de velas no encontró nada, así una señal cuyo cruce de SL/TP quedó fuera
+    // de la ventana de ~100 velas fetcheadas igual se resuelve si el precio ACTUAL ya
+    // está más allá del nivel (aunque no sepamos el instante exacto en que lo cruzó).
+    if (!outcome) {
       if (isLong && currentPrice >= h.tp1) outcome = 'win';
       else if (isLong && currentPrice <= h.sl) outcome = 'loss';
       else if (!isLong && currentPrice <= h.tp1) outcome = 'win';
       else if (!isLong && currentPrice >= h.sl) outcome = 'loss';
     }
+    // Si sigue sin resolverse y ya pasó la ventana máxima (ver CONFIG.SIGNAL_EXPIRATION_MS),
+    // el precio nunca volvió a cruzar SL/TP dentro de lo que podemos observar — no queda
+    // 'pending' indefinidamente (aparecía como señales "en curso" de días atrás, sin sentido
+    // operativo). Se marca 'expired': no cuenta como win/loss en stats (ver
+    // updateStrategyStatsBySymbol/updatePatternStats, que solo suman win/loss).
+    if (!outcome && (Date.now() - h.timestamp) > CONFIG.SIGNAL_EXPIRATION_MS) {
+      outcome = 'expired';
+    }
     if (outcome) {
-      h.result = outcome; h.rMultiple = outcome === 'win' ? rWin : -1; changed = true; resolvedEntries.push(h);
+      h.result = outcome; h.rMultiple = outcome === 'win' ? rWin : (outcome === 'loss' ? -1 : 0); changed = true; resolvedEntries.push(h);
     }
   });
   if (changed) {
