@@ -84,6 +84,18 @@
 //   después sale 1 pedido, corta, y el siguiente intento sin force queda bloqueado por
 //   RETRY_INTERVAL_MS. Camino exitoso (Twelve Data respondiendo bien) verificado sin
 //   cambios de comportamiento: 8 pedidos, pt_backtest_last_run se graba, 24hs se respetan.
+//
+// FIX v4.5 (chequeo de cuota diaria antes de disparar el backtest, sesión 13/8):
+// - Confirmado con el dashboard real de Twelve Data (825/800 créditos usados ese día,
+//   minutely average 4/8 y maximum 6/8 — nunca cerca del límite por minuto) que la causa
+//   de fondo del 429 era la cuota DIARIA agotada, no un pico puntual por minuto.
+// - runSymbol ya cortaba la corrida por cooldown apenas llegaba el primer 429 (fix v4.4),
+//   pero ese primer pedido siempre se disparaba igual, aunque el propio contador
+//   (RequestTracker) ya supiera que la cuota diaria estaba en 0 — el path en vivo
+//   (MarketDataProvider) sí evita eso desde antes. Se agregó el mismo chequeo
+//   (RequestTracker.getUsage('twelveData')) antes de intentar cada timeframe: si la
+//   cuota diaria ya está agotada, corta sin gastar ni ese último crédito en un pedido
+//   sin ninguna chance de éxito.
 // ============================================================
 
 const { sendPushToAll } = require('./subscriptions');
@@ -1722,6 +1734,22 @@ const BacktestEngine = {
     let allCustomEvents = [];
     let candlesAnalyzed = 0;
     for (const tf of CONFIG.BACKTEST.TIMEFRAMES) {
+      // FIX (cuota diaria agotada, complemento al fix de 429 en cascada de más abajo):
+      // el path en vivo (MarketDataProvider.getQuote/getOHLCV) ya chequea
+      // RequestTracker.getUsage antes de intentar un proveedor con cupo diario agotado
+      // y salta directo al siguiente — el backtest no tenía ese mismo chequeo y siempre
+      // disparaba al menos 1 pedido real a Twelve Data aunque el contador propio ya
+      // supiera que la cuota del día estaba en 0 (confirmado con el dashboard real de
+      // Twelve Data: 825/800 créditos usados). No es un problema grave por sí solo — el
+      // fix de cooldown de abajo ya corta el resto de la corrida con ese único 429 — pero
+      // es cupo gastado sin ninguna chance de éxito, evitable de antemano igual que en
+      // vivo. Se usa el mismo criterio (usage.limit && usage.used >= usage.limit) que
+      // MarketDataProvider, sin duplicar la lógica de PROVIDER_DAILY_LIMITS.
+      const twelveDataUsage = RequestTracker.getUsage('twelveData');
+      if (twelveDataUsage.limit && twelveDataUsage.used >= twelveDataUsage.limit) {
+        console.warn(`Backtest: cupo diario de twelveData agotado (${twelveDataUsage.used}/${twelveDataUsage.limit}), se corta ${symbol} en ${tf} (y los timeframes/símbolos restantes de esta corrida)`);
+        break;
+      }
       // FIX (429 en cascada): antes, un 429 de Twelve Data en el primer pedido de la
       // corrida no frenaba nada — se seguían mandando los pedidos restantes (hasta 8 por
       // corrida completa: 4 símbolos x 2 timeframes) exactamente igual, cada 6s, todos
