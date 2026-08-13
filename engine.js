@@ -690,7 +690,16 @@ const ProviderAdapters = {
       const cacheKey = `cg_ohlcv_${symbol}_${interval}`;
       const cached = ResponseCache.get(cacheKey); if (cached) return cached;
       const headers = state.apiKeys.coingecko ? { 'x-cg-demo-api-key': state.apiKeys.coingecko } : {};
-      const url = `${CONFIG.ENDPOINTS.COINGECKO}/coins/${id}/ohlc?vs_currency=usd&days=1`;
+      // CORREGIDO: con days=1, la auto-granularidad de CoinGecko (30 min para 1-2 días,
+      // según su doc oficial) siempre devuelve el total fijo de un día completo: 24h * 2
+      // velas/hora = 48 velas, sin importar qué "limit" se le pida acá. Eso hacía que
+      // detectSupplyDemand (custom-strategies.js) nunca llegara al mínimo de 50 velas HTF
+      // que necesita para activar el filtro de tendencia mayor (EMA20/EMA50), quedando ese
+      // filtro desactivado siempre que CoinGecko fuera el proveedor que resolvía la vela.
+      // days=2 sigue devolviendo velas de 30 min (mismo rango de auto-granularidad, 1-2
+      // días) pero casi duplica los datos crudos a ~96 velas, superando el mínimo de 50
+      // sin cambiar la naturaleza de la aproximación ya documentada arriba.
+      const url = `${CONFIG.ENDPOINTS.COINGECKO}/coins/${id}/ohlc?vs_currency=usd&days=2`;
       const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, { headers }, 'coingecko');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
