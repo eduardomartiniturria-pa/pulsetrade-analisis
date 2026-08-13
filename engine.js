@@ -690,16 +690,21 @@ const ProviderAdapters = {
       const cacheKey = `cg_ohlcv_${symbol}_${interval}`;
       const cached = ResponseCache.get(cacheKey); if (cached) return cached;
       const headers = state.apiKeys.coingecko ? { 'x-cg-demo-api-key': state.apiKeys.coingecko } : {};
-      // CORREGIDO: con days=1, la auto-granularidad de CoinGecko (30 min para 1-2 días,
-      // según su doc oficial) siempre devuelve el total fijo de un día completo: 24h * 2
-      // velas/hora = 48 velas, sin importar qué "limit" se le pida acá. Eso hacía que
-      // detectSupplyDemand (custom-strategies.js) nunca llegara al mínimo de 50 velas HTF
-      // que necesita para activar el filtro de tendencia mayor (EMA20/EMA50), quedando ese
-      // filtro desactivado siempre que CoinGecko fuera el proveedor que resolvía la vela.
-      // days=2 sigue devolviendo velas de 30 min (mismo rango de auto-granularidad, 1-2
-      // días) pero casi duplica los datos crudos a ~96 velas, superando el mínimo de 50
-      // sin cambiar la naturaleza de la aproximación ya documentada arriba.
-      const url = `${CONFIG.ENDPOINTS.COINGECKO}/coins/${id}/ohlc?vs_currency=usd&days=2`;
+      // CORREGIDO (13/8, ronda 2 — revierte el fix de la ronda 1): "days=2" NO es un valor
+      // válido para este endpoint — CoinGecko devolvía HTTP 400 en producción (confirmado en
+      // logs de Render), no 200 con más velas. El parámetro "days" solo acepta un conjunto fijo
+      // de valores (1, 7, 14, 30, 90, 180, 365, max), no cualquier entero — la tabla de
+      // auto-granularidad de la doc describe el RANGO "1-2 días: 30 min" pero eso no implica que
+      // "2" en sí sea un valor aceptado.
+      // Fix real: distinguir el pedido normal del pedido HTF por el "interval" recibido.
+      // CONFIG.HTF_MAP solo mapea a '1h' (nunca a otro valor), así que interval === '1h' identifica
+      // sin ambigüedad el pedido de velas HTF (el que usa detectSupplyDemand para su filtro de
+      // tendencia mayor, que necesita >=50 velas). Para ese caso se usa days=14 (válido), que cae
+      // en el rango de auto-granularidad 3-30 días -> velas de 4h, entregando ~84 velas. Para el
+      // pedido normal (interval === '15m', el timeframe base) se mantiene days=1 (válido, 30 min,
+      // ~48 velas), que ya alcanzaba de sobra el mínimo de 20 que pide SMCEngine.analyze.
+      const days = (interval === '1h') ? '14' : '1';
+      const url = `${CONFIG.ENDPOINTS.COINGECKO}/coins/${id}/ohlc?vs_currency=usd&days=${days}`;
       const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, { headers }, 'coingecko');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
