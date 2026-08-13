@@ -56,6 +56,34 @@
 //   definido, se cierra igual que antes al tocar TP1. Mismo campo hitTP2 agregado
 //   también a la resolución de señales SMC (resolveActiveSignal) para que el badge se
 //   comporte igual en las 8 estrategias.
+//
+// FIX v4.4 (Backtest reintentando en cada redeploy pese al 429 de Twelve Data, sesión 13/8):
+// - DIAGNÓSTICO (con evidencia de logs de Render): en 3 arranques distintos del proceso,
+//   los 8 pedidos del Backtest (4 símbolos x 2 timeframes) a Twelve Data fallaban SIEMPRE
+//   con HTTP 429 — confirmado por búsqueda que el plan gratis de Twelve Data es 8
+//   créditos/minuto, cupo que se resetea recién al minuto calendario siguiente (no de
+//   forma progresiva). fetchCandlesTwelveData no tenía ninguna de las protecciones que sí
+//   usa el path en vivo (MarketDataProvider): no chequeaba isProviderInCooldown antes de
+//   pedir, y el catch de runSymbol no llamaba a markProviderCooldown — así que, aunque el
+//   primer pedido ya pegara 429, los 7 restantes se mandaban igual, cada 6s, todos
+//   condenados a fallar. Además, pt_backtest_last_run (el timestamp que frena reintentos
+//   dentro de las 24hs) solo se grababa si la corrida conseguía al menos un evento — con
+//   los 8 pedidos fallando, results quedaba vacío y ese timestamp nunca se actualizaba, así
+//   que el gating de 24hs nunca frenaba nada: cada redeploy volvía a intentarlo 2 minutos
+//   después de arrancar (ver setTimeout en server.js) y volvía a fallar igual, sin límite.
+// - FIX: runSymbol ahora corta el loop de timeframes/símbolos apenas isProviderInCooldown
+//   detecta a twelveData en cooldown (activado por markProviderCooldown en el catch, que ya
+//   sabe interpretar "HTTP 429" → 10 min de cooldown, reutilizando el mismo mecanismo del
+//   path en vivo). runAll corta también el loop de símbolos restante bajo la misma
+//   condición. Se agrega además pt_backtest_last_attempt, que se graba SIEMPRE que se
+//   decide correr (haya éxito o no) apenas arranca la corrida — y un nuevo
+//   CONFIG.BACKTEST.RETRY_INTERVAL_MS (1h) que frena reintentos sin `force` si el último
+//   intento fue reciente, sin esperar las 24hs completas de RERUN_INTERVAL_MS (pensadas
+//   para corridas exitosas, no para esto). Verificado con test funcional simulando 429
+//   constante: antes salían 8 pedidos por corrida fallida y se repetía en cada redeploy;
+//   después sale 1 pedido, corta, y el siguiente intento sin force queda bloqueado por
+//   RETRY_INTERVAL_MS. Camino exitoso (Twelve Data respondiendo bien) verificado sin
+//   cambios de comportamiento: 8 pedidos, pt_backtest_last_run se graba, 24hs se respetan.
 // ============================================================
 
 const { sendPushToAll } = require('./subscriptions');
@@ -110,6 +138,21 @@ const CONFIG = {
     MAX_HOLD_CANDLES: 200,
     COOLDOWN_CANDLES: 6,
     RERUN_INTERVAL_MS: 24 * 60 * 60 * 1000,
+    // FIX (429 en cada redeploy): antes, pt_backtest_last_run solo se grababa cuando la
+    // corrida conseguía al menos un evento (resultados no vacíos). Si Twelve Data pegaba
+    // 429 en los 8 pedidos (4 símbolos x 2 timeframes) — como pasaba siempre que la corrida
+    // coincidía con el cupo de 8 créditos/minuto ya consumido por el refresco en vivo —
+    // `results` quedaba vacío, el timestamp nunca se actualizaba, y el chequeo de 24hs de
+    // arriba nunca frenaba nada: cada redeploy volvía a intentarlo desde cero 2 minutos
+    // después de arrancar, y volvía a fallar igual. Ahora se distingue "se intentó correr"
+    // (pt_backtest_last_attempt, se graba SIEMPRE que se decide correr, haya éxito o no) de
+    // "corrió con éxito" (pt_backtest_last_run, sigue igual que antes). Si el último intento
+    // fue hace menos de RETRY_INTERVAL_MS, no se reintenta — evita la cascada de redeploys
+    // seguidos reintentando cada vez. Es más corto que RERUN_INTERVAL_MS a propósito: una
+    // falla por rate limit suele ser transitoria (el cupo de Twelve Data se resetea cada
+    // minuto), así que 1h alcanza para no seguir chocando con el mismo 429 sin esperar un
+    // día entero para el próximo intento real.
+    RETRY_INTERVAL_MS: 60 * 60 * 1000,
     SEED_CAP: 40,
     YIELD_EVERY: 40
   },
@@ -1679,6 +1722,19 @@ const BacktestEngine = {
     let allCustomEvents = [];
     let candlesAnalyzed = 0;
     for (const tf of CONFIG.BACKTEST.TIMEFRAMES) {
+      // FIX (429 en cascada): antes, un 429 de Twelve Data en el primer pedido de la
+      // corrida no frenaba nada — se seguían mandando los pedidos restantes (hasta 8 por
+      // corrida completa: 4 símbolos x 2 timeframes) exactamente igual, cada 6s, todos
+      // condenados a fallar por el mismo motivo: Twelve Data resetea su cupo de 8
+      // créditos/minuto recién al minuto calendario siguiente, no de forma progresiva.
+      // Ahora, si twelveData ya quedó en cooldown (por un 429 de este mismo run, o por el
+      // refresco en vivo que también usa Twelve Data y corre en paralelo), se corta acá:
+      // ni este timeframe ni los que faltan van a conseguir datos hasta que se levante el
+      // cooldown, así que seguir intentando solo gasta cupo diario en pedidos sin chance.
+      if (isProviderInCooldown('twelveData')) {
+        console.warn(`Backtest: twelveData en cooldown, se corta ${symbol} en ${tf} (y los timeframes/símbolos restantes de esta corrida)`);
+        break;
+      }
       try {
         const candles = await this.fetchCandles(symbol, tf);
         if (!candles || !candles.length) continue;
@@ -1689,6 +1745,12 @@ const BacktestEngine = {
         allCustomEvents = allCustomEvents.concat(customEvents);
       } catch (e) {
         console.warn(`Backtest: no se pudo traer historial de ${symbol} en ${tf}:`, e.message);
+        // FIX: antes este catch no aplicaba ningún cooldown — fetchCandlesTwelveData no
+        // pasaba por el mismo mecanismo que ya usa el path en vivo (MarketDataProvider).
+        // markProviderCooldown ya sabe interpretar "HTTP 429" (10 min de cooldown); para
+        // cualquier otro tipo de error (ej. timeout puntual) getProviderCooldownMs
+        // devuelve null y esta llamada no hace nada.
+        markProviderCooldown('twelveData', e.message);
       }
       // Espacio entre cada pedido de historial (símbolo x temporalidad) para no saturar
       // el límite de consultas por minuto de TwelveData/CryptoCompare en el plan gratuito.
@@ -1721,14 +1783,34 @@ const BacktestEngine = {
     if (state.backtestRunning) return;
     const cfg = CONFIG.BACKTEST;
     const lastRun = parseInt(localStorage.getItem('pt_backtest_last_run') || '0', 10);
+    // FIX: además del chequeo de 24hs sobre la última corrida EXITOSA (lastRun, sin
+    // cambios), se agrega un segundo chequeo sobre el último INTENTO (haya tenido éxito o
+    // no). Antes, si el backtest fallaba entero (0 resultados por 429 de Twelve Data),
+    // pt_backtest_last_run nunca se grababa y este gating de arriba nunca frenaba nada —
+    // cada redeploy volvía a intentarlo 2 minutos después de arrancar. Ver comentario de
+    // RETRY_INTERVAL_MS en CONFIG.BACKTEST para el detalle completo.
+    const lastAttempt = parseInt(localStorage.getItem('pt_backtest_last_attempt') || '0', 10);
     if (!force && Date.now() - lastRun < cfg.RERUN_INTERVAL_MS) { renderBacktestStatus(); return; }
+    if (!force && Date.now() - lastAttempt < cfg.RETRY_INTERVAL_MS) { renderBacktestStatus(); return; }
     state.backtestRunning = true;
+    // Se graba ACÁ (apenas se decide correr, antes de intentar nada) y no al final —
+    // así, aunque el proceso se caiga a mitad de la corrida, el próximo arranque igual
+    // respeta el RETRY_INTERVAL_MS en vez de reintentar de inmediato.
+    localStorage.setItem('pt_backtest_last_attempt', String(Date.now()));
     renderBacktestStatus();
     const results = {};
     try {
       for (const symbol of cfg.SYMBOLS) {
         const r = await this.runSymbol(symbol);
         if (r) results[symbol] = r;
+        // FIX: si twelveData quedó en cooldown durante este símbolo, todos los símbolos
+        // restantes comparten el mismo proveedor y van a fallar exactamente igual hasta
+        // que se levante — cortar acá ahorra cupo diario y tiempo de la corrida en vez de
+        // barrer los símbolos que faltan solo para confirmar el mismo fallo de nuevo.
+        if (isProviderInCooldown('twelveData')) {
+          console.warn('Backtest: twelveData en cooldown, se corta la corrida completa (símbolos restantes sin procesar esta vez)');
+          break;
+        }
         await sleep(6000); // espacio entre activos, mismo motivo que arriba
       }
       if (Object.keys(results).length) {
