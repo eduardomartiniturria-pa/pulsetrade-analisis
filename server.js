@@ -143,17 +143,51 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     catch (e) { return []; }
   }
 
+  // CAMBIO (13/8, módulo de historial visual): antes strategyBreakdown solo traía
+  // {key, count, pct} — cuántas señales cerradas (ganadas+perdidas juntas) aportó cada
+  // estrategia al total del período, sin distinguir cuántas de esas fueron ganadas o
+  // perdidas. Para el desglose activo→estrategia (winrate por estrategia) hace falta
+  // wins/losses/winRate reales por estrategia, no solo el conteo. Se agregan esos campos
+  // sin sacar ninguno de los que ya existían.
   function summarizeClosedSignals(entries) {
     const wins = entries.filter(e => e.result === 'win').length;
     const losses = entries.filter(e => e.result === 'loss').length;
     const total = wins + losses;
     const winRate = total ? +((wins / total) * 100).toFixed(1) : null;
     const byStrategy = {};
-    entries.forEach(e => { const key = e.source || 'smc'; byStrategy[key] = (byStrategy[key] || 0) + 1; });
+    entries.forEach(e => {
+      const key = e.source || 'smc';
+      if (!byStrategy[key]) byStrategy[key] = { wins: 0, losses: 0 };
+      if (e.result === 'win') byStrategy[key].wins++;
+      else if (e.result === 'loss') byStrategy[key].losses++;
+    });
     const strategyBreakdown = Object.entries(byStrategy)
-      .map(([key, count]) => ({ key, count, pct: total ? +((count / total) * 100).toFixed(1) : 0 }))
+      .map(([key, s]) => {
+        const stotal = s.wins + s.losses;
+        return {
+          key, wins: s.wins, losses: s.losses, count: stotal,
+          winRate: stotal ? +((s.wins / stotal) * 100).toFixed(1) : null,
+          pct: total ? +((stotal / total) * 100).toFixed(1) : 0
+        };
+      })
       .sort((a, b) => b.count - a.count);
     return { wins, losses, total, winRate, strategyBreakdown };
+  }
+
+  // Mismo resumen que arriba, pero separado por activo (BTCUSD/ETHUSD/EURUSD/XAUUSD) —
+  // para la navegación Período → Activo → Estrategia del módulo de historial. Reutiliza
+  // summarizeClosedSignals sobre el subconjunto de entries de cada símbolo, así la lógica
+  // de cálculo de winrate/strategyBreakdown queda en un solo lugar.
+  function groupBySymbol(entries) {
+    const bySymbol = {};
+    entries.forEach(e => {
+      const sym = e.symbol || 'unknown';
+      if (!bySymbol[sym]) bySymbol[sym] = [];
+      bySymbol[sym].push(e);
+    });
+    const result = {};
+    Object.keys(bySymbol).forEach(sym => { result[sym] = summarizeClosedSignals(bySymbol[sym]); });
+    return result;
   }
 
   // Lista de días que tienen al menos una señal cerrada — así el panel arma la lista
@@ -194,7 +228,11 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     const dayKeys = days.map(localDayKeyFromDate);
     const entries = dayKeys.flatMap(getClosedSignalsForDay);
     const summary = summarizeClosedSignals(entries);
-    res.json({ period, anchor: date, days: dayKeys, ...summary });
+    // bySymbol: mismo resumen (wins/losses/winRate/strategyBreakdown) pero recortado a
+    // cada activo — así el panel puede mostrar primero el total del período y, al
+    // elegir un activo, el desglose por estrategia de ESE activo únicamente.
+    const bySymbol = groupBySymbol(entries);
+    res.json({ period, anchor: date, days: dayKeys, ...summary, bySymbol });
   });
 
   // Usado por el "pinger" externo (cron-job.org) para mantener despierto el server gratuito
