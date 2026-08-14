@@ -2065,29 +2065,60 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
   state.signalHistory.forEach(h => {
     if (h.symbol !== symbol || h.result !== 'pending') return;
     const isLong = h.type === 'long';
-    const rWin = (h.tp1Pips && h.slPips) ? +(h.tp1Pips / h.slPips).toFixed(2) : 2;
+    // FIX (TP1 vs TP2 — resultado y R grabados no coincidían con el cierre real de la
+    // señal en vivo): esta función solo comparaba contra `tp1`, así que en cuanto el
+    // precio tocaba TP1 la entrada quedaba 'win' con rMultiple = tp1Pips/slPips — para
+    // las estrategias que definen tp2 (Pivots Breakout & Reversal, EMA Cross Scalping,
+    // RSI Divergence, Bollinger Squeeze), eso contradecía a evaluateCustomSignalOutcome()
+    // (la que maneja el badge en vivo), que SÍ espera a tp2 antes de cerrar la señal
+    // activa. El winrate grabado en closed_signals no cambia (tocar TP1 ya es ganar),
+    // pero el R quedaba subestimado cada vez que el precio seguía hasta TP2 — y
+    // runAutoTuneForKey() usa ese R (expectancy) para ajustar el umbral de confianza de
+    // cada estrategia, así que venía decidiendo con una expectativa más baja que la real.
+    // Ahora, si la señal define tp2, se espera a tp2 (o SL) para cerrar, igual que en
+    // vivo; si no define tp2, se cierra en tp1 como antes.
+    const hasTP2 = h.tp2 !== undefined && h.tp2 !== null;
+    const rTP1 = (h.tp1Pips && h.slPips) ? +(h.tp1Pips / h.slPips).toFixed(2) : 2;
+    const rTP2 = (hasTP2 && h.tp2Pips && h.slPips) ? +(h.tp2Pips / h.slPips).toFixed(2) : null;
     let outcome = null;
+    let rHit = rTP1;
     const relevantCandles = (candles || []).filter(c => c.time >= h.timestamp);
     if (relevantCandles.length) {
       for (const c of relevantCandles) {
         const hitSL = isLong ? c.low <= h.sl : c.high >= h.sl;
-        const hitTP = isLong ? c.high >= h.tp1 : c.low <= h.tp1;
-        if (hitSL) { outcome = 'loss'; break; }
-        if (hitTP) { outcome = 'win'; break; }
+        const hitTP1 = isLong ? c.high >= h.tp1 : c.low <= h.tp1;
+        const hitTP2 = hasTP2 && (isLong ? c.high >= h.tp2 : c.low <= h.tp2);
+        // SL corta la operación apenas se toca, tenga o no tp2 definido (misma
+        // prioridad que ya usaba el código original).
+        if (hitSL) { outcome = 'loss'; rHit = -1; break; }
+        if (hasTP2) {
+          if (hitTP2) { outcome = 'win'; rHit = rTP2; break; }
+          // TP1 tocado pero tp2 sigue pendiente: no cierra todavía, se sigue vigilando
+          // en las velas siguientes (sin `break`), igual que en vivo.
+        } else if (hitTP1) {
+          outcome = 'win'; rHit = rTP1; break;
+        }
       }
     }
-    // FIX: antes este chequeo contra currentPrice solo corría en el `else` (cuando
-    // relevantCandles.length === 0), caso que casi nunca se da — con solo que UNA vela
-    // reciente exista en el fetch (siempre hay alguna), el filtro por timestamp entraba
-    // ahí y el fallback nunca se ejecutaba para señales viejas. Ahora corre siempre que
-    // el loop de velas no encontró nada, así una señal cuyo cruce de SL/TP quedó fuera
-    // de la ventana de ~100 velas fetcheadas igual se resuelve si el precio ACTUAL ya
-    // está más allá del nivel (aunque no sepamos el instante exacto en que lo cruzó).
+    // FIX previo (se mantiene): antes este chequeo contra currentPrice solo corría en el
+    // `else` (cuando relevantCandles.length === 0), caso que casi nunca se da — con solo
+    // que UNA vela reciente exista en el fetch (siempre hay alguna), el filtro por
+    // timestamp entraba ahí y el fallback nunca se ejecutaba para señales viejas. Ahora
+    // corre siempre que el loop de velas no resolvió nada, así una señal cuyo cruce de
+    // SL/TP quedó fuera de la ventana de ~100 velas fetcheadas igual se resuelve si el
+    // precio ACTUAL ya está más allá del nivel correspondiente (tp2 si hay, si no tp1).
     if (!outcome) {
-      if (isLong && currentPrice >= h.tp1) outcome = 'win';
-      else if (isLong && currentPrice <= h.sl) outcome = 'loss';
-      else if (!isLong && currentPrice <= h.tp1) outcome = 'win';
-      else if (!isLong && currentPrice >= h.sl) outcome = 'loss';
+      if (hasTP2) {
+        if (isLong && currentPrice >= h.tp2) { outcome = 'win'; rHit = rTP2; }
+        else if (!isLong && currentPrice <= h.tp2) { outcome = 'win'; rHit = rTP2; }
+        else if (isLong && currentPrice <= h.sl) { outcome = 'loss'; rHit = -1; }
+        else if (!isLong && currentPrice >= h.sl) { outcome = 'loss'; rHit = -1; }
+      } else {
+        if (isLong && currentPrice >= h.tp1) { outcome = 'win'; rHit = rTP1; }
+        else if (isLong && currentPrice <= h.sl) { outcome = 'loss'; rHit = -1; }
+        else if (!isLong && currentPrice <= h.tp1) { outcome = 'win'; rHit = rTP1; }
+        else if (!isLong && currentPrice >= h.sl) { outcome = 'loss'; rHit = -1; }
+      }
     }
     // Si sigue sin resolverse y ya pasó la ventana máxima (ver CONFIG.SIGNAL_EXPIRATION_MS),
     // el precio nunca volvió a cruzar SL/TP dentro de lo que podemos observar — no queda
@@ -2095,10 +2126,10 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
     // operativo). Se marca 'expired': no cuenta como win/loss en stats (ver
     // updateStrategyStatsBySymbol/updatePatternStats, que solo suman win/loss).
     if (!outcome && (Date.now() - h.timestamp) > CONFIG.SIGNAL_EXPIRATION_MS) {
-      outcome = 'expired';
+      outcome = 'expired'; rHit = 0;
     }
     if (outcome) {
-      h.result = outcome; h.rMultiple = outcome === 'win' ? rWin : (outcome === 'loss' ? -1 : 0); changed = true; resolvedEntries.push(h);
+      h.result = outcome; h.rMultiple = rHit; changed = true; resolvedEntries.push(h);
     }
   });
   if (changed) {
