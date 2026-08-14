@@ -617,16 +617,46 @@ function detectSupplyDemand(candles, htfCandles) {
 }
 
 // ---------------------------------------------------------
-// ESTRATEGIA 5: EMA CROSS SCALPING (EMA9/EMA21 + RSI + MACD)
+// ESTRATEGIA 5: EMA CROSS SCALPING (EMA9/EMA21 + RSI + MACD + tendencia HTF)
 // ---------------------------------------------------------
 // Nota: la infografía de origen promociona "90% win rate" — eso es marketing
 // de plantilla, no un resultado verificable. Se implementa la lógica tal
-// cual el Pine Script (cruce + filtros RSI/MACD + TP 2% / SL 1% fijos),
-// sin ninguna expectativa de ese winrate.
+// cual el Pine Script (cruce + filtros RSI/MACD + TP 2% / SL 1% fijos).
 // Parámetros: EMA9, EMA21, RSI14 (>50 compra / <50 venta), MACD(12,26,9)
 // SL = 1% fijo / TP1 = 2% fijo (RR 1:2)
+//
+// FIX (auditoría de estrategias, sesión 14/8): un cruce de EMA en aislamiento
+// es un indicador rezagado — backtests cuantitativos publicados lo ubican
+// cerca de 47-51% de winrate (cruce 50/200 EMA: 51%, PF 1.31; golden cross
+// diario: 49%), contra 61-64% de las entradas por order block del framework
+// SMC en el mismo dataset — prácticamente una moneda al aire una vez
+// descontado el spread. Apilar más indicadores rezagados (ya tenía RSI+MACD)
+// no corrige eso. Lo que sí tiene soporte es exigir que el cruce vaya a
+// favor de la tendencia del timeframe mayor (HTF): ahí deja de ser "cruce
+// de EMA como señal" y pasa a ser "cruce de EMA como confirmación de
+// entrada dentro de una tendencia ya establecida", que es el uso de medias
+// móviles con evidencia real detrás. Downgrade de disparador independiente
+// a filtro de confluencia: si no hay htfCandles disponibles (falla el fetch,
+// activo sin HTF_MAP), la estrategia queda desactivada ese ciclo — antes
+// prefería una señal sin confirmar a ninguna señal, ahora es al revés.
 
-function detectEmaCrossScalping(candles) {
+// Devuelve 'up', 'down' o null (datos insuficientes) según la pendiente de
+// la EMA50 del timeframe mayor. Se usa como filtro de confluencia para
+// estrategias basadas en indicadores rezagados, que solo tienen buen
+// respaldo cuando confirman una tendencia ya establecida, no cuando
+// disparan en aislamiento.
+function getHtfTrendDirection(htfCandles) {
+  if (!htfCandles || htfCandles.length < 55) return null;
+  const emaHtf = calculateEMASeries(htfCandles, 50);
+  const i = htfCandles.length - 1;
+  const now = emaHtf[i], back = emaHtf[i - 5];
+  if (now === null || back === null) return null;
+  if (now > back) return 'up';
+  if (now < back) return 'down';
+  return null;
+}
+
+function detectEmaCrossScalping(candles, htfCandles = null) {
   const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null };
   if (!candles || candles.length < 30) return result;
 
@@ -643,23 +673,29 @@ function detectEmaCrossScalping(candles) {
 
   if (fastNow === null || slowNow === null || fastPrev === null || slowPrev === null || rsiNow === null || macdNow === null || signalNow === null) return result;
 
+  const htfTrend = getHtfTrendDirection(htfCandles);
+  if (htfTrend === null) {
+    result.details.push('Sin datos de tendencia HTF disponibles — señal omitida (requiere confluencia)');
+    return result;
+  }
+
   const crossUp = fastPrev <= slowPrev && fastNow > slowNow;
   const crossDown = fastPrev >= slowPrev && fastNow < slowNow;
 
   const last = candles[i];
 
-  if (crossUp && rsiNow > 50 && macdNow > signalNow) {
+  if (crossUp && rsiNow > 50 && macdNow > signalNow && htfTrend === 'up') {
     result.bullish = true;
     result.entry = last.close;
     result.sl = result.entry * (1 - 0.01);  // 1% SL, tal cual el Pine Script
     result.tp1 = result.entry * (1 + 0.02); // 2% TP, RR 1:2
-    result.details.push(`Cruce EMA9>EMA21 + RSI ${rsiNow.toFixed(1)} (>50) + MACD alcista`);
-  } else if (crossDown && rsiNow < 50 && macdNow < signalNow) {
+    result.details.push(`Cruce EMA9>EMA21 + RSI ${rsiNow.toFixed(1)} (>50) + MACD alcista + tendencia HTF alcista`);
+  } else if (crossDown && rsiNow < 50 && macdNow < signalNow && htfTrend === 'down') {
     result.bearish = true;
     result.entry = last.close;
     result.sl = result.entry * (1 + 0.01);
     result.tp1 = result.entry * (1 - 0.02);
-    result.details.push(`Cruce EMA9<EMA21 + RSI ${rsiNow.toFixed(1)} (<50) + MACD bajista`);
+    result.details.push(`Cruce EMA9<EMA21 + RSI ${rsiNow.toFixed(1)} (<50) + MACD bajista + tendencia HTF bajista`);
   }
 
   return result;
@@ -683,12 +719,23 @@ function detectEmaCrossScalping(candles) {
 //     Sin esa confirmación, la divergencia queda "abierta" y no dispara nada.
 //   - SL: por debajo/encima del extremo de precio del pivot actual (con
 //     colchón de 0.5%). TP1 = riesgo x2 (RR 1:2). TP2 = riesgo x3.
+//
+// FIX (auditoría de estrategias, sesión 14/8): la divergencia RSI sola tiene
+// evidencia floja como disparador independiente — se vuelve mucho más
+// confiable cuando el pivot de precio donde se mide la divergencia ocurre en
+// un nivel realmente estirado, no en cualquier mínimo/máximo local menor. Se
+// agrega como filtro de confluencia obligatorio que el precio en ESE pivot
+// haya tocado o superado la banda de Bollinger (SMA20 +/- 2 desvíos)
+// correspondiente — "divergencia + nivel estadísticamente extendido", no
+// divergencia sola. Downgrade de disparador independiente a señal que exige
+// confluencia con otro indicador antes de emitirse.
 
 function detectRsiDivergence(candles) {
   const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null };
   if (!candles || candles.length < 60) return result;
 
   const rsi = calculateRSISeries(candles, 14);
+  const { upper: bbUpper, lower: bbLower } = calculateBollingerSeries(candles, 20, 2);
   const i = candles.length - 1;
   const last = candles[i];
   const rsiNow = rsi[i], rsiPrev = rsi[i - 1];
@@ -703,7 +750,9 @@ function detectRsiDivergence(candles) {
     const priorPL = PL[PL.length - 2];
     const rsiAtLast = rsi[lastPL.index];
     const rsiAtPrior = rsi[priorPL.index];
-    if (rsiAtLast !== null && rsiAtPrior !== null) {
+    const bbLowerAtPivot = bbLower[lastPL.index];
+    const touchedLowerBand = bbLowerAtPivot !== null && lastPL.price <= bbLowerAtPivot;
+    if (rsiAtLast !== null && rsiAtPrior !== null && touchedLowerBand) {
       const priceLL = lastPL.price < priorPL.price;
       const rsiHL = rsiAtLast > rsiAtPrior;
       const rsiCrossUp30 = rsiPrev <= 30 && rsiNow > 30;
@@ -711,7 +760,7 @@ function detectRsiDivergence(candles) {
         result.bullish = true;
         result.entry = last.close;
         result.sl = Math.min(lastPL.price, last.low) * 0.995;
-        result.details.push(`Divergencia alcista RSI: precio LL (${lastPL.price.toFixed(2)}) vs RSI HL (${rsiAtPrior.toFixed(1)}→${rsiAtLast.toFixed(1)}), confirmación cruzando 30`);
+        result.details.push(`Divergencia alcista RSI en banda inferior de Bollinger: precio LL (${lastPL.price.toFixed(2)}) vs RSI HL (${rsiAtPrior.toFixed(1)}→${rsiAtLast.toFixed(1)}), confirmación cruzando 30`);
       }
     }
   }
@@ -722,7 +771,9 @@ function detectRsiDivergence(candles) {
     const priorPH = PH[PH.length - 2];
     const rsiAtLast = rsi[lastPH.index];
     const rsiAtPrior = rsi[priorPH.index];
-    if (rsiAtLast !== null && rsiAtPrior !== null) {
+    const bbUpperAtPivot = bbUpper[lastPH.index];
+    const touchedUpperBand = bbUpperAtPivot !== null && lastPH.price >= bbUpperAtPivot;
+    if (rsiAtLast !== null && rsiAtPrior !== null && touchedUpperBand) {
       const priceHH = lastPH.price > priorPH.price;
       const rsiLH = rsiAtLast < rsiAtPrior;
       const rsiCrossDown70 = rsiPrev >= 70 && rsiNow < 70;
@@ -730,7 +781,7 @@ function detectRsiDivergence(candles) {
         result.bearish = true;
         result.entry = last.close;
         result.sl = Math.max(lastPH.price, last.high) * 1.005;
-        result.details.push(`Divergencia bajista RSI: precio HH (${lastPH.price.toFixed(2)}) vs RSI LH (${rsiAtPrior.toFixed(1)}→${rsiAtLast.toFixed(1)}), confirmación cruzando 70`);
+        result.details.push(`Divergencia bajista RSI en banda superior de Bollinger: precio HH (${lastPH.price.toFixed(2)}) vs RSI LH (${rsiAtPrior.toFixed(1)}→${rsiAtLast.toFixed(1)}), confirmación cruzando 70`);
       }
     }
   }
@@ -883,10 +934,13 @@ function evaluateAll(candles, symbol, asset, htfCandles = null) {
     });
   }
 
-  const emaScalp = safeRun('ema_cross_scalping', detectEmaCrossScalping, candles);
+  // FIX (auditoría de estrategias, sesión 14/8): ahora recibe htfCandles y exige
+  // confluencia con la tendencia del timeframe mayor (ver detectEmaCrossScalping) —
+  // sin eso, no dispara. Ya no es un disparador puramente independiente.
+  const emaScalp = safeRun('ema_cross_scalping', detectEmaCrossScalping, candles, htfCandles);
   if (emaScalp.bullish || emaScalp.bearish) {
     signals.push({
-      strategy: 'ema_cross_scalping', label: 'EMA Cross Scalping (RSI+MACD)',
+      strategy: 'ema_cross_scalping', label: 'EMA Cross Scalping (RSI+MACD+HTF)',
       direction: emaScalp.bullish ? 'long' : 'short', entry: emaScalp.entry, sl: emaScalp.sl, tp1: emaScalp.tp1,
       details: emaScalp.details, independent: true
     });
