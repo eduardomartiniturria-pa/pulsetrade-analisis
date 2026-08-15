@@ -2390,7 +2390,23 @@ function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
   if (hitTP1Now && !frozen.tp1HitAt) frozen.tp1HitAt = Date.now();
   const hitTP1 = hitTP1Now || !!frozen.tp1HitAt;
 
-  const shouldClose = hitSL || hitTP2 || (hitTP1 && frozen.tp2 == null);
+  // FIX (expiración corta de scalping no se aplicaba acá): CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY
+  // (4hs para ema_cross_scalping/ny_open_kill_zone) se había agregado únicamente en
+  // checkHistoryOutcomes(), que resuelve `state.signalHistory` — una estructura capada a
+  // 50 entradas COMPARTIDAS entre las 4 símbolos y las 8 estrategias, usada para el
+  // historial persistido y las estadísticas. Pero el display "en vivo" que ves en el
+  // panel (y que decide si una estrategia puede volver a disparar) lee de
+  // `state.activeCustomSignals`, una estructura APARTE que solo esta función
+  // (evaluateCustomSignalOutcome) limpia — y nunca chequeaba antigüedad, solo SL/TP2/TP1.
+  // Resultado confirmado con evidencia real: señales de EMA Cross Scalping en BTCUSD/ETHUSD
+  // (mercado 24/7, sin excusa de fin de semana) seguían "activas" a las 8-12hs, muy por
+  // encima del límite de 4hs, porque esta función nunca se enteraba de esa regla. Ahora
+  // expira acá también, con el mismo criterio (umbral por `frozen.source`, cae al general
+  // si no hay uno específico).
+  const expirationMs = (CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY && CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY[frozen.source]) || CONFIG.SIGNAL_EXPIRATION_MS;
+  const isExpired = !hitSL && !hitTP2 && !(hitTP1 && frozen.tp2 == null) && (Date.now() - frozen.timestamp) > expirationMs;
+
+  const shouldClose = hitSL || hitTP2 || (hitTP1 && frozen.tp2 == null) || isExpired;
   if (shouldClose) {
     delete state.activeCustomSignals[key];
     try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
