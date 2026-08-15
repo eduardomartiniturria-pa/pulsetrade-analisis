@@ -120,6 +120,17 @@ const CONFIG = {
   // resultado con los datos disponibles, se marca 'expired' en vez de dejarla eternamente
   // pendiente (no cuenta como win ni loss en las estadísticas por estrategia).
   SIGNAL_EXPIRATION_MS: 72 * 60 * 60 * 1000,
+  // Excepción al umbral de arriba: ema_cross_scalping y ny_open_kill_zone son estrategias
+  // pensadas para movimientos rápidos (scalping / ventana de apertura NY 9:30-9:45). El
+  // setup que justificó la entrada deja de ser válido mucho antes de las 72hs del umbral
+  // general, aunque el precio técnicamente no haya tocado SL ni TP todavía. Con 4hs alcanza
+  // de sobra para lo que estas dos estrategias buscan capturar; el resto de las estrategias
+  // (SMC, swing) sigue usando SIGNAL_EXPIRATION_MS sin cambios. Clave = h.source /
+  // strategyKeys[0] (ver custom-strategies.js, campo `strategy` de cada resultado).
+  SIGNAL_EXPIRATION_MS_BY_STRATEGY: {
+    ema_cross_scalping: 4 * 60 * 60 * 1000,
+    ny_open_kill_zone: 4 * 60 * 60 * 1000
+  },
   // Refresco dinámico: cada 15 min en horario normal (para no saturar rate limits),
   // pero cada 1 min dentro de la ventana Kill Zone NY (10:30-13:30 hora Argentina),
   // para no perderse el detalle de la vela de apertura ni la Bala de Plata.
@@ -2125,7 +2136,8 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
     // 'pending' indefinidamente (aparecía como señales "en curso" de días atrás, sin sentido
     // operativo). Se marca 'expired': no cuenta como win/loss en stats (ver
     // updateStrategyStatsBySymbol/updatePatternStats, que solo suman win/loss).
-    if (!outcome && (Date.now() - h.timestamp) > CONFIG.SIGNAL_EXPIRATION_MS) {
+    const expirationMs = (CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY && CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY[h.source]) || CONFIG.SIGNAL_EXPIRATION_MS;
+    if (!outcome && (Date.now() - h.timestamp) > expirationMs) {
       outcome = 'expired'; rHit = 0;
     }
     if (outcome) {
