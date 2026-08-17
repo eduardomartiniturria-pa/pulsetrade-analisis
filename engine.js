@@ -2404,7 +2404,13 @@ function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
   // expira acá también, con el mismo criterio (umbral por `frozen.source`, cae al general
   // si no hay uno específico).
   const expirationMs = (CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY && CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY[frozen.source]) || CONFIG.SIGNAL_EXPIRATION_MS;
-  const isExpired = !hitSL && !hitTP2 && !(hitTP1 && frozen.tp2 == null) && (Date.now() - frozen.timestamp) > expirationMs;
+  const ageMs = Date.now() - frozen.timestamp;
+  const isExpired = !hitSL && !hitTP2 && !(hitTP1 && frozen.tp2 == null) && ageMs > expirationMs;
+
+  // LOG TEMPORAL DE DIAGNÓSTICO — sacar una vez que se confirme por qué las señales de
+  // scalping no expiran ni cierran por SL en el display en vivo (activeCustomSignals),
+  // pese a que la lógica se revisó línea por línea y por inspección parece correcta.
+  console.log(`[DIAG evaluateCustomSignalOutcome] ${key} | source=${frozen.source} | quote.last=${quote.last} | sl=${frozen.sl} | tp1=${frozen.tp1} | tp2=${frozen.tp2} | hitSL=${hitSL} | hitTP1=${hitTP1} | hitTP2=${hitTP2} | ageMs=${ageMs} (${(ageMs/3600000).toFixed(2)}h) | expirationMs=${expirationMs} (${(expirationMs/3600000).toFixed(2)}h) | isExpired=${isExpired}`);
 
   const shouldClose = hitSL || hitTP2 || (hitTP1 && frozen.tp2 == null) || isExpired;
   if (shouldClose) {
@@ -2441,7 +2447,11 @@ function refreshActiveCustomSignalsDisplay(symbol, quote, skipStrategies = new S
     if (!key.startsWith(symbol + '_')) return;
     const frozen = state.activeCustomSignals[key];
     if (!frozen) return;
-    if (skipStrategies.has(frozen.strategyKeys[0])) return; // ya se renderizó arriba, en este mismo ciclo
+    if (skipStrategies.has(frozen.strategyKeys[0])) {
+      console.log(`[DIAG refreshActiveCustomSignalsDisplay] ${key} SALTEADA (ya disparó de nuevo este ciclo, strategyKey=${frozen.strategyKeys[0]})`);
+      return;
+    }
+    console.log(`[DIAG refreshActiveCustomSignalsDisplay] ${key} entrando a evaluateCustomSignalOutcome`);
     const display = evaluateCustomSignalOutcome(symbol, key, quote, frozen);
     renderCustomSignal(symbol, frozen.strategyKeys[0], display);
   });
