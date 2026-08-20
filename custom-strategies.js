@@ -3,18 +3,19 @@
 // ============================================================
 // Estas 8 estrategias (Kill Zone Apertura NY, Pivots Breakout & Reversal,
 // Price Action + RSI + EMA, Supply and Demand, EMA Cross Scalping,
-// Divergencia RSI, Bollinger Squeeze, ETH VWAP Trend Scalp) NO pasan por
-// SMCEngine.evalSide() ni por los filtros globales de confluencia
-// (premium/discount, HTF trend, etc). Cada una se evalúa por sí sola, con
-// su propia gestión de riesgo, tal como fueron definidas.
+// Divergencia RSI, Bollinger Squeeze, ETH VWAP Trend Scalp) son el único
+// motor de señales del engine — no pasan por ningún filtro global de
+// confluencia (premium/discount, HTF trend, etc). Cada una se evalúa por
+// sí sola, con su propia gestión de riesgo, tal como fueron definidas.
 // (Sesión 19/8: se sacaron EUR London Pullback VWAP y XAU VWAP Reversion
 // Scalp por usar datos de volumen simulados/estimados en OTC — decisión
-// del usuario de operar solo con datos reales. El motor SMC se saca aparte,
-// en engine.js, pendiente de esa entrega.)
+// del usuario de operar solo con datos reales. El motor SMC se eliminó
+// por completo de engine.js el mismo día — v4.5, ver changelog en el
+// encabezado de ese archivo — así que estas 8 ya no comparten ciclo con
+// ningún análisis SMC: son la única fuente de señales.)
 //
-// Cómo integrar en engine.js:
+// Cómo se integra en engine.js (dentro de refreshAsset(), en cada ciclo):
 //   const CustomStrategies = require('./custom-strategies');
-//   ... dentro de refreshAsset(), después de calcular `analysis`:
 //   const customSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfOhlcv?.candles);
 //   customSignals.forEach(sig => resolveCustomSignal(symbol, quote, sig, asset));
 // (resolveCustomSignal vive en engine.js, no en este archivo)
@@ -1031,10 +1032,17 @@ function detectEthVwapScalp(candles, htfCandles) {
   const vwapSlopeUp = vwap[i] > vwap[i - 5];
   const vwapSlopeDown = vwap[i] < vwap[i - 5];
 
+  // FIX (sesión 19/8): isPinBar() solo reconoce el string 'bull' para el lado alcista
+  // (cualquier otro valor, incluido 'bullish', cae en su rama else = mecha superior =
+  // forma bajista). Estaba llamado como isPinBar(last, 'bullish')/isPinBar(last,
+  // 'bearish') acá abajo: el lado LONG (SETUP 1) pedía por error el patrón de vela
+  // BAJISTA para confirmar una entrada alcista, así que casi nunca calzaba con un
+  // reclaim de VWAP real — el lado SHORT no tenía el problema (coincidía con la rama
+  // else por casualidad), pero se normalizó también a 'bear' por consistencia.
   // --- SETUP 1: reclaim de VWAP ---
   if (h1.bias === 'long' && vwapSlopeUp) {
     const pulledBack = candles[i - 1].close < candles[i - 1].open && candles[i - 2].close < candles[i - 2].open;
-    const rejection = isPinBar(last, 'bullish') && last.close > vwap[i];
+    const rejection = isPinBar(last, 'bull') && last.close > vwap[i];
     if (pulledBack && rejection) {
       result.bullish = true; result.mode = 'vwap_reclaim';
       result.entry = last.close;
@@ -1046,7 +1054,7 @@ function detectEthVwapScalp(candles, htfCandles) {
     }
   } else if (h1.bias === 'short' && vwapSlopeDown) {
     const pulledBack = candles[i - 1].close > candles[i - 1].open && candles[i - 2].close > candles[i - 2].open;
-    const rejection = isPinBar(last, 'bearish') && last.close < vwap[i];
+    const rejection = isPinBar(last, 'bear') && last.close < vwap[i];
     if (pulledBack && rejection) {
       result.bearish = true; result.mode = 'vwap_reclaim';
       result.entry = last.close;
