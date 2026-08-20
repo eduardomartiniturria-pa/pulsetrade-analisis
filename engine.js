@@ -1,5 +1,5 @@
 // ============================================================
-// PULSE TRADE v4.1 - MOTOR DE SEÑALES PROFESIONAL (CORREGIDO PARA RENDER)
+// PULSE TRADE v4.5 - MOTOR DE SEÑALES PROFESIONAL (CORREGIDO PARA RENDER)
 // ============================================================
 // Cambios vs v4.0:
 // - Binance Spot va primero para crypto (API pública, sin key, sin rate limit estricto)
@@ -96,6 +96,24 @@
 //   (RequestTracker.getUsage('twelveData')) antes de intentar cada timeframe: si la
 //   cuota diaria ya está agotada, corta sin gastar ni ese último crédito en un pedido
 //   sin ninguna chance de éxito.
+//
+// Cambios v4.5 (eliminación de SMC, sesión 19/8):
+// - Se eliminó por completo el motor SMC (clase SMCEngine: CHoCH/BOS/OB/FVG/Sweep/
+//   Bandas Reversión/Patrón V/Kill Zone NY, más SignalEngine, detectMarketRegime(),
+//   resolveActiveSignal(), y el bloque de análisis SMC dentro de refreshAsset()).
+//   Decisión del usuario: no lo considera una estrategia real, y en una semana de
+//   prueba dio 1 ganada / 4 perdidas sobre 5 señales (muestra chica, advertencia dada
+//   y aceptada). El motor ahora corre exclusivamente las 8 estrategias INDEPENDIENTES
+//   de custom-strategies.js: Kill Zone Apertura NY, Pivots Breakout & Reversal, Price
+//   Action + RSI + EMA, Supply and Demand, EMA Cross Scalping, Divergencia RSI,
+//   Bollinger Squeeze Breakout y ETH VWAP Trend Scalp (las estrategias VWAP OTC de
+//   EUR/USD y XAU/USD se sacaron aparte, en custom-strategies.js, por usar volumen
+//   simulado). BacktestEngine se adaptó para calibrar y agregar solo resultados de
+//   estas 8 estrategias (simulate/calibrateThreshold/aggregatePatternStats de SMC
+//   eliminados). Se limpió además código muerto sin caller tras la eliminación:
+//   getThresholdForSymbol(), getEffectivePatternStats(), checkSpreadAnomaly(), y los
+//   campos de estado state.activeSignals/lastSignalAt/spreadHistory/backtestPatternStats/
+//   backtestAutoTune.
 // ============================================================
 
 const { sendPushToAll } = require('./subscriptions');
@@ -139,7 +157,6 @@ const CONFIG = {
     killZoneIntervalMs: 60 * 1000
   },
   HTF_MAP: { '5m': '1h', '15m': '1h' },
-  SPREAD_ANOMALY_MULTIPLIER: 2.5,
   AUTO_TUNE: {
     minSampleSize: 10,
     windowSize: 20,
@@ -263,8 +280,6 @@ let state = {
   signalHistory: (() => { try { return JSON.parse(localStorage.getItem('pt_v4_signals') || '[]'); } catch (e) { return []; } })(),
   providers: {}, providerStats: {}, currentProvider: null, autoRefresh: null,
   lastFetchTime: null, currentData: null, logs: [],
-  activeSignals: (() => { try { return JSON.parse(localStorage.getItem('pt_active_signals') || '{}'); } catch (e) { return {}; } })(),
-  lastSignalAt: (() => { try { return JSON.parse(localStorage.getItem('pt_last_signal_at') || '{}'); } catch (e) { return {}; } })(),
   // FIX (duplicados por reinicio): antes, activeCustomSignals/lastCustomSignalAt vivían
   // solo en memoria — cualquier reinicio del proceso (redeploy, o el plan free de Render
   // reiniciando el servicio) los reseteaba a {} sin avisar. Si el patrón que había
@@ -276,7 +291,6 @@ let state = {
   // Ahora se persisten igual que signalHistory, así sobreviven a un reinicio.
   activeCustomSignals: (() => { try { return JSON.parse(localStorage.getItem('pt_active_custom_signals') || '{}'); } catch (e) { return {}; } })(),
   lastCustomSignalAt: (() => { try { return JSON.parse(localStorage.getItem('pt_last_custom_signal_at') || '{}'); } catch (e) { return {}; } })(),
-  spreadHistory: (() => { try { return JSON.parse(localStorage.getItem('pt_spread_history') || '{}'); } catch (e) { return {}; } })(),
   autoConfidenceThreshold: (() => {
     try { const v2 = JSON.parse(localStorage.getItem('pt_auto_threshold_v2') || 'null'); if (v2 && typeof v2 === 'object') return v2; } catch (e) {}
     const legacy = parseFloat(localStorage.getItem('pt_auto_threshold'));
@@ -295,11 +309,7 @@ let state = {
   // con los resultados del backtest y después se suma cada señal en vivo que se resuelve
   // (ver checkHistoryOutcomes/updateStrategyStatsBySymbol).
   strategyStatsBySymbol: (() => { try { return JSON.parse(localStorage.getItem('pt_strategy_stats_by_symbol') || '{}'); } catch (e) { return {}; } })(),
-  backtestPatternStats: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_pattern_stats') || '{}'); } catch (e) { return {}; } })(),
-  backtestAutoTune: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_autotune') || '{}'); } catch (e) { return {}; } })(),
-  // Estadísticas de backtest de las 7 estrategias independientes (custom-strategies.js).
-  // Separado de backtestPatternStats/backtestAutoTune porque estas estrategias no usan
-  // confianza ni régimen (trending/ranging) como SMCEngine — solo gana/pierde por estrategia.
+  // Estadísticas de backtest de las 8 estrategias independientes (custom-strategies.js).
   backtestCustomStats: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_custom_stats') || '{}'); } catch (e) { return {}; } })(),
   backtestRunning: false,
   soundEnabled: localStorage.getItem('pt_sound_enabled') !== 'false',
@@ -338,61 +348,6 @@ function isArgKillZoneWindow(nowMs = Date.now()) {
 
 function getDynamicRefreshIntervalMs() {
   return isArgKillZoneWindow() ? CONFIG.DYNAMIC_REFRESH.killZoneIntervalMs : CONFIG.DYNAMIC_REFRESH.normalIntervalMs;
-}
-
-// Orden exacto de fallback para decidir qué umbral de confianza usar (de más específico
-// y confiable a más genérico), sin tocar la lógica de abajo:
-//   1º. Si se pasa un régimen (trending/ranging) y el auto-tune EN VIVO ya tiene muestra
-//       suficiente para ese símbolo+régimen (sampleSize >= minSampleSize), se usa ese
-//       umbral — es el más afinado posible, calibrado con operaciones reales de ESE
-//       símbolo en ESE tipo de mercado.
-//   2º. Si hay régimen pero el en vivo todavía no tiene muestra suficiente, se usa el
-//       umbral calibrado por el BACKTEST para ese símbolo+régimen (si existe).
-//   3º. Si no hay régimen (o ninguna de las dos anteriores devolvió nada), se mira el
-//       auto-tune EN VIVO general del símbolo (sin distinguir régimen): si tiene muestra
-//       suficiente, se salta directo al paso 5 (se usa el umbral ya guardado para el
-//       símbolo, que es justamente el que ese auto-tune en vivo fue ajustando).
-//   4º. Si el en vivo general tampoco tiene muestra suficiente, se prueba el umbral
-//       calibrado por el BACKTEST general del símbolo (sin régimen).
-//   5º. Si nada de lo anterior aplicó, cae al umbral guardado en
-//       state.autoConfidenceThreshold[symbol] (el último valor conocido, en vivo o no) o,
-//       en último caso, al default fijo CONFIG.CONFIDENCE_THRESHOLD (70).
-// En criollo: primero se confía en lo más reciente y específico (en vivo por régimen),
-// después en el backtest por régimen, después en lo en vivo general, después en el
-// backtest general, y solo si no hay nada de nada, en el número fijo de config.
-function getThresholdForSymbol(symbol, regime = null) {
-  const cfg = CONFIG.AUTO_TUNE;
-  if (regime && regime !== 'unknown') {
-    const regimeKey = symbol + '_' + regime;
-    const regimeStats = state.autoTuneStats[regimeKey];
-    if (regimeStats && regimeStats.sampleSize >= cfg.minSampleSize && state.autoConfidenceThreshold[regimeKey] != null) {
-      return state.autoConfidenceThreshold[regimeKey];
-    }
-    const btRegime = state.backtestAutoTune && state.backtestAutoTune[regimeKey];
-    if (btRegime && btRegime.threshold) return btRegime.threshold;
-  }
-  const liveStats = state.autoTuneStats[symbol];
-  const liveReady = liveStats && liveStats.sampleSize >= cfg.minSampleSize;
-  if (!liveReady) {
-    const bt = state.backtestAutoTune && state.backtestAutoTune[symbol];
-    if (bt && bt.threshold) return bt.threshold;
-  }
-  return (state.autoConfidenceThreshold && state.autoConfidenceThreshold[symbol]) || CONFIG.CONFIDENCE_THRESHOLD;
-}
-
-function getEffectivePatternStats() {
-  const cfg = CONFIG.AUTO_TUNE;
-  const merged = {};
-  const keys = new Set([...Object.keys(state.patternStats || {}), ...Object.keys(state.backtestPatternStats || {})]);
-  keys.forEach(key => {
-    const live = state.patternStats[key];
-    const liveTotal = live ? (live.wins || 0) + (live.losses || 0) : 0;
-    if (liveTotal >= cfg.PATTERN_MIN_SAMPLE) { merged[key] = live; return; }
-    const bt = state.backtestPatternStats[key];
-    if (bt) { merged[key] = bt; return; }
-    if (live) merged[key] = live;
-  });
-  return merged;
 }
 
 function saveAutoTuneState() {
@@ -988,579 +943,6 @@ const MarketDataProvider = {
   }
 };
 
-function detectMarketRegime(candles, period = 14) {
-  if (!candles || candles.length < period + 1) return 'unknown';
-  const slice = candles.slice(-(period + 1));
-  const netMove = Math.abs(slice[slice.length - 1].close - slice[0].close);
-  let volatilitySum = 0;
-  for (let i = 1; i < slice.length; i++) volatilitySum += Math.abs(slice[i].close - slice[i - 1].close);
-  if (volatilitySum === 0) return 'ranging';
-  const er = netMove / volatilitySum;
-  return er >= 0.35 ? 'trending' : 'ranging';
-}
-
-class SMCEngine {
-  static findSwingHighs(candles, leftBars = 3, rightBars = 3) {
-    const swings = [];
-    for (let i = leftBars; i < candles.length - rightBars; i++) {
-      let isSwing = true;
-      for (let j = 1; j <= leftBars; j++) if (candles[i].high <= candles[i-j].high) isSwing = false;
-      for (let j = 1; j <= rightBars; j++) if (candles[i].high <= candles[i+j].high) isSwing = false;
-      if (isSwing) swings.push({ index: i, price: candles[i].high, time: candles[i].time, type: 'high' });
-    }
-    return swings;
-  }
-
-  static findSwingLows(candles, leftBars = 3, rightBars = 3) {
-    const swings = [];
-    for (let i = leftBars; i < candles.length - rightBars; i++) {
-      let isSwing = true;
-      for (let j = 1; j <= leftBars; j++) if (candles[i].low >= candles[i-j].low) isSwing = false;
-      for (let j = 1; j <= rightBars; j++) if (candles[i].low >= candles[i+j].low) isSwing = false;
-      if (isSwing) swings.push({ index: i, price: candles[i].low, time: candles[i].time, type: 'low' });
-    }
-    return swings;
-  }
-
-  static detectBOS(candles, swingHighs, swingLows) {
-    if (!candles || candles.length < 10 || swingHighs.length < 2 || swingLows.length < 2) {
-      return { bullish: false, bearish: false, score: 0, details: [] };
-    }
-    const last = candles[candles.length - 1];
-    const lastSH = swingHighs[swingHighs.length - 1];
-    const lastSL = swingLows[swingLows.length - 1];
-    let bullish = false, bearish = false;
-    const details = [];
-    if (last.close > lastSH.price) { bullish = true; details.push('BOS alcista'); }
-    if (last.close < lastSL.price) { bearish = true; details.push('BOS bajista'); }
-    return { bullish, bearish, score: (bullish || bearish) ? 20 : 0, details };
-  }
-
-  static detectCHoCH(candles, swingHighs, swingLows) {
-    if (!candles || candles.length < 15 || swingHighs.length < 3 || swingLows.length < 3) {
-      return { bullish: false, bearish: false, score: 0, details: [] };
-    }
-    const last = candles[candles.length - 1];
-    const sh = swingHighs.slice(-3);
-    const sl = swingLows.slice(-3);
-    let bullish = false, bearish = false;
-    const details = [];
-    const lowerLows = sl[2].price < sl[1].price && sl[1].price < sl[0].price;
-    const lastLH = sh[sh.length - 1];
-    if (lowerLows && last.close > lastLH.price) { bullish = true; details.push('CHoCH alcista'); }
-    const higherHighs = sh[2].price > sh[1].price && sh[1].price > sh[0].price;
-    const lastHL = sl[sl.length - 1];
-    if (higherHighs && last.close < lastHL.price) { bearish = true; details.push('CHoCH bajista'); }
-    return { bullish, bearish, score: (bullish || bearish) ? 20 : 0, details };
-  }
-
-  static detectFVG(candles) {
-    if (!candles || candles.length < 4) return { bullish: false, bearish: false, score: 0, details: [], bullZone: null, bearZone: null };
-    const c1 = candles[candles.length - 4];
-    const c3 = candles[candles.length - 2];
-    const last = candles[candles.length - 1];
-    let bullish = false, bearish = false;
-    let bullZone = null, bearZone = null;
-    const details = [];
-    if (c3.low > c1.high && last.close > c3.low) { bullish = true; bullZone = { low: c1.high, high: c3.low }; details.push('FVG alcista'); }
-    if (c3.high < c1.low && last.close < c3.high) { bearish = true; bearZone = { low: c3.high, high: c1.low }; details.push('FVG bajista'); }
-    return { bullish, bearish, score: (bullish || bearish) ? 15 : 0, details, bullZone, bearZone };
-  }
-
-  static detectOrderBlocks(candles, atr) {
-    if (!candles || candles.length < 5 || !atr) return { bullishOB: false, bearishOB: false, score: 0, details: [], bullZone: null, bearZone: null };
-    const last = candles[candles.length - 1];
-    const prev2 = candles[candles.length - 3];
-    const prev3 = candles[candles.length - 4];
-    let bullishOB = false, bearishOB = false;
-    let bullZone = null, bearZone = null;
-    const details = [];
-    const impulsoUp = Math.abs(last.close - prev2.open) > atr * 1.5 && last.close > prev2.open;
-    const impulsoDown = Math.abs(last.close - prev2.open) > atr * 1.5 && last.close < prev2.open;
-    if (impulsoUp && prev3.close < prev3.open && prev2.close > prev2.open) {
-      bullishOB = true; bullZone = { low: Math.min(prev2.open, prev2.close), high: Math.max(prev2.open, prev2.close) }; details.push('Order Block alcista');
-    }
-    if (impulsoDown && prev3.close > prev3.open && prev2.close < prev2.open) {
-      bearishOB = true; bearZone = { low: Math.min(prev2.open, prev2.close), high: Math.max(prev2.open, prev2.close) }; details.push('Order Block bajista');
-    }
-    return { bullishOB, bearishOB, score: (bullishOB || bearishOB) ? 15 : 0, details, bullZone, bearZone };
-  }
-
-  static detectLiquiditySweep(candles, swingHighs, swingLows) {
-    if (!candles || candles.length < 6 || swingHighs.length < 2 || swingLows.length < 2) {
-      return { bullish: false, bearish: false, score: 0, details: [] };
-    }
-    const last = candles[candles.length - 1];
-    const prevSH = swingHighs[swingHighs.length - 2];
-    const lastSH = swingHighs[swingHighs.length - 1];
-    const prevSL = swingLows[swingLows.length - 2];
-    const lastSL = swingLows[swingLows.length - 1];
-    let bullish = false, bearish = false;
-    const details = [];
-    if (last.low < lastSL.price && last.low < prevSL.price && last.close > lastSL.price) { bullish = true; details.push('Barrida de liquidez (mínimos)'); }
-    if (last.high > lastSH.price && last.high > prevSH.price && last.close < lastSH.price) { bearish = true; details.push('Barrida de liquidez (máximos)'); }
-    return { bullish, bearish, score: (bullish || bearish) ? 15 : 0, details };
-  }
-
-  static detectVPattern(candles, atr, lookback = 14) {
-    const empty = { bullish: false, bearish: false, score: 0, details: [] };
-    if (!candles || candles.length < lookback + 1 || !atr) return empty;
-    const window = candles.slice(-lookback);
-    const last = window[window.length - 1];
-    let troughIdx = 0, peakIdx = 0;
-    for (let i = 1; i < window.length; i++) { if (window[i].low < window[troughIdx].low) troughIdx = i; if (window[i].high > window[peakIdx].high) peakIdx = i; }
-    const minLegBars = 2, maxLegBars = 6, steepMultiplier = 1.8;
-    let bullish = false, bearish = false;
-    const details = [];
-    const downBars = troughIdx;
-    const upBars = window.length - 1 - troughIdx;
-    if (downBars >= minLegBars && downBars <= maxLegBars && upBars >= minLegBars && upBars <= maxLegBars) {
-      const startHigh = window[0].high, troughLow = window[troughIdx].low;
-      const downMove = startHigh - troughLow, upMove = last.close - troughLow;
-      const symmetric = upMove >= downMove * 0.5;
-      if (downMove >= atr * steepMultiplier && upMove >= atr * steepMultiplier && symmetric && last.close > last.open) { bullish = true; details.push('Patrón V (reversión en piso)'); }
-    }
-    const upBarsToPeak = peakIdx;
-    const downBarsFromPeak = window.length - 1 - peakIdx;
-    if (upBarsToPeak >= minLegBars && upBarsToPeak <= maxLegBars && downBarsFromPeak >= minLegBars && downBarsFromPeak <= maxLegBars) {
-      const startLow = window[0].low, peakHigh = window[peakIdx].high;
-      const upMove = peakHigh - startLow, downMove = peakHigh - last.close;
-      const symmetric = downMove >= upMove * 0.5;
-      if (upMove >= atr * steepMultiplier && downMove >= atr * steepMultiplier && symmetric && last.close < last.open) { bearish = true; details.push('Patrón V invertida (reversión en techo)'); }
-    }
-    return { bullish, bearish, score: (bullish || bearish) ? 15 : 0, details };
-  }
-
-  static calculatePivotPoints(candles) {
-    if (!candles || candles.length < 10) return null;
-    const byDay = {};
-    candles.forEach(c => { const day = new Date(c.time).toISOString().slice(0, 10); (byDay[day] = byDay[day] || []).push(c); });
-    const days = Object.keys(byDay).sort();
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const completedDays = days.filter(d => d !== todayStr);
-    let refCandles;
-    if (completedDays.length > 0) refCandles = byDay[completedDays[completedDays.length - 1]];
-    else { const half = Math.floor(candles.length / 2); refCandles = candles.slice(0, Math.max(half, 10)); }
-    const high = Math.max(...refCandles.map(c => c.high));
-    const low = Math.min(...refCandles.map(c => c.low));
-    const close = refCandles[refCandles.length - 1].close;
-    const pivot = (high + low + close) / 3;
-    return { pivot, r1: 2 * pivot - low, s1: 2 * pivot - high, r2: pivot + (high - low), s2: pivot - (high - low) };
-  }
-
-  static detectPivotBreakoutReversal(candles, pivots) {
-    if (!candles || candles.length < 3 || !pivots) return { bullish: false, bearish: false, score: 0, details: [], level: null };
-    const last = candles[candles.length - 1];
-    const prev = candles[candles.length - 2];
-    const { r1, r2, s1, s2 } = pivots;
-    let bullish = false, bearish = false, level = null;
-    const details = [];
-    if (prev.close <= r1 && last.close > r1) { bullish = true; level = 'R1'; details.push('Ruptura alcista de Pivot R1'); }
-    else if (prev.close <= r2 && last.close > r2) { bullish = true; level = 'R2'; details.push('Ruptura alcista de Pivot R2'); }
-    else if (last.low <= s1 && last.close > s1) { bullish = true; level = 'S1'; details.push('Reversión alcista en soporte Pivot S1'); }
-    else if (last.low <= s2 && last.close > s2) { bullish = true; level = 'S2'; details.push('Reversión alcista en soporte Pivot S2'); }
-    else if (prev.close >= s1 && last.close < s1) { bearish = true; level = 'S1'; details.push('Ruptura bajista de Pivot S1'); }
-    else if (prev.close >= s2 && last.close < s2) { bearish = true; level = 'S2'; details.push('Ruptura bajista de Pivot S2'); }
-    else if (last.high >= r1 && last.close < r1) { bearish = true; level = 'R1'; details.push('Reversión bajista en resistencia Pivot R1'); }
-    else if (last.high >= r2 && last.close < r2) { bearish = true; level = 'R2'; details.push('Reversión bajista en resistencia Pivot R2'); }
-    return { bullish, bearish, score: (bullish || bearish) ? 15 : 0, details, level };
-  }
-
-  // CORREGIDO: antes era promedio simple de las últimas `period` True Range.
-  // Ahora es Wilder/RMA real (igual a TradingView/MT4/MT5): semilla = promedio
-  // simple de los primeros `period` TR, y de ahí en adelante suavizado
-  // exponencial atr = (atr*(period-1) + TR) / period. Mismo cambio aplicado
-  // en custom-strategies.js para que las 7 estrategias independientes y el
-  // motor SMC calculen el mismo ATR.
-  static calculateATR(candles, period = 14) {
-    if (!candles || candles.length < period + 1) return null;
-    const trueRanges = [];
-    for (let i = 1; i < candles.length; i++) {
-      const high = candles[i].high, low = candles[i].low, prevClose = candles[i - 1].close;
-      trueRanges.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
-    }
-    if (trueRanges.length < period) return null;
-    let atr = trueRanges.slice(0, period).reduce((a, b) => a + b, 0) / period;
-    for (let i = period; i < trueRanges.length; i++) {
-      atr = (atr * (period - 1) + trueRanges[i]) / period;
-    }
-    return atr;
-  }
-
-  static calculateEMA(candles, period) {
-    if (!candles || candles.length < period) return null;
-    const k = 2 / (period + 1);
-    let ema = candles.slice(0, period).reduce((sum, c) => sum + c.close, 0) / period;
-    for (let i = period; i < candles.length; i++) ema = candles[i].close * k + ema * (1 - k);
-    return ema;
-  }
-
-  static calculateWMA(values, period) {
-    if (!values || values.length < period) return null;
-    const slice = values.slice(-period);
-    let weightedSum = 0, weightTotal = 0;
-    for (let i = 0; i < slice.length; i++) { const weight = i + 1; weightedSum += slice[i] * weight; weightTotal += weight; }
-    return weightedSum / weightTotal;
-  }
-
-  static calculateHMASeries(candles, period) {
-    const closes = candles.map(c => c.close);
-    const n = closes.length;
-    const halfPeriod = Math.max(1, Math.round(period / 2));
-    const sqrtPeriod = Math.max(1, Math.round(Math.sqrt(period)));
-    const raw = new Array(n).fill(null);
-    for (let i = 0; i < n; i++) {
-      if (i + 1 < period) continue;
-      const slice = closes.slice(0, i + 1);
-      const wmaHalf = this.calculateWMA(slice, halfPeriod);
-      const wmaFull = this.calculateWMA(slice, period);
-      if (wmaHalf === null || wmaFull === null) continue;
-      raw[i] = 2 * wmaHalf - wmaFull;
-    }
-    const hma = new Array(n).fill(null);
-    for (let i = 0; i < n; i++) {
-      if (raw[i] === null) continue;
-      const rawSlice = raw.slice(0, i + 1).filter(v => v !== null);
-      if (rawSlice.length < sqrtPeriod) continue;
-      hma[i] = this.calculateWMA(rawSlice, sqrtPeriod);
-    }
-    return hma;
-  }
-
-  static percentileNearestRank(values, percentile) {
-    if (!values || !values.length) return 0;
-    const sorted = [...values].sort((a, b) => a - b);
-    const rank = Math.ceil((percentile / 100) * sorted.length);
-    const idx = Math.min(Math.max(rank - 1, 0), sorted.length - 1);
-    return sorted[idx];
-  }
-
-  static detectReversalBands(candles, opts = {}) {
-    const midbandLength = opts.midbandLength || 50;
-    const sampleMemory = opts.sampleMemory || 50;
-    const movePercentile = opts.movePercentile || 90;
-    const bandMultiplier = opts.bandMultiplier || 2.0;
-    const atrLength = opts.atrLength || 14;
-    const trailDistanceMultiplier = opts.trailDistanceMultiplier || 2.1;
-    const invalidationBars = opts.invalidationBars || 2;
-    const allowTrailInterruptions = !!opts.allowTrailInterruptions;
-    const empty = { bullish: false, bearish: false };
-    if (!candles || candles.length < midbandLength + 5) return empty;
-    const hmaSeries = this.calculateHMASeries(candles, midbandLength);
-    let bullishMoveBuild = 0, bearishMoveBuild = 0;
-    const bullishMoves = [], bearishMoves = [];
-    let trailDirection = 0, lastSignalDirection = 0, trailValue = null, outsideCount = 0;
-    let lastBullishSignal = false, lastBearishSignal = false;
-    const trueRanges = [];
-    for (let i = 0; i < candles.length; i++) {
-      const c = candles[i]; const midband = hmaSeries[i];
-      if (i > 0) {
-        const prevClose = candles[i - 1].close;
-        trueRanges.push(Math.max(c.high - c.low, Math.abs(c.high - prevClose), Math.abs(c.low - prevClose)));
-      }
-      const atrWindow = trueRanges.slice(-atrLength);
-      const atr = atrWindow.length ? atrWindow.reduce((a, b) => a + b, 0) / atrWindow.length : null;
-      const candleDirection = c.close > c.open ? 1 : -1;
-      const candleBody = Math.abs(c.close - c.open);
-      if (candleDirection < 0) { if (bullishMoveBuild > 0) { bullishMoves.unshift(bullishMoveBuild); if (bullishMoves.length > sampleMemory) bullishMoves.pop(); } bullishMoveBuild = 0; }
-      else { bullishMoveBuild += candleBody; }
-      if (candleDirection > 0) { if (bearishMoveBuild > 0) { bearishMoves.unshift(bearishMoveBuild); if (bearishMoves.length > sampleMemory) bearishMoves.pop(); } bearishMoveBuild = 0; }
-      else { bearishMoveBuild += candleBody; }
-      lastBullishSignal = false; lastBearishSignal = false;
-      if (midband === null || !atr) continue;
-      const upperBand = this.percentileNearestRank(bullishMoves, movePercentile) * bandMultiplier + midband;
-      const lowerBand = midband - this.percentileNearestRank(bearishMoves, movePercentile) * bandMultiplier;
-      const closeInsideBands = c.close >= lowerBand && c.close <= upperBand;
-      const bullishWickRejection = closeInsideBands && c.low < lowerBand;
-      const bearishWickRejection = closeInsideBands && c.high > upperBand;
-      const upperTrailSource = midband + (upperBand - midband) * trailDistanceMultiplier;
-      const lowerTrailSource = midband - (midband - lowerBand) * trailDistanceMultiplier;
-      const signalCanStart = trailDirection === 0 || allowTrailInterruptions;
-      const bullishSignal = signalCanStart && bullishWickRejection && lastSignalDirection !== 1 && (!bearishWickRejection || c.close >= c.open);
-      const bearishSignal = signalCanStart && bearishWickRejection && lastSignalDirection !== -1 && (!bullishWickRejection || c.close < c.open);
-      if (bullishSignal) { trailDirection = 1; lastSignalDirection = 1; outsideCount = 0; const bullishStartDistance = Math.max(midband - lowerTrailSource, atr * trailDistanceMultiplier); trailValue = Math.min(midband - bullishStartDistance, c.low); }
-      else if (bearishSignal) { trailDirection = -1; lastSignalDirection = -1; outsideCount = 0; const bearishStartDistance = Math.max(upperTrailSource - midband, atr * trailDistanceMultiplier); trailValue = Math.max(midband + bearishStartDistance, c.high); }
-      else if (trailDirection === 1) { trailValue = Math.max(trailValue, lowerTrailSource); outsideCount = c.low < trailValue ? outsideCount + 1 : 0; if (outsideCount >= invalidationBars) { trailDirection = 0; trailValue = null; outsideCount = 0; } }
-      else if (trailDirection === -1) { trailValue = Math.min(trailValue, upperTrailSource); outsideCount = c.high > trailValue ? outsideCount + 1 : 0; if (outsideCount >= invalidationBars) { trailDirection = 0; trailValue = null; outsideCount = 0; } }
-      lastBullishSignal = bullishSignal; lastBearishSignal = bearishSignal;
-    }
-    return { bullish: lastBullishSignal, bearish: lastBearishSignal, trailDirection, trailValue };
-  }
-
-  static detectTrend(candles) {
-    const ema20 = this.calculateEMA(candles, Math.min(20, Math.floor(candles.length / 2)));
-    const ema50 = this.calculateEMA(candles, Math.min(50, candles.length - 1));
-    if (ema20 === null || ema50 === null) return { direction: 'neutral', ema20, ema50 };
-    if (ema20 > ema50 * 1.0005) return { direction: 'bullish', ema20, ema50 };
-    if (ema20 < ema50 * 0.9995) return { direction: 'bearish', ema20, ema50 };
-    return { direction: 'neutral', ema20, ema50 };
-  }
-
-  static isKillZone() {
-    const utcHour = new Date().getUTCHours();
-    return (utcHour >= 7 && utcHour < 10) || (utcHour >= 12 && utcHour < 15);
-  }
-
-  static getNYTimeParts(ms) {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false
-    }).formatToParts(new Date(ms));
-    return {
-      weekday: parts.find(p => p.type === 'weekday').value,
-      hour: parseInt(parts.find(p => p.type === 'hour').value, 10) % 24,
-      minute: parseInt(parts.find(p => p.type === 'minute').value, 10)
-    };
-  }
-
-  static isNYKillZoneWindow(nowMs = Date.now()) {
-    const { weekday, hour, minute } = this.getNYTimeParts(nowMs);
-    if (weekday === 'Sat' || weekday === 'Sun') return false;
-    const minutesNow = hour * 60 + minute;
-    return minutesNow >= (9 * 60 + 30) && minutesNow < (13 * 60 + 30);
-  }
-
-  static detectNYKillZoneSweep(candles, regime) {
-    const result = { bullish: false, bearish: false };
-    if (!this.isNYKillZoneWindow()) return result;
-    if (regime === 'ranging') return result;
-    if (!candles || candles.length < 5) return result;
-
-    const last = candles[candles.length - 1];
-    const lastNY = this.getNYTimeParts(last.time);
-    if (lastNY.hour * 60 + lastNY.minute < 9 * 60 + 45) return result;
-
-    let openIdx = -1;
-    for (let i = candles.length - 1; i >= 0 && i >= candles.length - 20; i--) {
-      const p = this.getNYTimeParts(candles[i].time);
-      if (p.hour === 9 && p.minute >= 30 && p.minute < 45) { openIdx = i; break; }
-    }
-    if (openIdx === -1 || openIdx >= candles.length - 1) return result;
-
-    const openCandle = candles[openIdx];
-    const sessionCandles = candles.slice(openIdx);
-    if (sessionCandles.length < 2) return result;
-
-    const bias = openCandle.close > openCandle.open ? 'bull' : (openCandle.close < openCandle.open ? 'bear' : null);
-    if (!bias) return result;
-
-    const prior = candles[candles.length - 2];
-    const between = sessionCandles.slice(1, -1);
-
-    if (bias === 'bull') {
-      const sweptLow = between.some(c => c.low < openCandle.low) || last.low < openCandle.low;
-      const strongBull = last.close > last.open && last.close > prior.high;
-      if (sweptLow && strongBull) result.bullish = true;
-    } else {
-      const sweptHigh = between.some(c => c.high > openCandle.high) || last.high > openCandle.high;
-      const strongBear = last.close < last.open && last.close < prior.low;
-      if (sweptHigh && strongBear) result.bearish = true;
-    }
-    return result;
-  }
-
-  static checkVolumeConfirmation(candles, lookback = 20, multiplier = 1.2) {
-    if (!candles || candles.length < lookback + 1) return { confirmed: true, available: false, score: 0, ratio: null };
-    const last = candles[candles.length - 1];
-    const prevCandles = candles.slice(-(lookback + 1), -1);
-    const avgVolume = prevCandles.reduce((sum, c) => sum + (c.volume || 0), 0) / prevCandles.length;
-    if (!avgVolume) return { confirmed: true, available: false, score: 0, ratio: null };
-    const ratio = last.volume / avgVolume;
-    const confirmed = ratio >= multiplier;
-    return { confirmed, available: true, score: confirmed ? 10 : 0, ratio };
-  }
-
-  static checkConfirmationCandle(candles, direction, atr) {
-    if (!direction || !candles || candles.length < 1) return { confirmed: false, bodyRatio: 0 };
-    const last = candles[candles.length - 1];
-    const body = Math.abs(last.close - last.open);
-    const minBody = (atr || 0) * 0.3;
-    const aligned = direction === 'long' ? last.close > last.open : last.close < last.open;
-    return { confirmed: aligned && body >= minBody, bodyRatio: atr ? +(body / atr).toFixed(2) : 0 };
-  }
-
-  static checkMitigation(candles, direction, ob, fvg, atr) {
-    const zone = direction === 'long' ? (ob.bullZone || fvg.bullZone) : (ob.bearZone || fvg.bearZone);
-    if (!zone) return { required: false, confirmed: true };
-    const last = candles[candles.length - 1];
-    const tolerance = (atr || 0) * 0.3;
-    return { required: true, confirmed: last.close >= zone.low - tolerance && last.close <= zone.high + tolerance };
-  }
-
-  static detectHTFTrend(htfCandles) {
-    if (!htfCandles || htfCandles.length < 20) return null;
-    return this.detectTrend(htfCandles);
-  }
-
-  static calculatePremiumDiscount(candles, lookback = 30) {
-    if (!candles || candles.length < 10) return null;
-    const slice = candles.slice(-Math.min(lookback, candles.length));
-    const high = Math.max(...slice.map(c => c.high));
-    const low = Math.min(...slice.map(c => c.low));
-    const range = high - low;
-    if (!range) return null;
-    const equilibrium = low + range * 0.5;
-    const last = candles[candles.length - 1];
-    const zone = last.close > equilibrium ? 'premium' : 'discount';
-    const oteLongZone = { low: low + range * 0.618, high: low + range * 0.79 };
-    const oteShortZone = { low: low + range * 0.21, high: low + range * 0.382 };
-    return { high, low, equilibrium, zone, oteLongZone, oteShortZone, inOteLong: last.close >= oteLongZone.low && last.close <= oteLongZone.high, inOteShort: last.close >= oteShortZone.low && last.close <= oteShortZone.high };
-  }
-
-  static analyze(candles, strictMode = false, assetType = 'forex', htfCandles = null, confidenceThreshold = CONFIG.CONFIDENCE_THRESHOLD, patternStats = {}) {
-    if (!candles || candles.length < 20) return { valid: false, reason: 'Datos históricos insuficientes (se necesitan al menos 20 velas).' };
-    const swingHighs = this.findSwingHighs(candles);
-    const swingLows = this.findSwingLows(candles);
-    const atr = this.calculateATR(candles);
-    const bos = this.detectBOS(candles, swingHighs, swingLows);
-    const choch = this.detectCHoCH(candles, swingHighs, swingLows);
-    const fvg = this.detectFVG(candles);
-    const ob = this.detectOrderBlocks(candles, atr);
-    const sweep = this.detectLiquiditySweep(candles, swingHighs, swingLows);
-    const trend = this.detectTrend(candles);
-    const killZone = this.isKillZone();
-    const pivots = this.calculatePivotPoints(candles);
-    const pivotSig = this.detectPivotBreakoutReversal(candles, pivots);
-    const volumeCheck = this.checkVolumeConfirmation(candles);
-    const htfTrend = this.detectHTFTrend(htfCandles);
-    const premiumDiscount = this.calculatePremiumDiscount(candles);
-    const reversal = this.detectReversalBands(candles);
-    const vPattern = this.detectVPattern(candles, atr);
-    const regime = detectMarketRegime(candles);
-    const nyKZ = this.detectNYKillZoneSweep(candles, regime);
-
-    const STRATEGIES = [
-      { key: 'choch', label: 'CHoCH (cambio de carácter)', base: 82, bullish: choch.bullish, bearish: choch.bearish },
-      { key: 'nykz', label: 'Kill Zone NY (apertura + barrida)', base: 80, bullish: nyKZ.bullish, bearish: nyKZ.bearish },
-      { key: 'sweep', label: 'Barrida de liquidez', base: 78, bullish: sweep.bullish, bearish: sweep.bearish },
-      { key: 'bos', label: 'BOS (ruptura de estructura)', base: 76, bullish: bos.bullish, bearish: bos.bearish },
-      { key: 'reversal', label: 'Bandas de Reversión (AlgoAlpha)', base: 75, bullish: reversal.bullish, bearish: reversal.bearish },
-      { key: 'ob', label: 'Order Block', base: 74, bullish: ob.bullishOB, bearish: ob.bearishOB },
-      { key: 'vpattern', label: 'Patrón V', base: 70, bullish: vPattern.bullish, bearish: vPattern.bearish },
-      { key: 'fvg', label: 'FVG (Fair Value Gap)', base: 68, bullish: fvg.bullish, bearish: fvg.bearish }
-    ];
-
-    const bullHits = STRATEGIES.filter(s => s.bullish);
-    const bearHits = STRATEGIES.filter(s => s.bearish);
-
-    function evalSide(hits) {
-      if (hits.length === 0) return { confidence: 0, hits: [] };
-      if (hits.length === 1 && hits[0].key === 'fvg') return { confidence: 0, hits: [] };
-      const best = Math.max(...hits.map(s => s.base));
-      const confluenceBonus = Math.min(18, (hits.length - 1) * 6);
-      return { confidence: Math.min(100, best + confluenceBonus), hits };
-    }
-
-    const bullEval = evalSide(bullHits);
-    const bearEval = evalSide(bearHits);
-
-    let direction = null, confidence = 0, activeHits = [];
-    if (bullEval.confidence > bearEval.confidence) { direction = 'long'; confidence = bullEval.confidence; activeHits = bullEval.hits; }
-    else if (bearEval.confidence > bullEval.confidence) { direction = 'short'; confidence = bearEval.confidence; activeHits = bearEval.hits; }
-
-    const pivotReinforces = !!(direction && ((direction === 'long' && pivotSig.bullish) || (direction === 'short' && pivotSig.bearish)));
-    if (pivotReinforces) confidence = Math.min(100, confidence + 4);
-    const pivotLevel = pivotReinforces ? pivotSig.level : null;
-
-    const killZoneApplies = !!(direction && killZone && assetType !== 'crypto');
-    if (killZoneApplies) confidence = Math.min(100, confidence + 6);
-
-    const oteBonusApplies = !!(direction && premiumDiscount && ((direction === 'long' && premiumDiscount.inOteLong) || (direction === 'short' && premiumDiscount.inOteShort)));
-    if (oteBonusApplies) confidence = Math.min(100, confidence + 8);
-
-    const isConfluence = activeHits.length > 1;
-    const strategyLabels = activeHits.map(s => s.label);
-    const strategyKeys = activeHits.map(s => s.key);
-
-    const patternAdj = direction ? this.getPatternAdjustment(strategyKeys, patternStats) : 0;
-    if (patternAdj) confidence = Math.max(0, Math.min(100, confidence + patternAdj));
-
-    const filteredByConfidence = !!(direction && confidence < confidenceThreshold);
-    if (filteredByConfidence) direction = null;
-
-    const filteredByVolume = !!(direction && volumeCheck.available && !volumeCheck.confirmed);
-    if (filteredByVolume) direction = null;
-
-    const confirmCandle = this.checkConfirmationCandle(candles, direction, atr);
-    const filteredByCandle = !!(direction && !confirmCandle.confirmed);
-    if (filteredByCandle) direction = null;
-
-    const mitigation = strictMode ? this.checkMitigation(candles, direction, ob, fvg, atr) : { required: false, confirmed: true };
-    const filteredByMitigation = !!(direction && mitigation.required && !mitigation.confirmed);
-    if (filteredByMitigation) direction = null;
-
-    const filteredByPremiumDiscount = !!(direction && premiumDiscount && ((direction === 'long' && premiumDiscount.zone === 'premium') || (direction === 'short' && premiumDiscount.zone === 'discount')));
-    if (filteredByPremiumDiscount) direction = null;
-
-    const filteredByHTF = !!(direction && htfTrend && htfTrend.direction !== 'neutral' && ((direction === 'long' && htfTrend.direction === 'bearish') || (direction === 'short' && htfTrend.direction === 'bullish')));
-    if (filteredByHTF) direction = null;
-
-    const details = direction ? (isConfluence ? [`Confluencia de ${activeHits.length} estrategias: ${strategyLabels.join(' + ')}${pivotReinforces ? ' + Pivot' : ''}${killZoneApplies ? ' + Kill Zone' : ''}`] : [`Señal por estrategia individual: ${strategyLabels[0]}${pivotReinforces ? ' (+ Pivot)' : ''}${killZoneApplies ? ' (+ Kill Zone activa)' : ''}`]) : [];
-
-    return {
-      valid: true, direction, confidence, atr, trend, killZone, isConfluence, strategyLabels, strategyKeys,
-      regime, pivotLevel, pivots, filteredByConfidence, filteredByVolume, filteredByCandle,
-      filteredByMitigation, filteredByHTF, htfTrendDirection: htfTrend ? htfTrend.direction : null,
-      filteredByPremiumDiscount, premiumDiscountZone: premiumDiscount ? premiumDiscount.zone : null,
-      volumeRatio: volumeCheck.ratio, volumeAvailable: volumeCheck.available, confidenceThreshold, patternAdj, strictMode,
-      components: {
-        bos: { score: (bos.bullish || bos.bearish) ? 76 : 0, max: 76 },
-        choch: { score: (choch.bullish || choch.bearish) ? 82 : 0, max: 82 },
-        fvg: { score: (fvg.bullish || fvg.bearish) ? 68 : 0, max: 68 },
-        ob: { score: (ob.bullishOB || ob.bearishOB) ? 74 : 0, max: 74 },
-        sweep: { score: (sweep.bullish || sweep.bearish) ? 78 : 0, max: 78 },
-        reversal: { score: (reversal.bullish || reversal.bearish) ? 75 : 0, max: 75 },
-        vpattern: { score: (vPattern.bullish || vPattern.bearish) ? 70 : 0, max: 70 },
-        pivot: { score: pivotReinforces ? 4 : 0, max: 4 },
-        killZone: { score: killZoneApplies ? 6 : 0, max: 6 },
-        volume: { score: volumeCheck.score, max: 10 },
-        candle: { score: confirmCandle.confirmed ? 10 : 0, max: 10 },
-        htf: { score: (htfTrend && !filteredByHTF) ? 10 : 0, max: 10 },
-        ote: { score: oteBonusApplies ? 8 : 0, max: 8 }
-      },
-      details
-    };
-  }
-
-  static getPatternAdjustment(keys, patternStats) {
-    const cfg = CONFIG.AUTO_TUNE;
-    if (!keys || !keys.length || !patternStats) return 0;
-    const adjustments = keys.map(key => {
-      const stat = patternStats[key]; if (!stat) return 0;
-      const total = (stat.wins || 0) + (stat.losses || 0); if (total < cfg.PATTERN_MIN_SAMPLE) return 0;
-      const winRate = stat.wins / total;
-      const raw = (winRate - 0.5) * (cfg.PATTERN_MAX_BONUS / 0.5);
-      return Math.max(-cfg.PATTERN_MAX_BONUS, Math.min(cfg.PATTERN_MAX_BONUS, raw));
-    });
-    return adjustments.reduce((a, b) => a + b, 0) / adjustments.length;
-  }
-}
-
-const SignalEngine = {
-  build(symbol, quote, analysis) {
-    const asset = ASSETS[symbol];
-    if (!analysis.valid) return { type: 'no-data', reason: analysis.reason };
-    if (!analysis.direction) return { type: 'no-signal', analysis };
-    const entry = quote.last;
-    const atr = analysis.atr || entry * 0.005;
-    const risk = atr * 1.5;
-    const isLong = analysis.direction === 'long';
-    const sl = isLong ? entry - risk : entry + risk;
-    const tp1 = isLong ? entry + risk * 2 : entry - risk * 2;
-    const tp2 = isLong ? entry + risk * 3 : entry - risk * 3;
-    const slPips = toPips(sl, entry, asset);
-    const tp1Pips = toPips(tp1, entry, asset);
-    const tp2Pips = toPips(tp2, entry, asset);
-    return {
-      type: analysis.direction, symbol, asset, entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips,
-      rr1: '1:2', rr2: '1:3', confidence: analysis.confidence, trend: analysis.trend.direction,
-      killZone: analysis.killZone, isConfluence: analysis.isConfluence, strategyLabels: analysis.strategyLabels,
-      strategyKeys: analysis.strategyKeys, regime: analysis.regime, patternAdj: analysis.patternAdj,
-      pivotLevel: analysis.pivotLevel, details: analysis.details.length ? analysis.details : ['Patrón técnico detectado'],
-      components: analysis.components, timestamp: Date.now(), decimals: asset.decimals
-    };
-  }
-};
-
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 const BacktestEngine = {
@@ -1597,81 +979,7 @@ const BacktestEngine = {
     }));
   },
 
-  async simulate(candles, assetType) {
-    const cfg = CONFIG.BACKTEST;
-    const events = [];
-    let lastSignalIndex = -9999;
-    let lastDirection = null;
-    for (let i = cfg.MIN_LOOKBACK; i < candles.length - 1; i++) {
-      if (i % cfg.YIELD_EVERY === 0) await sleep(0);
-      const windowStart = Math.max(0, i - cfg.WINDOW_SIZE + 1);
-      const window = candles.slice(windowStart, i + 1);
-      const analysis = SMCEngine.analyze(window, false, assetType, null, 0, {});
-      if (!analysis.valid || !analysis.direction) continue;
-      if (lastDirection && analysis.direction !== lastDirection && (i - lastSignalIndex) < cfg.COOLDOWN_CANDLES) continue;
-      const entryCandle = candles[i + 1]; if (!entryCandle) break;
-      const entry = entryCandle.open;
-      const atr = analysis.atr || entry * 0.005;
-      const risk = atr * 1.5;
-      const isLong = analysis.direction === 'long';
-      const sl = isLong ? entry - risk : entry + risk;
-      const tp1 = isLong ? entry + risk * 2 : entry - risk * 2;
-      let result = null;
-      const horizon = Math.min(candles.length, i + 1 + cfg.MAX_HOLD_CANDLES);
-      for (let j = i + 1; j < horizon; j++) {
-        const c = candles[j];
-        const hitSL = isLong ? c.low <= sl : c.high >= sl;
-        const hitTP = isLong ? c.high >= tp1 : c.low <= tp1;
-        if (hitSL) { result = 'loss'; break; }
-        if (hitTP) { result = 'win'; break; }
-      }
-      if (result) {
-        // rMultiple exacto, no aproximado: tp1 se arma siempre como entry ± risk*2 (arriba),
-        // así que una señal ganadora vale matemáticamente 2R y una perdedora -1R, sin
-        // excepción — no depende de estimar nada.
-        events.push({ index: i, direction: analysis.direction, confidence: analysis.confidence, strategyKeys: analysis.strategyKeys, regime: analysis.regime, result, rMultiple: result === 'win' ? 2 : -1 });
-        lastSignalIndex = i; lastDirection = analysis.direction;
-      }
-    }
-    return events;
-  },
-
-  calibrateThreshold(events) {
-    const cfg = CONFIG.AUTO_TUNE;
-    let threshold = CONFIG.CONFIDENCE_THRESHOLD;
-    let lastStats = null;
-    for (let iter = 0; iter < 10; iter++) {
-      const filtered = events.filter(e => e.confidence >= threshold);
-      const recent = filtered.slice(-cfg.windowSize);
-      if (recent.length < cfg.minSampleSize) break;
-      const wins = recent.filter(e => e.result === 'win').length;
-      const winRate = wins / recent.length;
-      const expectancy = recent.reduce((sum, e) => sum + (e.result === 'win' ? 2 : -1), 0) / recent.length;
-      lastStats = { sampleSize: filtered.length, winRate, expectancy };
-      if (expectancy < cfg.targetExpectancyLow) threshold = Math.min(cfg.maxThreshold, threshold + cfg.step);
-      else if (expectancy > cfg.targetExpectancyHigh) threshold = Math.max(cfg.minThreshold, threshold - cfg.step);
-      else break;
-    }
-    return { threshold, stats: lastStats };
-  },
-
-  aggregatePatternStats(events) {
-    const stats = {};
-    events.forEach(e => {
-      (e.strategyKeys || []).forEach(key => {
-        if (!stats[key]) stats[key] = { wins: 0, losses: 0 };
-        if (e.result === 'win') stats[key].wins++; else stats[key].losses++;
-      });
-    });
-    const cap = CONFIG.BACKTEST.SEED_CAP;
-    Object.keys(stats).forEach(key => {
-      const s = stats[key]; const total = s.wins + s.losses;
-      if (total > cap) { const factor = cap / total; s.wins = Math.round(s.wins * factor); s.losses = cap - s.wins; }
-    });
-    return stats;
-  },
-
-  // Igual que simulate(), pero para las 7 estrategias independientes de custom-strategies.js
+  // Igual que simulate() (SMC, eliminado 19/8), pero para las 8 estrategias independientes de custom-strategies.js
   // en vez de SMCEngine. No usan `confidence` ni `regime`, así que no pasan por
   // calibrateThreshold() — cada una solo suma gana/pierde por separado (aggregateCustomStats).
   // htfCandles se pasa null a propósito: en vivo (refreshAsset) sí hay HTF real, pero acá
@@ -1741,7 +1049,6 @@ const BacktestEngine = {
 
   async runSymbol(symbol) {
     const asset = ASSETS[symbol];
-    let allEvents = [];
     let allCustomEvents = [];
     let candlesAnalyzed = 0;
     for (const tf of CONFIG.BACKTEST.TIMEFRAMES) {
@@ -1778,8 +1085,6 @@ const BacktestEngine = {
         const candles = await this.fetchCandles(symbol, tf);
         if (!candles || !candles.length) continue;
         candlesAnalyzed += candles.length;
-        const events = await this.simulate(candles, asset.type);
-        allEvents = allEvents.concat(events);
         const customEvents = await this.simulateCustom(candles, symbol, asset);
         allCustomEvents = allCustomEvents.concat(customEvents);
       } catch (e) {
@@ -1795,27 +1100,9 @@ const BacktestEngine = {
       // el límite de consultas por minuto de TwelveData/CryptoCompare en el plan gratuito.
       await sleep(6000);
     }
-    if (!allEvents.length && !allCustomEvents.length) return null;
-    const { threshold, stats } = this.calibrateThreshold(allEvents);
-    const patternStats = this.aggregatePatternStats(allEvents);
+    if (!allCustomEvents.length) return null;
     const customStats = this.aggregateCustomStats(allCustomEvents);
-    const wins = allEvents.filter(e => e.result === 'win').length;
-    // Igual que en aggregateCustomStats: rMultiple ya viene exacto desde simulate() (2R/-1R
-    // por construcción de SMC), se suma directo en vez de volver a asumirlo acá.
-    const totalR = +allEvents.reduce((sum, e) => sum + (e.rMultiple != null ? e.rMultiple : (e.result === 'win' ? 2 : -1)), 0).toFixed(2);
-    const regimeCalibration = {};
-    ['trending', 'ranging'].forEach(regime => {
-      const regimeEvents = allEvents.filter(e => e.regime === regime);
-      if (!regimeEvents.length) return;
-      const r = this.calibrateThreshold(regimeEvents);
-      if (r.stats) regimeCalibration[regime] = { threshold: r.threshold, sampleSize: regimeEvents.length, winRate: r.stats.winRate };
-    });
-    return {
-      symbol, candlesAnalyzed,
-      totalSignals: allEvents.length, winRate: allEvents.length ? wins / allEvents.length : 0, totalR,
-      calibratedThreshold: threshold, calibratedStats: stats, regimeCalibration, patternStats,
-      customStats
-    };
+    return { symbol, candlesAnalyzed, customStats };
   },
 
   async runAll(force = false) {
@@ -1860,17 +1147,7 @@ const BacktestEngine = {
         // (no pisa contadores ya acumulados con señales reales en vivo).
         seedStrategyStatsFromBacktest(results);
 
-        const combinedPatternStats = {};
-        Object.values(results).forEach(r => {
-          Object.entries(r.patternStats).forEach(([key, s]) => {
-            if (!combinedPatternStats[key]) combinedPatternStats[key] = { wins: 0, losses: 0 };
-            combinedPatternStats[key].wins += s.wins; combinedPatternStats[key].losses += s.losses;
-          });
-        });
-        state.backtestPatternStats = combinedPatternStats;
-        localStorage.setItem('pt_backtest_pattern_stats', JSON.stringify(combinedPatternStats));
-
-        // Igual que arriba pero para las 7 estrategias independientes: se suman gana/pierde
+        // Se suman gana/pierde
         // de los 4 símbolos x 2 timeframes en una sola tabla por estrategia.
         const combinedCustomStats = {};
         Object.values(results).forEach(r => {
@@ -1887,16 +1164,6 @@ const BacktestEngine = {
         });
         state.backtestCustomStats = combinedCustomStats;
         localStorage.setItem('pt_backtest_custom_stats', JSON.stringify(combinedCustomStats));
-
-        const autoTune = {};
-        Object.entries(results).forEach(([symbol, r]) => {
-          autoTune[symbol] = { threshold: r.calibratedThreshold, sampleSize: r.totalSignals, winRate: r.winRate, candlesAnalyzed: r.candlesAnalyzed };
-          Object.entries(r.regimeCalibration || {}).forEach(([regime, rc]) => {
-            autoTune[symbol + '_' + regime] = { threshold: rc.threshold, sampleSize: rc.sampleSize, winRate: rc.winRate };
-          });
-        });
-        state.backtestAutoTune = autoTune;
-        localStorage.setItem('pt_backtest_autotune', JSON.stringify(autoTune));
         localStorage.setItem('pt_backtest_last_run', String(Date.now()));
         state.backtestResults = results;
       }
@@ -1932,21 +1199,6 @@ function fmtPips(pips) {
 function pctDiff(a, b) {
   if (a === null || a === undefined || !b) return 0;
   return ((a - b) / b) * 100;
-}
-
-function checkSpreadAnomaly(symbol, quote) {
-  if (!quote || quote.spread === null || quote.spread === undefined || quote.estimatedSpread) return { anomalous: false, ratio: null };
-  const history = state.spreadHistory[symbol] || [];
-  history.push(quote.spread);
-  if (history.length > 20) history.shift();
-  state.spreadHistory[symbol] = history;
-  try { localStorage.setItem('pt_spread_history', JSON.stringify(state.spreadHistory)); } catch (e) {}
-  if (history.length < 5) return { anomalous: false, ratio: null };
-  const priorReadings = history.slice(0, -1);
-  const avg = priorReadings.reduce((a, b) => a + b, 0) / priorReadings.length;
-  if (!avg) return { anomalous: false, ratio: null };
-  const ratio = quote.spread / avg;
-  return { anomalous: ratio > CONFIG.SPREAD_ANOMALY_MULTIPLIER, ratio };
 }
 
 // ---- Stubs de UI (no aplica en backend, no hay DOM) ----
@@ -2048,18 +1300,6 @@ function updateStrategyStatsBySymbol(entry) {
 function seedStrategyStatsFromBacktest(resultsBySymbol) {
   Object.entries(resultsBySymbol).forEach(([symbol, r]) => {
     state.strategyStatsBySymbol[symbol] = state.strategyStatsBySymbol[symbol] || {};
-    // SMC: r.winRate / r.totalSignals ya son el agregado del símbolo completo (los 8
-    // subtipos de patrón de SMC juntos), que es el nivel al que el usuario piensa "SMC"
-    // como una sola de las 8 estrategias.
-    if (r.totalSignals && !state.strategyStatsBySymbol[symbol].smc) {
-      const wins = Math.round(r.winRate * r.totalSignals);
-      const losses = r.totalSignals - wins;
-      // r.totalR ya viene exacto desde runSymbol (2R/-1R por construcción de SMC); si por
-      // algún motivo faltara (backtest viejo persistido antes de este cambio), se aproxima
-      // igual que en el resto del archivo.
-      const totalR = r.totalR != null ? r.totalR : (wins * 2 - losses);
-      state.strategyStatsBySymbol[symbol].smc = { wins, losses, totalR, seeded: true };
-    }
     Object.entries(r.customStats || {}).forEach(([key, s]) => {
       if (!state.strategyStatsBySymbol[symbol][key]) {
         const totalR = s.totalR != null ? s.totalR : (s.wins * 2 - s.losses);
@@ -2246,52 +1486,12 @@ function notifyNewSignal(signal) {
 function toggleSound() {}
 function toggleStrictMode() { state.strictMode = !state.strictMode; }
 
-function resolveActiveSignal(symbol, quote, analysis) {
-  if (!analysis.valid) { delete state.activeSignals[symbol]; return { type: 'no-data', reason: analysis.reason }; }
-  if (!analysis.direction) { delete state.activeSignals[symbol]; return { type: 'no-signal', analysis, checkedAt: Date.now() }; }
-  const existing = state.activeSignals[symbol];
-  const isNewDirection = !existing || existing.type !== analysis.direction;
-  const lastAt = state.lastSignalAt[symbol] || 0;
-  const cooldownRemainingMs = CONFIG.SIGNAL_COOLDOWN_MS - (Date.now() - lastAt);
-  const inCooldown = isNewDirection && cooldownRemainingMs > 0;
-  if (isNewDirection && !inCooldown) {
-    const frozen = SignalEngine.build(symbol, quote, analysis);
-    frozen.source = 'smc';
-    frozen.detectedAt = Date.now();
-    state.activeSignals[symbol] = frozen;
-    state.lastSignalAt[symbol] = frozen.detectedAt;
-    // Mismo fix que activeCustomSignals: persistir de inmediato para que un reinicio
-    // no "olvide" que esta señal SMC ya estaba activa y la duplique en el historial.
-    try { localStorage.setItem('pt_active_signals', JSON.stringify(state.activeSignals)); } catch (e) {}
-    try { localStorage.setItem('pt_last_signal_at', JSON.stringify(state.lastSignalAt)); } catch (e) {}
-    pushSignalHistory(frozen);
-    notifyNewSignal(frozen);
-  }
-  if (!state.activeSignals[symbol]) return { type: 'no-signal', analysis, cooldownMinutesLeft: inCooldown ? Math.ceil(cooldownRemainingMs / 60000) : null, checkedAt: Date.now() };
-  const frozen = state.activeSignals[symbol];
-  const isLong = frozen.type === 'long';
-  const hitTP = isLong ? quote.last >= frozen.tp1 : quote.last <= frozen.tp1;
-  const hitSL = isLong ? quote.last <= frozen.sl : quote.last >= frozen.sl;
-  // FIX (badge TP2 distinto, mismo pedido que en las señales custom): SMC ya se
-  // autolimpia cada ciclo (no tenía el bug de congelamiento), pero seguía sin distinguir
-  // TP2 de TP1 en el resultado — si el precio saltó directo a TP2 antes del próximo
-  // refresco, igual se mostraba "TP1 alcanzado". Con este campo, el front-end puede
-  // mostrar el badge correcto en el único ciclo en que esta señal queda expuesta.
-  const hitTP2 = frozen.tp2 != null && (isLong ? quote.last >= frozen.tp2 : quote.last <= frozen.tp2);
-  const result = { type: frozen.type, frozen, currentPrice: quote.last, hitTP, hitTP1: hitTP, hitTP2, hitSL, isNewDirection: isNewDirection && !inCooldown };
-  if (hitTP || hitSL) {
-    delete state.activeSignals[symbol];
-    try { localStorage.setItem('pt_active_signals', JSON.stringify(state.activeSignals)); } catch (e) {}
-  }
-  return result;
-}
-
 // ---------------------------------------------------------
-// Resolución de señales de las 7 estrategias independientes
+// Resolución de señales de las 8 estrategias independientes
 // (Kill Zone NY, Pivots Breakout & Reversal, Price Action+RSI+EMA,
-// Supply and Demand, EMA Cross Scalping, Divergencia RSI, Bollinger Squeeze)
-// Cada una tiene su propio cooldown por símbolo+estrategia, y NO
-// pisa ni se mezcla con las señales SMC de resolveActiveSignal().
+// Supply and Demand, EMA Cross Scalping, Divergencia RSI, Bollinger Squeeze,
+// ETH VWAP Trend Scalp)
+// Cada una tiene su propio cooldown por símbolo+estrategia.
 // ---------------------------------------------------------
 function resolveCustomSignal(symbol, quote, customSig, asset) {
   const key = `${symbol}_${customSig.strategy}`;
@@ -2473,29 +1673,13 @@ async function refreshAsset(symbol, forceRefresh = false) {
       try { const htfOhlcv = await MarketDataProvider.getOHLCV(symbol, htfTF, 60, forceRefresh); htfCandles = htfOhlcv.candles; }
       catch (e) { htfCandles = null; }
     }
-    const regimeForThreshold = detectMarketRegime(ohlcv.candles);
-    const analysis = SMCEngine.analyze(ohlcv.candles, state.strictMode, asset.type, htfCandles, getThresholdForSymbol(symbol, regimeForThreshold), getEffectivePatternStats());
-
-    if (analysis.filteredByConfidence) addLog(quote.source, `Señal bloqueada: confianza insuficiente (umbral ${analysis.confidenceThreshold})`, symbol);
-    if (analysis.filteredByVolume) addLog(quote.source, `Señal bloqueada: volumen no confirma (ratio ${analysis.volumeRatio ? analysis.volumeRatio.toFixed(2) : 'n/d'}x, se requiere 1.2x)`, symbol);
-    if (analysis.filteredByCandle) addLog(quote.source, 'Señal bloqueada: vela de confirmación no cumplida', symbol);
-    if (analysis.filteredByMitigation) addLog(quote.source, 'Señal bloqueada: mitigación de OB/FVG no confirmada (Modo Estricto)', symbol);
-    if (analysis.filteredByPremiumDiscount) addLog(quote.source, `Señal bloqueada: filtro Premium/Discount (zona: ${analysis.premiumDiscountZone})`, symbol);
-    if (analysis.filteredByHTF) addLog(quote.source, `Señal bloqueada: tendencia HTF contraria (${analysis.htfTrendDirection})`, symbol);
-
-    const spreadCheck = checkSpreadAnomaly(symbol, quote);
-    if (spreadCheck.anomalous && analysis.direction) {
-      addLog(quote.source, `Señal bloqueada por spread anómalo (${spreadCheck.ratio.toFixed(1)}x el promedio)`, symbol);
-      analysis.direction = null; analysis.filteredBySpread = true; analysis.spreadRatio = spreadCheck.ratio;
-    }
-
-    const display = resolveActiveSignal(symbol, quote, analysis);
-    if (display.cooldownMinutesLeft) addLog(quote.source, `Cambio de dirección bloqueado por cooldown (${display.cooldownMinutesLeft} min restantes)`, symbol);
-    renderSignal(symbol, display);
+    // checkHistoryOutcomes es compartida: resuelve pending/win/loss/expired del historial
+    // para las 8 estrategias independientes (antes también corría para SMC).
     checkHistoryOutcomes(symbol, quote.last, ohlcv.candles);
 
-    // --- Estrategias independientes (Kill Zone NY, Pivots B&R, Price Action+RSI+EMA) ---
-    // Corren en paralelo, no pasan por evalSide() ni por los filtros SMC de arriba.
+    // --- Estrategias independientes (Kill Zone NY, Pivots B&R, Price Action+RSI+EMA,
+    // Supply and Demand, EMA Cross Scalping, Divergencia RSI, Bollinger Squeeze,
+    // ETH VWAP Trend Scalp) ---
     try {
       const customSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles);
       const firedThisCycle = new Set();
