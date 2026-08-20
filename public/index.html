@@ -265,12 +265,11 @@ function renderPriceCard(symbol) {
 
 // Antes SMC tenía su propia tarjeta grande (renderSignalCard) y las 7 estrategias
 // independientes compartían una versión chica aparte (renderCustomSignals), debajo de
-// esa. Daba la sensación de que SMC era "la principal" y las otras un anexo, cuando en
-// realidad son 8 sistemas de señales corriendo en paralelo con el mismo peso — cada uno
-// con sus propios parámetros, y cuando se cumplen, emite señal. Ahora hay una sola
-// función que arma la tarjeta, igual para las 8: el título cambia, los datos reales que
-// difieren (SMC calcula un score de confianza, las otras no) se muestran si existen y
-// se omiten si no, pero la estructura (entrada/SL/TP1/TP2/RR/estado) es idéntica.
+// esa. (19/8: SMC se eliminó del motor por completo — ver engine.js v4.5 — así que ahora
+// las 8 tarjetas de abajo son todas de estrategias independientes, con el mismo peso.)
+// Ahora hay una sola función que arma la tarjeta, igual para las 8: el título cambia,
+// los datos reales que difieren entre estrategias se muestran si existen y se omiten
+// si no, pero la estructura (entrada/SL/TP1/TP2/RR/estado) es idéntica.
 const CUSTOM_STRATEGY_LIST = [
   { key: 'ny_open_kill_zone', label: 'Kill Zone Apertura NY' },
   { key: 'pivots_breakout_reversal', label: 'Pivots Breakout & Reversal' },
@@ -278,12 +277,14 @@ const CUSTOM_STRATEGY_LIST = [
   { key: 'supply_demand', label: 'Supply and Demand' },
   { key: 'ema_cross_scalping', label: 'EMA Cross Scalping' },
   { key: 'rsi_divergence', label: 'Divergencia RSI' },
-  { key: 'bollinger_squeeze', label: 'Bollinger Squeeze Breakout' }
+  { key: 'bollinger_squeeze', label: 'Bollinger Squeeze Breakout' },
+  { key: 'eth_vwap_scalp', label: 'ETH VWAP Trend Scalp' }
 ];
 
-// Mismas 7 + SMC, para el desglose por estrategia del módulo de historial
-// (renderAssetStrategyBreakdown). 'smc' es la key que usa entry.source cuando la señal
-// no viene de ninguna de las 7 independientes (ver pushSignalHistory en engine.js).
+// Las 8 independientes + 'smc' como key histórica: se mantiene acá (aunque el motor ya
+// no genera señales nuevas de SMC) porque strategyLabel() la usa para mostrar el label
+// correcto de señales SMC ya cerradas que quedaron en el historial de antes del 19/8 —
+// sacarla rompería ese label para datos viejos, no solo dejaría de sumar señales nuevas.
 const ALL_STRATEGY_LIST = [{ key: 'smc', label: 'Smart Money Concepts (SMC)' }].concat(CUSTOM_STRATEGY_LIST);
 
 function renderStrategySlot(title, d) {
@@ -303,27 +304,13 @@ function renderStrategySlot(title, d) {
     </div>`;
   }
   if (d.type === 'no-signal') {
-    const a = d.analysis; // solo existe en la señal SMC, las 7 independientes no calculan score
-    let badgesRow = '';
-    let reason = 'Esperando que se cumplan sus condiciones.';
-    if (a) {
-      const conf = fmtPct(a.confidence);
-      badgesRow = `<div class="signal-badges-row"><span class="badge-offline">Confianza ${conf}%</span></div>`;
-      reason = `No encontró un patrón por encima del umbral actual (${fmtPct(a.confidenceThreshold)}%).`;
-      if (a.filteredByVolume) reason = 'Se detectó un patrón, pero el volumen no confirmó el movimiento.';
-      else if (a.filteredByCandle) reason = 'Se detectó un patrón, pero faltó una vela de confirmación en la dirección esperada.';
-      else if (a.filteredByMitigation) reason = 'Se detectó un patrón, pero el nivel todavía no fue mitigado (modo estricto).';
-      else if (a.filteredByPremiumDiscount) reason = 'Se detectó un patrón, pero el precio está en una zona premium/descuento desfavorable.';
-      else if (a.filteredByHTF) reason = 'Se detectó un patrón, pero contradice la tendencia del timeframe mayor.';
-    }
     return `<div class="signal-card no-signal">
       <div class="signal-title">⏸️ ${title}</div>
-      ${badgesRow}
-      <div class="signal-reason">${reason}</div>
+      <div class="signal-reason">Esperando que se cumplan sus condiciones.</div>
     </div>`;
   }
 
-  // Señal activa — misma estructura para las 8, sea SMC o una de las independientes.
+  // Señal activa — misma estructura para las 8 estrategias independientes.
   const s = d.frozen;
   const isLong = s.type === 'long';
   const dec = s.decimals;
@@ -348,10 +335,12 @@ function renderStrategySlot(title, d) {
     </div>`;
   }
 
-  // Estos 4 badges solo existen en la señal SMC (SignalEngine.build calcula tendencia,
-  // confluencia y kill zone; confianza es un score 0-100). Las 7 estrategias
-  // independientes no los calculan — cuando no existen, el badge simplemente no se
-  // muestra, en vez de forzar un valor falso.
+  // Estos 4 badges eran exclusivos de la señal SMC (SignalEngine.build calculaba
+  // tendencia, confluencia y kill zone; confianza era un score 0-100), eliminada del
+  // motor el 19/8. Las 8 estrategias independientes no los calculan — cuando no
+  // existen, el badge simplemente no se muestra, en vez de forzar un valor falso.
+  // (Se dejan los campos/CSS por si en el futuro alguna estrategia agrega badges
+  // propios equivalentes.)
   const confBadge = s.confidence != null ? `<span class="badge-active">Confianza ${fmtPct(s.confidence)}%</span>` : '';
   const trendBadge = s.trend ? `<span class="badge-trend ${s.trend === 'bullish' ? 'bullish' : 'bearish'}">${s.trend === 'bullish' ? '📈 Tendencia alcista' : '📉 Tendencia bajista'}</span>` : '';
   const confluenceBadge = s.isConfluence !== undefined ? (s.isConfluence ? `<span class="badge-smc">🔗 Confluencia (${s.strategyLabels.length})</span>` : '<span class="badge-smc">🎯 Individual</span>') : '';
@@ -381,16 +370,14 @@ function renderStrategySlot(title, d) {
   </div>`;
 }
 
-// Arma las tarjetas de las 8 estrategias (SMC + 7 independientes), pero solo
-// muestra las que tienen una señal activa lista para operar — ninguna se deja fija
-// en pantalla por default. Si ninguna de las 8 tiene señal, un único mensaje limpio
-// en vez de 8 tarjetas "esperando" ocupando lugar sin aportar nada operable.
+// Arma las tarjetas de las 8 estrategias independientes, pero solo muestra las que
+// tienen una señal activa lista para operar — ninguna se deja fija en pantalla por
+// default. Si ninguna de las 8 tiene señal, un único mensaje limpio en vez de 8
+// tarjetas "esperando" ocupando lugar sin aportar nada operable.
 function renderAllStrategyCards(symbol) {
-  const smcDisplay = lastState.signals && lastState.signals[symbol];
   const customBySymbol = (lastState.customSignals && lastState.customSignals[symbol]) || {};
 
-  const slots = [{ title: 'Smart Money Concepts (SMC)', d: smcDisplay }]
-    .concat(CUSTOM_STRATEGY_LIST.map(strat => ({ title: strat.label, d: customBySymbol[strat.key] || null })));
+  const slots = CUSTOM_STRATEGY_LIST.map(strat => ({ title: strat.label, d: customBySymbol[strat.key] || null }));
 
   // Estados especiales (mercado cerrado / sin datos) sí se muestran siempre, aunque
   // no sean una señal operable — el usuario necesita saber por qué no hay nada.
