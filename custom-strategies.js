@@ -1,17 +1,16 @@
 // ============================================================
 // ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4 (CORREGIDO)
 // ============================================================
-// Estas 10 estrategias (Kill Zone Apertura NY, Pivots Breakout & Reversal,
+// Estas 8 estrategias (Kill Zone Apertura NY, Pivots Breakout & Reversal,
 // Price Action + RSI + EMA, Supply and Demand, EMA Cross Scalping,
-// Divergencia RSI, Bollinger Squeeze, ETH VWAP Trend Scalp, EUR London
-// Pullback VWAP y XAU VWAP Reversion Scalp) NO pasan por SMCEngine.evalSide()
-// ni por los filtros globales de confluencia (premium/discount, HTF
-// trend, etc). Cada una se evalúa por sí sola, con su propia gestión de
-// riesgo, tal como fueron definidas. Corren en paralelo a las estrategias
-// SMC existentes (CHoCH, BOS, OB, FVG, Sweep, etc), sin mezclarse con
-// ellas. (Nota: versiones anteriores de este comentario decían "5" — se
-// corrigió acá, no hay ninguna separación real entre las estrategias,
-// todas están al mismo nivel.)
+// Divergencia RSI, Bollinger Squeeze, ETH VWAP Trend Scalp) NO pasan por
+// SMCEngine.evalSide() ni por los filtros globales de confluencia
+// (premium/discount, HTF trend, etc). Cada una se evalúa por sí sola, con
+// su propia gestión de riesgo, tal como fueron definidas.
+// (Sesión 19/8: se sacaron EUR London Pullback VWAP y XAU VWAP Reversion
+// Scalp por usar datos de volumen simulados/estimados en OTC — decisión
+// del usuario de operar solo con datos reales. El motor SMC se saca aparte,
+// en engine.js, pendiente de esa entrega.)
 //
 // Cómo integrar en engine.js:
 //   const CustomStrategies = require('./custom-strategies');
@@ -1092,140 +1091,14 @@ function detectEthVwapScalp(candles, htfCandles) {
 }
 
 // ---------------------------------------------------------
-// ESTRATEGIA 9: EUR LONDON PULLBACK VWAP (id: eur_london_pullback_vwap) — solo EURUSD
+// ELIMINADAS (sesión 19/8, decisión del usuario): EUR London Pullback VWAP
+// y XAU VWAP Reversion Scalp. Ambas dependían de calculateVWAPSeries() en
+// EURUSD/XAUUSD, instrumentos OTC sin volumen de mercado centralizado — el
+// VWAP caía a un fallback de promedio de precio típico (dato estimado, no
+// real). El usuario prefiere que la app solo opere con datos reales. Se
+// mantiene eth_vwap_scalp porque ETHUSD sí tiene volumen real vía
+// Binance/CoinGecko.
 // ---------------------------------------------------------
-// LIMITACIÓN CONOCIDA: EURUSD no tiene volumen de mercado real (ver nota en
-// calculateVWAPSeries) — el VWAP acá probablemente opera en modo fallback
-// (promedio de precio típico) hasta que se confirme lo contrario en logs de
-// producción. Solo genera señales dentro de la sesión de Londres.
-function detectEurLondonPullbackVwap(candles, htfCandles) {
-  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, reason: null };
-  if (!candles || candles.length < 60) { result.reason = 'Velas insuficientes'; return result; }
-
-  const last = candles[candles.length - 1];
-  if (!isLondonSession(last.time)) { result.reason = 'Fuera de la ventana horaria de Londres'; return result; }
-
-  const h1 = getH1Bias(htfCandles);
-  if (h1.bias === 'no_trade') { result.reason = h1.reason; return result; }
-
-  const { vwap } = calculateVWAPSeries(candles);
-  const i = candles.length - 1;
-  if (vwap[i] === null || vwap[i - 5] === null) { result.reason = 'VWAP no calculable aún'; return result; }
-  const vwapSlopeUp = vwap[i] > vwap[i - 5];
-  const vwapSlopeDown = vwap[i] < vwap[i - 5];
-  // Filtro de exclusión: VWAP plana
-  if (!vwapSlopeUp && !vwapSlopeDown) { result.reason = 'VWAP plana, sin pendiente clara'; return result; }
-
-  const PH = findStrictPivotHighs(candles);
-  const PL = findStrictPivotLows(candles);
-
-  if (h1.bias === 'long' && vwapSlopeUp) {
-    if (PL.length < 2 || !(PL[PL.length - 1].price >= PL[PL.length - 2].price)) { result.reason = 'Estructura alcista no confirmada (sin mínimos crecientes)'; return result; }
-    const nearVwap = Math.abs(last.low - vwap[i]) / vwap[i] < 0.0015 || (last.low <= vwap[i] && last.close >= vwap[i]);
-    const rejection = isPinBar(last, 'bullish') || (last.close > last.open && last.close > vwap[i]);
-    if (nearVwap && rejection) {
-      result.bullish = true;
-      result.entry = last.close;
-      const lastPL = PL[PL.length - 1];
-      result.sl = Math.min(lastPL.price, vwap[i]) * 0.999;
-      const risk = result.entry - result.sl;
-      const priorHigh = PH.length ? PH[PH.length - 1].price : null;
-      result.tp1 = result.entry + risk * 1;
-      result.tp2 = (priorHigh && priorHigh > result.tp1) ? priorHigh : result.entry + risk * 1.75;
-      result.details.push(`Pullback a VWAP (${vwap[i].toFixed(5)}) en sesión Londres, ${h1.reason}`);
-    } else { result.reason = 'Sin rechazo válido en el pullback a VWAP'; }
-  } else if (h1.bias === 'short' && vwapSlopeDown) {
-    if (PH.length < 2 || !(PH[PH.length - 1].price <= PH[PH.length - 2].price)) { result.reason = 'Estructura bajista no confirmada (sin máximos decrecientes)'; return result; }
-    const nearVwap = Math.abs(last.high - vwap[i]) / vwap[i] < 0.0015 || (last.high >= vwap[i] && last.close <= vwap[i]);
-    const rejection = isPinBar(last, 'bearish') || (last.close < last.open && last.close < vwap[i]);
-    if (nearVwap && rejection) {
-      result.bearish = true;
-      result.entry = last.close;
-      const lastPH = PH[PH.length - 1];
-      result.sl = Math.max(lastPH.price, vwap[i]) * 1.001;
-      const risk = result.sl - result.entry;
-      const priorLow = PL.length ? PL[PL.length - 1].price : null;
-      result.tp1 = result.entry - risk * 1;
-      result.tp2 = (priorLow && priorLow < result.tp1) ? priorLow : result.entry - risk * 1.75;
-      result.details.push(`Pullback a VWAP (${vwap[i].toFixed(5)}) en sesión Londres, ${h1.reason}`);
-    } else { result.reason = 'Sin rechazo válido en el pullback a VWAP'; }
-  } else {
-    result.reason = 'VWAP no alineado con el sesgo H1';
-  }
-
-  return result;
-}
-
-// ---------------------------------------------------------
-// ESTRATEGIA 10: XAU VWAP REVERSION SCALP (id: xau_vwap_reversion) — solo XAUUSD
-// ---------------------------------------------------------
-// LIMITACIÓN CONOCIDA: mismo caso que EUR — XAUUSD spot no tiene volumen
-// real centralizado, el VWAP puede operar en modo fallback (ver
-// calculateVWAPSeries). Filtro de RR mínimo 1:1.5 aplicado explícitamente
-// (a diferencia de la mayoría de las otras estrategias, acá si no se cumple
-// se descarta la señal en vez de mostrarla igual).
-function detectXauVwapReversion(candles) {
-  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, reason: null };
-  if (!candles || candles.length < 60) { result.reason = 'Velas insuficientes'; return result; }
-
-  const last = candles[candles.length - 1];
-  if (!(isLondonSession(last.time) || isNYOpenWindow(last.time) || isLondonNYOverlap(last.time))) {
-    result.reason = 'Fuera de sesión (Londres / apertura NY / solape)'; return result;
-  }
-
-  const atr = calculateATR(candles, 14);
-  const i = candles.length - 1;
-  if (atr === null || atr === undefined) { result.reason = 'ATR no calculable aún'; return result; }
-  if (atr < last.close * 0.0006) { result.reason = 'Volatilidad insuficiente (ATR14 muy bajo)'; return result; }
-
-  const { vwap, upperBand, lowerBand } = calculateVWAPSeries(candles);
-  const rsi2 = calculateRSISeries(candles, 2);
-  const emaFast = calculateEMASeries(candles, 9);
-  const emaSlow = calculateEMASeries(candles, 21);
-  if (vwap[i] === null || lowerBand[i] === null || upperBand[i] === null || rsi2[i] === null || emaFast[i] === null || emaSlow[i] === null) {
-    result.reason = 'Indicadores no calculables aún'; return result;
-  }
-
-  // --- LONG: extensión bajista extrema + barrida de banda inferior ---
-  if (last.low <= lowerBand[i] && rsi2[i] <= 10 && last.close > last.open && last.close > lowerBand[i] && emaFast[i] >= emaSlow[i - 1]) {
-    result.entry = last.close;
-    result.sl = last.low;
-    const risk = result.entry - result.sl;
-    const tp1 = vwap[i];
-    const rr1 = (tp1 - result.entry) / risk;
-    if (rr1 >= 1.5) {
-      result.bullish = true;
-      result.tp1 = tp1;
-      const PH = findStrictPivotHighs(candles);
-      const nextLevel = PH.length ? PH[PH.length - 1].price : null;
-      result.tp2 = (nextLevel && nextLevel > tp1) ? nextLevel : result.entry + risk * 2.5;
-      result.details.push(`Barrida banda inferior VWAP (RSI2=${rsi2[i].toFixed(1)}) + rechazo alcista, RR1 ${rr1.toFixed(2)}`);
-    } else {
-      result.reason = `RR insuficiente hacia VWAP (1:${rr1.toFixed(2)}, mínimo 1:1.5)`;
-    }
-  // --- SHORT: extensión alcista extrema + barrida de banda superior ---
-  } else if (last.high >= upperBand[i] && rsi2[i] >= 90 && last.close < last.open && last.close < upperBand[i] && emaFast[i] <= emaSlow[i - 1]) {
-    result.entry = last.close;
-    result.sl = last.high;
-    const risk = result.sl - result.entry;
-    const tp1 = vwap[i];
-    const rr1 = (result.entry - tp1) / risk;
-    if (rr1 >= 1.5) {
-      result.bearish = true;
-      result.tp1 = tp1;
-      const PL = findStrictPivotLows(candles);
-      const nextLevel = PL.length ? PL[PL.length - 1].price : null;
-      result.tp2 = (nextLevel && nextLevel < tp1) ? nextLevel : result.entry - risk * 2.5;
-      result.details.push(`Barrida banda superior VWAP (RSI2=${rsi2[i].toFixed(1)}) + rechazo bajista, RR1 ${rr1.toFixed(2)}`);
-    } else {
-      result.reason = `RR insuficiente hacia VWAP (1:${rr1.toFixed(2)}, mínimo 1:1.5)`;
-    }
-  } else if (!result.reason) {
-    result.reason = 'Sin extensión/barrida de banda VWAP con agotamiento RSI2 en este ciclo';
-  }
-
-  return result;
-}
 
 // ---------------------------------------------------------
 // EVALUACIÓN CONJUNTA (independiente, sin pasar por evalSide)
@@ -1327,28 +1200,6 @@ function evaluateAll(candles, symbol, asset, htfCandles = null) {
     }
   }
 
-  if (symbol === 'EURUSD') {
-    const eurVwap = safeRun('eur_london_pullback_vwap', detectEurLondonPullbackVwap, candles, htfCandles);
-    if (eurVwap.bullish || eurVwap.bearish) {
-      signals.push({
-        strategy: 'eur_london_pullback_vwap', label: 'EUR London Pullback VWAP',
-        direction: eurVwap.bullish ? 'long' : 'short', entry: eurVwap.entry, sl: eurVwap.sl, tp1: eurVwap.tp1, tp2: eurVwap.tp2,
-        details: eurVwap.details, independent: true
-      });
-    }
-  }
-
-  if (symbol === 'XAUUSD') {
-    const xauVwap = safeRun('xau_vwap_reversion', detectXauVwapReversion, candles);
-    if (xauVwap.bullish || xauVwap.bearish) {
-      signals.push({
-        strategy: 'xau_vwap_reversion', label: 'XAU VWAP Reversion Scalp',
-        direction: xauVwap.bullish ? 'long' : 'short', entry: xauVwap.entry, sl: xauVwap.sl, tp1: xauVwap.tp1, tp2: xauVwap.tp2,
-        details: xauVwap.details, independent: true
-      });
-    }
-  }
-
   return signals;
 }
 
@@ -1362,8 +1213,6 @@ module.exports = {
   detectRsiDivergence,
   detectBollingerSqueeze,
   detectEthVwapScalp,
-  detectEurLondonPullbackVwap,
-  detectXauVwapReversion,
   calculateRSISeries,
   calculateMACDSeries,
   calculateSMASeries,
@@ -1440,4 +1289,10 @@ module.exports = {
 //    implementarlo sería que engine.js calcule las estadísticas del día
 //    para cada una de estas 3 estrategias antes de llamar a evaluateAll()
 //    y se las pase como parámetro nuevo — no incluido en esta entrega.
+// 9. [ELIMINADAS] (sesión 19/8) Se sacaron eur_london_pullback_vwap y
+//    xau_vwap_reversion. Motivo: en EURUSD/XAUUSD (OTC, sin volumen real
+//    centralizado) calculateVWAPSeries() caía al fallback de promedio de
+//    precio típico — dato estimado, no volumen real de mercado. El usuario
+//    decidió que la app solo opere con datos reales. Se mantiene
+//    eth_vwap_scalp (ETHUSD sí tiene volumen real vía Binance/CoinGecko).
 // ============================================================
