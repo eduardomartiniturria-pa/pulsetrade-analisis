@@ -115,10 +115,8 @@
 //   campos de estado state.activeSignals/lastSignalAt/spreadHistory/backtestPatternStats/
 //   backtestAutoTune.
 // ============================================================
-
 const { sendPushToAll } = require('./subscriptions');
 const CustomStrategies = require('./custom-strategies');
-
 const CONFIG = {
   REFRESH_INTERVAL: 30000,
   HISTORY_LIMIT: 50,
@@ -533,7 +531,6 @@ const ProviderAdapters = {
       ResponseCache.set(cacheKey, result); return result;
     }
   },
-
   binanceFutures: {
     name: 'Binance Futures', requiresKey: false, supports: ['BTCUSD','ETHUSD'],
     async fetchQuote(symbol) {
@@ -565,10 +562,8 @@ const ProviderAdapters = {
       ResponseCache.set(cacheKey, result); return result;
     }
   },
-
   // CryptoCompare se sacó del todo: su plan gratuito solo permite 100 consultas
   // por MES para este tipo de dato (histominute), no alcanza para uso real.
-
   exchangerate: {
     name: 'ExchangeRate-API', requiresKey: false, supports: ['EURUSD'],
     async fetchQuote(symbol) {
@@ -589,7 +584,6 @@ const ProviderAdapters = {
       ResponseCache.set(cacheKey, marketData); return marketData;
     }
   },
-
   twelveData: {
     name: 'Twelve Data', requiresKey: true, supports: ['BTCUSD','ETHUSD','EURUSD','XAUUSD'],
     async fetchQuote(symbol) {
@@ -632,7 +626,6 @@ const ProviderAdapters = {
       ResponseCache.set(cacheKey, result); return result;
     }
   },
-
   finnhub: {
     name: 'Finnhub', requiresKey: true, supports: ['BTCUSD','ETHUSD','EURUSD','XAUUSD'],
     async fetchQuote(symbol) {
@@ -666,7 +659,6 @@ const ProviderAdapters = {
       ResponseCache.set(cacheKey, result); return result;
     }
   },
-
   // CoinGecko reemplaza a CryptoCompare como respaldo de cripto: CoinDesk (dueño de
   // CryptoCompare desde 2024) discontinuó el nivel gratis de esa API el 21 de mayo de 2026 —
   // por eso pegaba "rate limit / upgrade your account" siempre, no era un problema de ráfaga.
@@ -736,7 +728,6 @@ const ProviderAdapters = {
       ResponseCache.set(cacheKey, result); return result;
     }
   },
-
   alphaVantage: {
     name: 'Alpha Vantage', requiresKey: true, supports: ['BTCUSD','ETHUSD','EURUSD','XAUUSD'],
     async fetchQuote(symbol) {
@@ -799,7 +790,6 @@ const ProviderAdapters = {
       ResponseCache.set(cacheKey, result); return result;
     }
   },
-
   fmp: {
     name: 'Financial Modeling Prep', requiresKey: true, supports: ['BTCUSD','ETHUSD','EURUSD','XAUUSD'],
     async fetchQuote(symbol) {
@@ -838,7 +828,6 @@ const MarketDataProvider = {
     const asset = ASSETS[symbol];
     if (!asset) throw new Error('Activo no configurado: ' + symbol);
     if (!isMarketOpenForAsset(symbol)) throw new Error('MERCADO_CERRADO');
-
     const providerList = asset.providerPriority || CONFIG.PROVIDER_PRIORITY;
     const eligible = providerList.filter(providerName => {
       const adapter = ProviderAdapters[providerName];
@@ -849,12 +838,9 @@ const MarketDataProvider = {
       if (usage.limit && usage.used >= usage.limit) return false; // cupo diario ya agotado, no tiene sentido intentar
       return true;
     });
-
     if (eligible.length === 0) throw new Error(`Datos de mercado temporalmente no disponibles para ${symbol}.`);
-
     const readyProviders = eligible.filter(p => !isProviderInCooldown(p));
     const providersToTry = readyProviders.length > 0 ? readyProviders : eligible;
-
     for (const providerName of providersToTry) {
       const adapter = ProviderAdapters[providerName];
       addLog(adapter.name, 'INTENTO', symbol);
@@ -878,18 +864,15 @@ const MarketDataProvider = {
         await sleep(1500);
       }
     }
-
     const detailMessages = providersToTry.map((name) => {
       const stats = state.providerStats[name]; return `${name}: ${stats?.lastErrorMsg || 'falló'}`;
     }).join('; ');
     throw new Error(`Todos los proveedores fallaron: ${detailMessages}`);
   },
-
   async getOHLCV(symbol, tf, limit = 100, forceRefresh = false) {
     const asset = ASSETS[symbol];
     if (!asset) return new OHLCVData([]);
     if (!isMarketOpenForAsset(symbol)) return state.klineHistory[symbol] || new OHLCVData([]);
-
     const providerList = asset.providerPriority || CONFIG.PROVIDER_PRIORITY;
     const eligible = providerList.filter(providerName => {
       const adapter = ProviderAdapters[providerName];
@@ -899,11 +882,9 @@ const MarketDataProvider = {
       if (usage.limit && usage.used >= usage.limit) return false; // cupo diario ya agotado, no tiene sentido intentar
       return true;
     });
-
     if (eligible.length > 0) {
       const readyProviders = eligible.filter(p => !isProviderInCooldown(p));
       const providersToTry = readyProviders.length > 0 ? readyProviders : eligible;
-
       for (const providerName of providersToTry) {
         try {
           const data = await ProviderAdapters[providerName].fetchOHLCV(symbol, tf, limit);
@@ -929,11 +910,9 @@ const MarketDataProvider = {
       if (state.klineHistory[symbol] && state.klineHistory[symbol].candles.length > 0) return state.klineHistory[symbol];
       throw new Error(`No se pudieron obtener velas históricas`);
     }
-
     if (state.klineHistory[symbol] && state.klineHistory[symbol].candles.length > 0) return state.klineHistory[symbol];
     throw new Error('No hay datos históricos disponibles');
   },
-
   setApiKey(provider, key) {
     state.apiKeys[provider] = key;
     if (state.persistKeys) {
@@ -958,7 +937,6 @@ const BacktestEngine = {
     // deja pedir cientos de velas con el detalle que necesita el backtest.
     return this.fetchCandlesTwelveData(symbol, interval);
   },
-
   // FIX: se agrega &timezone=UTC, mismo motivo que en ProviderAdapters.twelveData.fetchOHLCV
   // — sin este parámetro, `datetime` viene en hora local de la plaza (NY para XAUUSD) sin
   // sufijo `Z`, y `new Date(v.datetime)` en un proceso en UTC lo interpreta mal, corriendo
@@ -978,7 +956,6 @@ const BacktestEngine = {
       low: parseFloat(v.low), close: parseFloat(v.close), volume: v.volume ? parseFloat(v.volume) : 0
     }));
   },
-
   // Igual que simulate() (SMC, eliminado 19/8), pero para las 8 estrategias independientes de custom-strategies.js
   // en vez de SMCEngine. No usan `confidence` ni `regime`, así que no pasan por
   // calibrateThreshold() — cada una solo suma gana/pierde por separado (aggregateCustomStats).
@@ -1027,7 +1004,6 @@ const BacktestEngine = {
     }
     return events;
   },
-
   aggregateCustomStats(events) {
     const stats = {};
     events.forEach(e => {
@@ -1046,7 +1022,6 @@ const BacktestEngine = {
     });
     return stats;
   },
-
   async runSymbol(symbol) {
     const asset = ASSETS[symbol];
     let allCustomEvents = [];
@@ -1104,7 +1079,6 @@ const BacktestEngine = {
     const customStats = this.aggregateCustomStats(allCustomEvents);
     return { symbol, candlesAnalyzed, customStats };
   },
-
   async runAll(force = false) {
     if (state.backtestRunning) return;
     const cfg = CONFIG.BACKTEST;
@@ -1146,7 +1120,6 @@ const BacktestEngine = {
         // el símbolo. Solo escribe si todavía no hay datos para ese símbolo+estrategia
         // (no pisa contadores ya acumulados con señales reales en vivo).
         seedStrategyStatsFromBacktest(results);
-
         // Se suman gana/pierde
         // de los 4 símbolos x 2 timeframes en una sola tabla por estrategia.
         const combinedCustomStats = {};
@@ -1210,6 +1183,7 @@ function updatePriceUI(symbol, quote, asset) {
     estimatedSpread: !!quote.estimatedSpread, timestamp: quote.timestamp, source: quote.source
   };
 }
+
 function renderTradingHoursBar() {}
 function assetFeedSkeleton() { return ''; }
 function renderAssetsFeedSkeleton() {}
@@ -1229,7 +1203,9 @@ function renderCustomSignal(symbol, strategyKey, display) {
   state.lastCustomDisplay[symbol] = state.lastCustomDisplay[symbol] || {};
   state.lastCustomDisplay[symbol][strategyKey] = display || { type: 'no-signal' };
 }
+
 function renderConfidence() {}
+
 function pushSignalHistory(signal) {
   if (signal.type !== 'long' && signal.type !== 'short') return;
   // Antes había acá un chequeo que descartaba la señal si `state.signalHistory[0]`
@@ -1405,6 +1381,7 @@ function runAutoTune(symbol) {
 }
 
 function renderAutoTuneStatus() {}
+
 function localDayKey(timestamp) {
   const d = new Date(timestamp);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -1459,7 +1436,7 @@ function showSignalAlertBanner() {}
 function notifyNewSignal(signal) {
   const asset = ASSETS[signal.symbol];
   const title = `${signal.type === 'long' ? '🟢 LONG' : '🔴 SHORT'} ${asset ? asset.name : signal.symbol}${signal.source && signal.source !== 'smc' ? ' · ' + signal.strategyLabels[0] : ''}`;
-  const confPart = (signal.confidence !== null && signal.confidence !== undefined) ? ` · Confianza ${signal.confidence}%` : '';
+  const confPart = (signal.confidence !== null && signal.confidence !== undefined) ? `· Confianza ${signal.confidence}%` : '';
   const body = `Entrada ${fmt(signal.entry, signal.decimals)} · SL ${fmt(signal.sl, signal.decimals)} · TP1 ${fmt(signal.tp1, signal.decimals)}${confPart}`;
   sendPushToAll({ title, body, symbol: signal.symbol, signal }).catch(err => console.error('Error enviando push:', err.message));
 }
@@ -1481,14 +1458,13 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
   const lastAt = state.lastCustomSignalAt[key] || 0;
   const cooldownRemainingMs = CONFIG.SIGNAL_COOLDOWN_MS - (Date.now() - lastAt);
   const inCooldown = isNewDirection && cooldownRemainingMs > 0;
-
   if (isNewDirection && !inCooldown) {
     const entry = customSig.entry || quote.last;
     const sl = customSig.sl;
     const tp1 = customSig.tp1;
     // Antes: `customSig.tp2 || customSig.tp1` — si la estrategia no definía TP2, se
     // mostraba el mismo valor que TP1 como si fueran dos niveles reales (confuso en el
-    // panel). Ahora se deja `null` cuando no hay un TP2 real, y `fmt()`/`toPips()` en el
+    // panel). Ahora se deja `null` cuando no hay un TP2 real, y `fmt()` / `toPips()` en el
     // front-end ya saben mostrar "--" para null.
     const tp2 = (customSig.tp2 !== undefined && customSig.tp2 !== null) ? customSig.tp2 : null;
     const slPips = toPips(sl, entry, asset);
@@ -1497,7 +1473,7 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     // Antes: `rr1: '1:2'` y `rr2: '1:3'` fijos, sin importar la estrategia. Eso era
     // correcto para Pivots, EMA Cross, RSI Divergence y Bollinger (que sí usan esos
     // ratios exactos), pero mentía en Kill Zone NY (real: 1:1.5 y 1:2, no 1:2 y 1:3) y
-    // en Price Action / Supply&Demand, donde TP1/TP2 son niveles estructurales
+    // en Price Action / Supply & Demand, donde TP1/TP2 son niveles estructurales
     // (próxima zona S/R u oferta/demanda opuesta), no un múltiplo fijo del riesgo —
     // ahí el RR real puede ser cualquier valor (2.3, 3.8, lo que sea). Ahora se calcula
     // el RR real a partir de entry/sl/tp en cada caso.
@@ -1531,7 +1507,6 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     pushSignalHistory(frozen);
     notifyNewSignal(frozen);
   }
-
   const frozen = state.activeCustomSignals[key];
   if (!frozen) return null;
   return evaluateCustomSignalOutcome(symbol, key, quote, frozen);
@@ -1570,13 +1545,11 @@ function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
   // esperar tp2 en ningún caso (antes, las estrategias con tp2 definido quedaban
   // "activas" indefinidamente si el precio tocaba TP1 y no seguía hasta TP2).
   const hitTP2 = frozen.tp2 != null && (isLong ? quote.last >= frozen.tp2 : quote.last <= frozen.tp2);
-
   // Una vez tocado TP1, se recuerda (frozen.tp1HitAt) para no "deshacerlo" si el precio
   // retrocede por debajo de TP1 (ya no aplica esperar a tp2, pero se mantiene el sello
   // de tiempo por si se usa en otro lado del código).
   if (hitTP1Now && !frozen.tp1HitAt) frozen.tp1HitAt = Date.now();
   const hitTP1 = hitTP1Now || !!frozen.tp1HitAt;
-
   // FIX (expiración corta de scalping no se aplicaba acá): CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY
   // (4hs para ema_cross_scalping/ny_open_kill_zone) se había agregado únicamente en
   // checkHistoryOutcomes(), que resuelve `state.signalHistory` — una estructura capada a
@@ -1593,12 +1566,10 @@ function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
   const expirationMs = (CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY && CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY[frozen.source]) || CONFIG.SIGNAL_EXPIRATION_MS;
   const ageMs = Date.now() - frozen.timestamp;
   const isExpired = !hitSL && !hitTP1 && ageMs > expirationMs;
-
   // LOG TEMPORAL DE DIAGNÓSTICO — sacar una vez que se confirme por qué las señales de
   // scalping no expiran ni cierran por SL en el display en vivo (activeCustomSignals),
   // pese a que la lógica se revisó línea por línea y por inspección parece correcta.
   console.log(`[DIAG evaluateCustomSignalOutcome] ${key} | source=${frozen.source} | quote.last=${quote.last} | sl=${frozen.sl} | tp1=${frozen.tp1} | tp2=${frozen.tp2} | hitSL=${hitSL} | hitTP1=${hitTP1} | hitTP2=${hitTP2} | ageMs=${ageMs} (${(ageMs/3600000).toFixed(2)}h) | expirationMs=${expirationMs} (${(expirationMs/3600000).toFixed(2)}h) | isExpired=${isExpired}`);
-
   const shouldClose = hitSL || hitTP1 || isExpired;
   if (shouldClose) {
     delete state.activeCustomSignals[key];
@@ -1606,7 +1577,6 @@ function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
     state.pendingCustomDisplayReset = state.pendingCustomDisplayReset || {};
     state.pendingCustomDisplayReset[key] = true;
   }
-
   return { type: frozen.type, frozen, currentPrice: quote.last, hitTP: hitTP1, hitTP1, hitTP2, hitSL };
 }
 
@@ -1629,7 +1599,6 @@ function refreshActiveCustomSignalsDisplay(symbol, quote, skipStrategies = new S
       delete state.pendingCustomDisplayReset[pendingKey];
     });
   }
-
   Object.keys(state.activeCustomSignals).forEach(key => {
     if (!key.startsWith(symbol + '_')) return;
     const frozen = state.activeCustomSignals[key];
@@ -1663,10 +1632,81 @@ async function refreshAsset(symbol, forceRefresh = false) {
     // checkHistoryOutcomes es compartida: resuelve pending/win/loss/expired del historial
     // para las 8 estrategias independientes (antes también corría para SMC).
     checkHistoryOutcomes(symbol, quote.last, ohlcv.candles);
-
     // --- Estrategias independientes (Kill Zone NY, Pivots B&R, Price Action+RSI+EMA,
     // Supply and Demand, EMA Cross Scalping, Divergencia RSI, Bollinger Squeeze,
     // ETH VWAP Trend Scalp) ---
     try {
       const customSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles);
-      con
+      const firedThisCycle = new Set();
+      customSignals.forEach(sig => {
+        const customDisplay = resolveCustomSignal(symbol, quote, sig, asset);
+        renderCustomSignal(symbol, sig.strategy, customDisplay);
+        firedThisCycle.add(sig.strategy);
+        if (customDisplay) {
+          addLog(quote.source, `[${sig.label}] señal ${sig.direction === 'long' ? 'LONG' : 'SHORT'} independiente`, symbol);
+        }
+      });
+      // Refresca (TP/SL, precio actual) las señales custom que ya estaban activas de
+      // ciclos anteriores y que esta vuelta no volvieron a dispararse.
+      refreshActiveCustomSignalsDisplay(symbol, quote, firedThisCycle);
+    } catch (e) {
+      console.warn(`Estrategias independientes fallaron para ${symbol}:`, e.message);
+    }
+  } catch (error) {
+    if (error.message === 'MERCADO_CERRADO') renderSignal(symbol, { type: 'market-closed' });
+    else {
+      renderApiError(symbol, error.message || 'No se pudo obtener información de ningún proveedor. Revisa tu conexión o las claves de API en Ajustes.');
+      renderSignal(symbol, { type: 'no-data', reason: 'Todos los proveedores de datos fallaron para este activo.' });
+    }
+  }
+}
+
+async function refreshAllData(forceRefresh = false) {
+  renderTradingHoursBar();
+  if (forceRefresh) setLoading(true, 'Consultando proveedores de datos...');
+  try {
+    for (const symbol of Object.keys(ASSETS)) {
+      await refreshAsset(symbol, forceRefresh);
+      await sleep(8000); // ↑ delay entre activos aumentado a 8s (antes 4s)
+    }
+  } finally {
+    if (forceRefresh) setLoading(false);
+  }
+}
+
+async function requestWakeLock() {}
+
+// ---------------------------------------------------------
+// Scheduler autoajustable: reemplaza al setInterval fijo de server.js.
+// Corre refreshAllData() y programa la siguiente pasada según la hora:
+// cada 15 min normalmente, cada 1 min dentro de la ventana Kill Zone NY.
+// Llamar UNA sola vez desde server.js con: engine.startAutoRefreshLoop();
+// (y sacar de ahí cualquier setInterval(refreshAllData, ...) que hubiera).
+// ---------------------------------------------------------
+let autoRefreshTimer = null;
+
+async function autoRefreshTick() {
+  try {
+    await refreshAllData(false);
+  } catch (e) {
+    console.warn('autoRefreshTick: error en refreshAllData', e.message);
+  } finally {
+    const delay = getDynamicRefreshIntervalMs();
+    addLog('scheduler', `Próximo refresco en ${Math.round(delay / 1000)}s (${isArgKillZoneWindow() ? 'Kill Zone NY activa' : 'horario normal'})`, 'ALL');
+    autoRefreshTimer = setTimeout(autoRefreshTick, delay);
+  }
+}
+
+function startAutoRefreshLoop() {
+  if (autoRefreshTimer) return; // ya está corriendo, no duplicar
+  autoRefreshTick();
+}
+
+function stopAutoRefreshLoop() {
+  if (autoRefreshTimer) { clearTimeout(autoRefreshTimer); autoRefreshTimer = null; }
+}
+
+module.exports = {
+  state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
+  startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isArgKillZoneWindow
+};
