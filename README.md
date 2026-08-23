@@ -1,3 +1,4 @@
+[Uploading README.md…]()
 [README.md](https://github.com/user-attachments/files/30840733/README.md)
 # PulseTrade PRO — backend (corre solo, sin celular abierto)
 
