@@ -43,7 +43,6 @@
 // Supabase en el mismo orden en que se generaron. Escrituras de keys DISTINTAS siguen
 // yendo en paralelo entre sí — no hay motivo para serializarlas, y serializar TODO
 // (una sola cola global) sería mucho más lento sin necesidad.
-
 const { Pool } = require('pg');
 
 const pool = process.env.DATABASE_URL
@@ -92,7 +91,12 @@ function enqueueWrite(key, task) {
 }
 
 async function ensureTable() {
-  await pool.query(`CREATE TABLE IF NOT EXISTS kv_store ( key TEXT PRIMARY KEY, value TEXT )`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS kv_store (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    )
+  `);
 }
 
 async function loadAll() {
@@ -199,7 +203,6 @@ async function gracefulShutdown(signal) {
   if (pool) await pool.end().catch(() => {});
   process.exit(0);
 }
-
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
