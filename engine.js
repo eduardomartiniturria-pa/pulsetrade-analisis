@@ -1,22 +1,18 @@
 // ============================================================
-// PULSE TRADE v4.6 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.6 - MOTOR DE SEÑALES PROFESIONAL (CON FILTRO DE ESTRATEGIAS)
 // ============================================================
 // Cambios v4.6 (sesión 23/8):
-// - Filtro de estrategias por rendimiento real (90 ops observadas):
-//   ENABLED_STRATEGIES: lista blanca global (solo estas corren)
-//   DISABLED_STRATEGIES_BY_SYMBOL: lista negra por activo específico
-// - Desactivadas: rsi_divergence (0% winrate), price_action_rsi_ema (0% winrate)
-// - Desactivada ema_cross_scalping SOLO en ETHUSD (0% en ETH, 50% en BTC/XAU)
-// - Blindaje contra señales SMC residuales (eliminadas en v4.5 pero aún aparecen
-//   en stats por localStorage viejo o deploy desactualizado)
-// - Estrategias activas: ny_open_kill_zone (56%), pivots_breakout_reversal (40%),
-//   bollinger_squeeze (39%), supply_demand (lógica sólida, merece muestra),
-//   ema_cross_scalping (solo BTC/XAU)
+// - Filtro de estrategias por rendimiento real (ENABLED_STRATEGIES / DISABLED_STRATEGIES_BY_SYMBOL).
+// - Desactivadas: rsi_divergence (0% winrate), price_action_rsi_ema (0% winrate).
+// - Desactivada ema_cross_scalping SOLO en ETHUSD (0% en ETH, 50% en BTC/XAU).
+// - Blindaje contra señales SMC residuales (eliminadas en v4.5).
+// - Limpieza de errores de sintaxis/espacios rotos heredados del documento original.
 //
-// [Todo el changelog de v4.0 a v4.5 se mantiene igual - ver archivo anterior]
+// [Changelog v4.0 a v4.5 se mantiene: fixes de timezone, 429 en cascada, cuota diaria, etc.]
 // ============================================================
 const { sendPushToAll } = require('./subscriptions');
 const CustomStrategies = require('./custom-strategies');
+
 const CONFIG = {
   REFRESH_INTERVAL: 30000,
   HISTORY_LIMIT: 50,
@@ -73,23 +69,16 @@ const CONFIG = {
     FMP: 'https://financialmodelingprep.com/stable'
   },
   // v4.6: LISTA BLANCA - Solo estas estrategias están permitidas para operar
-  // Basado en 90 operaciones reales observadas al 23/8. Las estrategias que rinden
-  // 0% winrate (rsi_divergence, price_action_rsi_ema) se desactivan para limpiar
-  // el feed de señales falsas y mejorar el winrate global automáticamente.
   ENABLED_STRATEGIES: [
-    'ny_open_kill_zone',           // 56% winrate - La más consistente (14/25)
-    'pivots_breakout_reversal',    // 40% winrate - Muestra grande (12/30), rentable con RR 1:2
-    'bollinger_squeeze',           // 39% winrate - Funciona en compresión real de volatilidad
-    'supply_demand',               // Lógica estructural sólida, merece más muestra
-    'ema_cross_scalping'           // 50% en BTC/XAU (se filtra por activo abajo)
-    // 'rsi_divergence'            // DESACTIVADA: 0% winrate (0/3) - trampa contrarian
-    // 'price_action_rsi_ema'      // DESACTIVADA: 0% winrate (0/3) - sobreajustada
-    // 'smc'                       // DESACTIVADA: eliminada en v4.5, blindaje por residuales
+    'ny_open_kill_zone',
+    'pivots_breakout_reversal',
+    'bollinger_squeeze',
+    'supply_demand',
+    'ema_cross_scalping'
   ],
   // v4.6: LISTA NEGRA POR ACTIVO - Desactiva estrategias específicas que fallan en un activo
-  // pero rinden en otros. Permite granularidad sin perder la estrategia completa.
   DISABLED_STRATEGIES_BY_SYMBOL: {
-    ETHUSD: ['ema_cross_scalping', 'smc'], // ETH tiene mucho ruido en EMAs cortas (0/3)
+    ETHUSD: ['ema_cross_scalping', 'smc'],
     BTCUSD: ['smc'],
     XAUUSD: ['smc'],
     EURUSD: ['smc']
@@ -741,14 +730,15 @@ const BacktestEngine = {
       let signals;
       try { signals = CustomStrategies.evaluateAll(window, symbol, asset, null); }
       catch (e) { continue; }
-      // v4.6: Filtrar estrategias también en el backtest para que las stats reflejen
-      // solo las estrategias activas en vivo (no mezclar con las desactivadas).
+      
+      // v4.6: Filtrar estrategias también en el backtest para que las stats reflejen solo las activas
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
       const filteredSignals = signals.filter(sig => {
         if (!CONFIG.ENABLED_STRATEGIES.includes(sig.strategy)) return false;
         if (disabledForSymbol.includes(sig.strategy)) return false;
         return true;
       });
+
       for (const sig of filteredSignals) {
         const lastIdx = lastSignalIndexByStrategy[sig.strategy] ?? -9999;
         if (i - lastIdx < cfg.COOLDOWN_CANDLES) continue;
@@ -874,23 +864,19 @@ const BacktestEngine = {
 };
 
 function renderBacktestStatus() {}
-
 function fmt(value, decimals) {
   if (value === null || value === undefined || isNaN(value)) return '--';
   return Number(value).toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
-
 function toPips(priceA, priceB, asset) {
   if (priceA === null || priceA === undefined || priceB === null || priceB === undefined) return null;
   const pipSize = asset && asset.pipSize ? asset.pipSize : 1;
   return Math.abs(priceA - priceB) / pipSize;
 }
-
 function fmtPips(pips) {
   if (pips === null || pips === undefined || isNaN(pips)) return '--';
   return pips.toFixed(1) + ' pips';
 }
-
 function pctDiff(a, b) {
   if (a === null || a === undefined || !b) return 0;
   return ((a - b) / b) * 100;
@@ -919,7 +905,6 @@ function renderCustomSignal(symbol, strategyKey, display) {
   state.lastCustomDisplay[symbol] = state.lastCustomDisplay[symbol] || {};
   state.lastCustomDisplay[symbol][strategyKey] = display || { type: 'no-signal' };
 }
-
 function renderConfidence() {}
 
 function pushSignalHistory(signal) {
@@ -1044,7 +1029,6 @@ function runAutoTune(symbol) {
   saveAutoTuneState();
   renderAutoTuneStatus(symbol);
 }
-
 function renderAutoTuneStatus() {}
 
 function localDayKey(timestamp) {
@@ -1201,8 +1185,6 @@ async function refreshAsset(symbol, forceRefresh = false) {
       const rawSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles);
       
       // v4.6: FILTRO DE ESTRATEGIAS POR RENDIMIENTO
-      // Lista blanca global + lista negra por activo. Las estrategias desactivadas
-      // no generan señales ni en vivo ni en el panel, limpiando el feed de ruido.
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
       const filteredSignals = rawSignals.filter(sig => {
         if (!CONFIG.ENABLED_STRATEGIES.includes(sig.strategy)) {
@@ -1254,7 +1236,6 @@ async function refreshAllData(forceRefresh = false) {
 async function requestWakeLock() {}
 
 let autoRefreshTimer = null;
-
 async function autoRefreshTick() {
   try {
     await refreshAllData(false);
