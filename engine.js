@@ -2,8 +2,8 @@
 // PULSE TRADE v4.6.2 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
 // Cambios v4.6.2:
-// - Ajuste de holgura dinámica para XAUUSD: amplía el SL un 50% y recalcula 
-//   los TPs para mantener el mismo ratio Riesgo:Beneficio (RR), evitando 
+// - Ajuste de holgura dinámica para XAUUSD: amplía el SL un 50% y recalcula
+//   los TPs para mantener el mismo ratio Riesgo:Beneficio (RR), evitando
 //   que las mechas del oro barren stops fijos.
 // - Filtro de estrategias por rendimiento real (ENABLED_STRATEGIES / DISABLED_STRATEGIES_BY_SYMBOL).
 // - Desactivadas: rsi_divergence, price_action_rsi_ema, ema_cross_scalping (solo en ETHUSD), smc.
@@ -730,14 +730,12 @@ const BacktestEngine = {
       let signals;
       try { signals = CustomStrategies.evaluateAll(window, symbol, asset, null); }
       catch (e) { continue; }
-      
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
       const filteredSignals = signals.filter(sig => {
         if (!CONFIG.ENABLED_STRATEGIES.includes(sig.strategy)) return false;
         if (disabledForSymbol.includes(sig.strategy)) return false;
         return true;
       });
-
       for (const sig of filteredSignals) {
         const lastIdx = lastSignalIndexByStrategy[sig.strategy] ?? -9999;
         if (i - lastIdx < cfg.COOLDOWN_CANDLES) continue;
@@ -777,7 +775,7 @@ const BacktestEngine = {
       s.sampleSize = total;
       s.winRate = total ? +(s.wins / total).toFixed(2) : 0;
       s.totalR = +s.totalR.toFixed(2);
-      s.avgR = total ? +(s.totalR / total).toFixed(2) : 0; // v4.6.1: R-multiple promedio
+      s.avgR = total ? +(s.totalR / total).toFixed(2) : 0;
     });
     return stats;
   },
@@ -945,10 +943,8 @@ function updateStrategyStatsBySymbol(entry) {
   else stats.losses++;
   const r = entry.rMultiple != null ? entry.rMultiple : (entry.result === 'win' ? 2 : -1);
   stats.totalR = +((stats.totalR || 0) + r).toFixed(2);
-  
   const totalOps = stats.wins + stats.losses;
-  stats.avgR = totalOps > 0 ? +(stats.totalR / totalOps).toFixed(2) : 0; // v4.6.1: Recalcular R promedio
-  
+  stats.avgR = totalOps > 0 ? +(stats.totalR / totalOps).toFixed(2) : 0;
   localStorage.setItem('pt_strategy_stats_by_symbol', JSON.stringify(state.strategyStatsBySymbol));
 }
 
@@ -959,12 +955,12 @@ function seedStrategyStatsFromBacktest(resultsBySymbol) {
       if (!state.strategyStatsBySymbol[symbol][key]) {
         const totalR = s.totalR != null ? s.totalR : (s.wins * 2 - s.losses);
         const totalOps = s.wins + s.losses;
-        state.strategyStatsBySymbol[symbol][key] = { 
-          wins: s.wins, 
-          losses: s.losses, 
-          totalR, 
-          avgR: totalOps > 0 ? +(totalR / totalOps).toFixed(2) : 0, // v4.6.1
-          seeded: true 
+        state.strategyStatsBySymbol[symbol][key] = {
+          wins: s.wins,
+          losses: s.losses,
+          totalR,
+          avgR: totalOps > 0 ? +(totalR / totalOps).toFixed(2) : 0,
+          seeded: true
         };
       }
     });
@@ -1100,24 +1096,17 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
   const lastAt = state.lastCustomSignalAt[key] || 0;
   const cooldownRemainingMs = CONFIG.SIGNAL_COOLDOWN_MS - (Date.now() - lastAt);
   const inCooldown = isNewDirection && cooldownRemainingMs > 0;
-  
   if (isNewDirection && !inCooldown) {
     let entry = customSig.entry || quote.last;
     let sl = customSig.sl;
     let tp1 = customSig.tp1;
     let tp2 = (customSig.tp2 !== undefined && customSig.tp2 !== null) ? customSig.tp2 : null;
-
-    // --- NUEVO v4.6.2: Ajuste de holgura para XAUUSD (Oro) ---
-    // El oro sufre muchas mechas que barren stops fijos. Ampliamos el SL un 50% 
-    // y recalculamos los TPs para mantener el mismo ratio Riesgo:Beneficio (RR) original.
     if (symbol === 'XAUUSD' && sl !== null && tp1 !== null) {
       const risk = Math.abs(entry - sl);
       const reward1 = Math.abs(tp1 - entry);
-      const originalRR1 = risk > 0 ? (reward1 / risk) : 2; 
-      
-      const slBufferFactor = 1.5; // 50% más de holgura para el SL
+      const originalRR1 = risk > 0 ? (reward1 / risk) : 2;
+      const slBufferFactor = 1.5;
       const newRisk = risk * slBufferFactor;
-      
       const isLong = customSig.direction === 'long';
       if (isLong) {
         sl = entry - newRisk;
@@ -1135,11 +1124,9 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
         }
       }
     }
-
     const slPips = toPips(sl, entry, asset);
     const tp1Pips = toPips(tp1, entry, asset);
     const tp2Pips = toPips(tp2, entry, asset);
-    
     const currentRisk = Math.abs(entry - sl);
     const formatRR = tp => {
       if (tp === null || !currentRisk) return null;
@@ -1147,7 +1134,6 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
       const ratio = reward / currentRisk;
       return `1:${ratio % 1 === 0 ? ratio.toFixed(0) : ratio.toFixed(1)}`;
     };
-    
     const frozen = {
       type: customSig.direction, symbol, asset, entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips,
       rr1: formatRR(tp1), rr2: formatRR(tp2), confidence: null,
@@ -1225,7 +1211,6 @@ async function refreshAsset(symbol, forceRefresh = false) {
       catch (e) { htfCandles = null; }
     }
     checkHistoryOutcomes(symbol, quote.last, ohlcv.candles);
-    
     try {
       const rawSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles);
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
@@ -1240,7 +1225,6 @@ async function refreshAsset(symbol, forceRefresh = false) {
         }
         return true;
       });
-
       const firedThisCycle = new Set();
       filteredSignals.forEach(sig => {
         const customDisplay = resolveCustomSignal(symbol, quote, sig, asset);
