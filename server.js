@@ -1,67 +1,108 @@
 require('dotenv').config();
-
-const { init, onBeforeShutdown } = require('./localStorage'); // ahora es async: hay que esperarlo antes de tocar engine.js
-const Subscriptions = require('./subscriptions'); // también async: ahora persiste en Supabase, no en disco
+const { init, onBeforeShutdown } = require('./localStorage');
+const Subscriptions = require('./subscriptions');
 
 (async () => {
-  await init(); // conecta a Supabase y carga todo lo guardado en memoria (localStorage global)
-  await Subscriptions.init(); // carga las suscripciones push desde Supabase (o disco si no hay DATABASE_URL)
+  await init();
+  await Subscriptions.init();
 
-  // A partir de acá, todo sigue exactamente igual que antes.
   const express = require('express');
   const path = require('path');
   const { addSubscription, removeSubscription, getCount } = Subscriptions;
-
-  // engine.js declara ASSETS, CONFIG, state, refreshAllData, BacktestEngine, etc. como globales
-  // de módulo (era un <script> de navegador). Lo cargamos aquí y usamos esas mismas funciones,
-  // sin haber tocado su lógica de señales/aprendizaje.
-  // startAutoRefreshLoop reemplaza al cron fijo de 5 min: corre solo, y decide internamente
-  // cada cuánto refrescar (15 min normal, 1 min dentro de la ventana Kill Zone NY 10:30-13:30 ARG).
   const { state, ASSETS, CONFIG, refreshAllData, BacktestEngine, startAutoRefreshLoop, stopAutoRefreshLoop } = require('./engine.js');
 
-  // Se registra ACÁ (no en localStorage.js, que se carga antes y no conoce a engine.js)
-  // para que, apenas llegue SIGTERM (redeploy en Render), el motor deje de arrancar
-  // ciclos nuevos ANTES de que localStorage.js empiece a esperar las escrituras
-  // pendientes. Esto es lo que le faltaba al fix anterior: sin esto, una señal podía
-  // generarse y empezar a guardarse DESPUÉS de que ya se había tomado la foto de "qué
-  // hay que esperar", y se perdía igual pese a que el flush en sí funcionaba bien.
   onBeforeShutdown(stopAutoRefreshLoop);
 
-  // El motor original leía las API keys desde localStorage (las cargaba el usuario a mano en el
-  // navegador). Aquí vienen del .env del servidor, una sola vez para todos.
   state.apiKeys = {
     twelveData: process.env.TWELVEDATA_API_KEY || null,
     finnhub: process.env.FINNHUB_API_KEY || null,
     alphaVantage: process.env.ALPHAVANTAGE_API_KEY || null,
     fmp: process.env.FMP_API_KEY || null,
-    // CryptoCompare (ahora CCData) exige API key en todos los pedidos — es gratis igual,
-    // solo hay que registrarse. Sin esto, ese proveedor se salta siempre (requiresKey: true).
-    // CoinGecko Demo (gratis, 10.000 pedidos/mes) — respaldo de cripto (BTC/ETH) para cuando
-    // TwelveData se queda sin cupo. Reemplaza a CryptoCompare, discontinuada en mayo 2026.
-    // Se saca gratis en https://www.coingecko.com/en/developers/dashboard
     coingecko: process.env.COINGECKO_API_KEY || null
   };
   state.lastDisplay = state.lastDisplay || {};
 
   const app = express();
-  app.use(express.json());
-  app.use(express.static(path.join(__dirname, 'public')));
+  app.use(express.json({ limit: '10kb' }));
 
-  // Estado actual: última señal/no-señal por símbolo + historial + qué tan calibrado está
-  // el auto-tune de cada activo. Esto es lo que consume el panel (PWA) en vez de generarlo él mismo.
-  app.get('/api/state', (req, res) => {
+  // CORS: permitir requests desde el mismo origen + dominios configurados
+  const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',')
+    : [process.env.RENDER_EXTERNAL_URL || 'http://localhost:3000'];
+
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (ALLOWED_ORIGINS.includes(origin) || origin === undefined) {
+      res.header('Access-Control-Allow-Origin', origin || '*');
+      res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, X-API-Token');
+      res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.header('Access-Control-Max-Age', '86400');
+    }
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    next();
+  });
+
+  app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1d' }));
+
+  // Autenticación simple con token secreto para endpoints sensibles
+  const API_SECRET = process.env.API_SECRET || 'pulsetrade-default-secret-change-me';
+
+  function requireAuth(req, res, next) {
+    const token = req.headers['x-api-token'] || req.query.token;
+    if (token !== API_SECRET) {
+      return res.status(401).json({ error: 'No autorizado. Token inválido.' });
+    }
+    next();
+  }
+
+  // Rate limiting manual (sin dependencias extra)
+  const rateLimitStore = new Map();
+  function rateLimit(maxRequests, windowMs) {
+    return (req, res, next) => {
+      const key = req.ip;
+      const now = Date.now();
+      const record = rateLimitStore.get(key) || { count: 0, resetAt: now + windowMs };
+      if (now > record.resetAt) {
+        record.count = 0;
+        record.resetAt = now + windowMs;
+      }
+      record.count++;
+      rateLimitStore.set(key, record);
+      res.header('X-RateLimit-Limit', maxRequests);
+      res.header('X-RateLimit-Remaining', Math.max(0, maxRequests - record.count));
+      if (record.count > maxRequests) {
+        return res.status(429).json({ error: 'Demasiados requests, esperá un momento' });
+      }
+      next();
+    };
+  }
+
+  // Limpiar rate limit cada 10 minutos para no crecer el Map
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, record] of rateLimitStore) {
+      if (now > record.resetAt) rateLimitStore.delete(key);
+    }
+  }, 10 * 60 * 1000);
+
+  // --- ENDPOINTS PÚBLICOS (sin autenticación) ---
+
+  app.get('/api/vapid-public-key', (req, res) => {
+    res.json({ key: process.env.VAPID_PUBLIC_KEY || null });
+  });
+
+  app.get('/health', (req, res) => {
+    res.json({ ok: true, uptime: process.uptime(), version: '4.6.2' });
+  });
+
+  // --- ENDPOINTS PROTEGIDOS (requieren token) ---
+
+  app.get('/api/state', requireAuth, (req, res) => {
     res.json({
       signals: state.lastDisplay,
-      // Señales de las 7 estrategias independientes (Kill Zone NY, Pivots B&R, Price
-      // Action+RSI+EMA, Supply&Demand, EMA Cross Scalping, Divergencia RSI, Bollinger
-      // Squeeze). Antes se calculaban y se notificaban por push, pero nunca se exponían
-      // acá — el panel no tenía forma de mostrarlas mientras estaban activas.
       customSignals: state.lastCustomDisplay || {},
       prices: state.livePrices || {},
       history: (state.signalHistory || []).slice(-50).reverse(),
-      // Ganadas/perdidas (y R promedio) por símbolo + estrategia, para la tabla comparativa
-      // del panel (renderStrategyStatsTable en index.html). Faltaba exponerlo acá — el campo
-      // ya existía en engine.js (state.strategyStatsBySymbol) pero nunca llegaba al frontend.
       strategyStatsBySymbol: state.strategyStatsBySymbol || {},
       autoTune: {
         threshold: state.autoConfidenceThreshold,
@@ -73,12 +114,13 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     });
   });
 
-  app.get('/api/vapid-public-key', (req, res) => {
-    res.json({ key: process.env.VAPID_PUBLIC_KEY || null });
-  });
-
-  app.post('/api/subscribe', async (req, res) => {
-    if (!req.body || !req.body.endpoint) return res.status(400).json({ error: 'Suscripción inválida' });
+  app.post('/api/subscribe', rateLimit(10, 60 * 1000), async (req, res) => {
+    if (!req.body || !req.body.endpoint) {
+      return res.status(400).json({ error: 'Suscripción inválida: falta endpoint' });
+    }
+    if (typeof req.body.endpoint !== 'string' || req.body.endpoint.length > 500) {
+      return res.status(400).json({ error: 'Endpoint inválido' });
+    }
     try {
       await addSubscription(req.body);
       res.json({ ok: true });
@@ -88,7 +130,7 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     }
   });
 
-  app.post('/api/unsubscribe', async (req, res) => {
+  app.post('/api/unsubscribe', rateLimit(10, 60 * 1000), async (req, res) => {
     try {
       if (req.body && req.body.endpoint) await removeSubscription(req.body.endpoint);
       res.json({ ok: true });
@@ -98,21 +140,13 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     }
   });
 
-  // Disparo manual (por si quieres forzar un chequeo desde el panel, no depende del scheduler).
-  app.post('/api/check-now', async (req, res) => {
+  app.post('/api/check-now', requireAuth, rateLimit(5, 60 * 1000), async (req, res) => {
     refreshAllData(true).catch(e => console.error('Error en check-now:', e.message));
     res.json({ ok: true, started: true });
   });
 
-  // NUEVO: dispara BacktestEngine.runAll(true) a demanda, con force=true (recalibración
-  // completa de autoConfidenceThreshold/patternStats/strategyStatsBySymbol). Se agregó tras
-  // el fix de ATR (Wilder, ronda de custom-strategies.js/engine.js): el auto-tune runAll(false)
-  // que corre solo al arrancar el server NO fuerza recalibración, así que el cambio de ATR
-  // nunca se reflejaba en los umbrales de confianza hasta correr esto manualmente. Es un GET
-  // (no POST) a propósito, para poder dispararlo abriendo la URL directo desde el navegador
-  // sin necesitar curl ni Postman. isRunning evita que se pise con otra corrida en simultáneo.
   let recalibrateRunning = false;
-  app.get('/api/recalibrate', async (req, res) => {
+  app.get('/api/recalibrate', requireAuth, async (req, res) => {
     if (recalibrateRunning) {
       return res.status(409).json({ ok: false, error: 'Ya hay una recalibración en curso, esperá a que termine.' });
     }
@@ -128,12 +162,8 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     }
   });
 
-  // ---------------------------------------------------------
-  // Historial navegable por día/semana/mes (solo lectura, para el panel).
-  // Lee los keys `closed_signals:YYYY-MM-DD` que engine.js escribe cada vez que una
-  // señal se resuelve win/loss (ver appendClosedSignal en engine.js). No toca
-  // pt_v4_signals ni ninguna lógica de trading/auto-tune.
-  // ---------------------------------------------------------
+  // --- HISTORIAL (público, solo lectura) ---
+
   function localDayKeyFromDate(d) {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }
@@ -143,12 +173,6 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     catch (e) { return []; }
   }
 
-  // CAMBIO (13/8, módulo de historial visual): antes strategyBreakdown solo traía
-  // {key, count, pct} — cuántas señales cerradas (ganadas+perdidas juntas) aportó cada
-  // estrategia al total del período, sin distinguir cuántas de esas fueron ganadas o
-  // perdidas. Para el desglose activo→estrategia (winrate por estrategia) hace falta
-  // wins/losses/winRate reales por estrategia, no solo el conteo. Se agregan esos campos
-  // sin sacar ninguno de los que ya existían.
   function summarizeClosedSignals(entries) {
     const wins = entries.filter(e => e.result === 'win').length;
     const losses = entries.filter(e => e.result === 'loss').length;
@@ -174,10 +198,6 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     return { wins, losses, total, winRate, strategyBreakdown };
   }
 
-  // Mismo resumen que arriba, pero separado por activo (BTCUSD/ETHUSD/EURUSD/XAUUSD) —
-  // para la navegación Período → Activo → Estrategia del módulo de historial. Reutiliza
-  // summarizeClosedSignals sobre el subconjunto de entries de cada símbolo, así la lógica
-  // de cálculo de winrate/strategyBreakdown queda en un solo lugar.
   function groupBySymbol(entries) {
     const bySymbol = {};
     entries.forEach(e => {
@@ -190,8 +210,6 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     return result;
   }
 
-  // Lista de días que tienen al menos una señal cerrada — así el panel arma la lista
-  // cronológica sin tener que adivinar fechas ni barrer keys a ciegas.
   app.get('/api/history/days', (req, res) => {
     let days;
     try { days = JSON.parse(localStorage.getItem('closed_signals_days') || '[]'); }
@@ -199,20 +217,15 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     res.json({ days });
   });
 
-  // :period = day | week | month. :date = YYYY-MM-DD, cualquier día dentro del
-  // período que se quiere consultar (para 'week' y 'month' se calcula el rango
-  // completo a partir de esa fecha ancla).
   app.get('/api/history/:period/:date', (req, res) => {
     const { period, date } = req.params;
     const anchor = new Date(`${date}T00:00:00`);
     if (isNaN(anchor.getTime())) return res.status(400).json({ error: 'Fecha inválida, formato esperado YYYY-MM-DD' });
-
     let days = [];
     if (period === 'day') {
       days = [anchor];
     } else if (period === 'week') {
-      // Semana de lunes a domingo, calculada a partir de la fecha ancla.
-      const dow = anchor.getDay(); // 0=domingo
+      const dow = anchor.getDay();
       const diffToMonday = dow === 0 ? -6 : 1 - dow;
       const monday = new Date(anchor);
       monday.setDate(anchor.getDate() + diffToMonday);
@@ -224,34 +237,28 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     } else {
       return res.status(400).json({ error: "period debe ser 'day', 'week' o 'month'" });
     }
-
     const dayKeys = days.map(localDayKeyFromDate);
     const entries = dayKeys.flatMap(getClosedSignalsForDay);
     const summary = summarizeClosedSignals(entries);
-    // bySymbol: mismo resumen (wins/losses/winRate/strategyBreakdown) pero recortado a
-    // cada activo — así el panel puede mostrar primero el total del período y, al
-    // elegir un activo, el desglose por estrategia de ESE activo únicamente.
     const bySymbol = groupBySymbol(entries);
     res.json({ period, anchor: date, days: dayKeys, ...summary, bySymbol });
   });
 
-  // Usado por el "pinger" externo (cron-job.org) para mantener despierto el server gratuito
-  // Y como probe de salud.
-  app.get('/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }));
+  // --- 404 handler ---
+  app.use((req, res) => {
+    res.status(404).json({ error: 'Endpoint no encontrado' });
+  });
+
+  // --- Error handler ---
+  app.use((err, req, res, next) => {
+    console.error('Error no manejado:', err.message);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  });
 
   const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => console.log(`PulseTrade backend escuchando en :${PORT}`));
+  app.listen(PORT, () => console.log(`PulseTrade backend v4.6.2 escuchando en :${PORT}`));
 
-  // ---- Motor en segundo plano: corre solo, sin depender de ningún celular abierto ----
-  // El backtest de calibración se corre 2 minutos después del arranque, para no pedirle datos
-  // a Twelve Data al mismo tiempo que el primer chequeo (juntos superaban el límite gratuito
-  // de 8 pedidos/minuto y todo fallaba).
   setTimeout(() => BacktestEngine.runAll(false), 2 * 60 * 1000);
-
-  // Arranca el scheduler autoajustable de engine.js: hace el primer chequeo inmediato y a partir
-  // de ahí decide solo cada cuánto volver a refrescar (15 min normal / 1 min en Kill Zone NY).
-  // Reemplaza al viejo cron.schedule('*/5 * * * *', runCycle) — NO agregar un cron aparte acá,
-  // se duplicarían los requests contra los proveedores y empeoraría el rate limit.
   startAutoRefreshLoop();
 })().catch(e => {
   console.error('Error fatal iniciando el servidor:', e);
