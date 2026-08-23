@@ -3,7 +3,7 @@
 // ANTES vivían solo en un archivo en disco (data/subscriptions.json). En el plan free
 // de Render el disco es efímero: cada redeploy o reinicio de contenedor lo borraba. Eso
 // dejaba al servidor con 0 suscriptores SIN NINGÚN ERROR VISIBLE — el motor seguía
-// detectando señales y llamando a sendPushToAll() con normalidad, pero el array de
+// detectando señales y llamaba a sendPushToAll() con normalidad, pero el array de
 // destinatarios estaba vacío, así que no se mandaba (ni fallaba) nada. Silencio total
 // y silencioso, literalmente. Esto es lo que probablemente pasó en el último corte.
 //
@@ -13,11 +13,9 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 const webpush = require('web-push');
-
 const pool = process.env.DATABASE_URL
   ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
   : null;
-
 // Mismo motivo que en localStorage.js: sin este listener, un corte de red en un cliente
 // idle del pool tira un evento 'error' sin manejar y Node mata el proceso entero.
 if (pool) {
@@ -25,39 +23,26 @@ if (pool) {
     console.error('Error inesperado en un cliente idle del pool de Supabase (subscriptions, no se cae el server):', err.message);
   });
 }
-
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const FILE = path.join(DATA_DIR, 'subscriptions.json');
-
 function loadFromDisk() {
   try {
     if (fs.existsSync(FILE)) return JSON.parse(fs.readFileSync(FILE, 'utf8'));
   } catch (e) { /* arranca en blanco si el archivo está corrupto */ }
   return [];
 }
-
 function saveToDisk(subs) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(FILE, JSON.stringify(subs));
 }
-
 let subscriptions = [];
-
 async function ensureTable() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS push_subscriptions (
-      endpoint TEXT PRIMARY KEY,
-      subscription JSONB NOT NULL,
-      created_at TIMESTAMPTZ DEFAULT now()
-    )
-  `);
+  await pool.query(`CREATE TABLE IF NOT EXISTS push_subscriptions ( endpoint TEXT PRIMARY KEY, subscription JSONB NOT NULL, created_at TIMESTAMPTZ DEFAULT now() )`);
 }
-
 async function loadFromDb() {
   const res = await pool.query('SELECT subscription FROM push_subscriptions');
   subscriptions = res.rows.map(r => r.subscription);
 }
-
 // Hay que llamar y esperar esto ANTES de que el servidor empiece a aceptar tráfico
 // (mismo patrón que localStorage.init()), para no perder ninguna suscripción mientras carga.
 async function init() {
@@ -70,7 +55,6 @@ async function init() {
   await loadFromDb();
   console.log(`Suscripciones push cargadas desde Supabase: ${subscriptions.length}`);
 }
-
 if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
   webpush.setVapidDetails(
     process.env.VAPID_SUBJECT || 'mailto:admin@example.com',
@@ -80,7 +64,6 @@ if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
 } else {
   console.warn('⚠️  Faltan VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY en .env — las notificaciones push no funcionarán hasta configurarlas.');
 }
-
 // IMPORTANTE: esto es idempotente a propósito (no hace nada si el endpoint ya existe).
 // El frontend ahora llama a /api/subscribe SIEMPRE al cargar, aunque el navegador ya
 // tenga una suscripción local — así, si Supabase/disco perdieron el registro por algún
@@ -100,7 +83,6 @@ async function addSubscription(sub) {
     console.error('No se pudo guardar la suscripción en Supabase:', e.message);
   }
 }
-
 async function removeSubscription(endpoint) {
   subscriptions = subscriptions.filter(s => s.endpoint !== endpoint);
   if (!pool) { saveToDisk(subscriptions); return; }
@@ -110,7 +92,6 @@ async function removeSubscription(endpoint) {
     console.error('No se pudo borrar la suscripción en Supabase:', e.message);
   }
 }
-
 async function sendPushToAll(payload) {
   if (!process.env.VAPID_PUBLIC_KEY) return;
   const body = JSON.stringify(payload);
@@ -129,7 +110,6 @@ async function sendPushToAll(payload) {
     return Promise.resolve();
   }));
 }
-
 module.exports = {
   init,
   addSubscription,
