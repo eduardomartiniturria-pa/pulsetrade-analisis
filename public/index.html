@@ -1,679 +1,234 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>PulseTrade PRO - Motor de Señales</title>
-<link rel="manifest" href="/manifest.json">
-<meta name="theme-color" content="#0a0f1a">
-<style>
-  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  body{background:#0a0f1a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;min-height:100vh;padding-bottom:100px}
-  .header{background:#0d1321;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #1a2332;position:sticky;top:0;z-index:100}
-  .header-left{display:flex;align-items:center;gap:12px}
-  .logo-icon{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,#06b6d4,#0891b2);display:flex;align-items:center;justify-content:center;font-size:1.3rem;box-shadow:0 0 12px rgba(6,182,212,0.3)}
-  .header-title{font-size:1.2rem;font-weight:700;color:#f8fafc}
-  .header-sub{font-size:0.7rem;color:#64748b;margin-top:1px}
-  .header-actions{display:flex;gap:10px}
-  .header-btn{width:38px;height:38px;border-radius:10px;background:#1a2332;border:1px solid #2d3a4f;display:flex;align-items:center;justify-content:center;font-size:1.1rem;color:#94a3b8;cursor:pointer}
-  .header-btn.active{background:linear-gradient(135deg,#06b6d4,#0891b2);border-color:transparent;color:#fff;box-shadow:0 0 12px rgba(6,182,212,0.4)}
-  .asset-block{margin-top:8px}
-  .asset-block-header{display:flex;align-items:center;gap:8px;padding:18px 16px 4px}
-  .asset-block-title{font-size:1.05rem;font-weight:800;color:#f8fafc}
-  .price-card{background:#1a2332;border-radius:14px;padding:14px 16px;border:1px solid #2d3a4f;margin:8px 16px}
-  .price-label{font-size:0.8rem;color:#64748b;margin-bottom:4px}
-  .price-main{display:flex;align-items:center;justify-content:space-between;gap:10px}
-  .price-value{font-size:1.6rem;font-weight:700;font-family:'SF Mono',monospace;color:#f8fafc;letter-spacing:-0.5px}
-  .price-change{padding:4px 10px;border-radius:8px;font-size:0.75rem;font-weight:600;background:rgba(34,197,94,0.15);color:#4ade80;display:flex;align-items:center;gap:4px}
-  .price-change.down{background:rgba(239,68,68,0.15);color:#f87171}
-  .signal-card{border-radius:24px;margin:0 16px 16px;padding:20px;position:relative;overflow:hidden;border:2px solid}
-  .signal-card.long{background:linear-gradient(180deg,rgba(34,197,94,0.08),rgba(34,197,94,0.02));border-color:rgba(34,197,94,0.4);box-shadow:0 0 30px rgba(34,197,94,0.1)}
-  .signal-card.short{background:linear-gradient(180deg,rgba(239,68,68,0.08),rgba(239,68,68,0.02));border-color:rgba(239,68,68,0.4);box-shadow:0 0 30px rgba(239,68,68,0.1)}
-  .signal-card.no-signal{background:#1a2332;border-color:#2d3a4f;opacity:0.85}
-  .signal-card.no-data,.signal-card.market-closed-card{background:#131a25;border-color:#2a3545;opacity:0.75}
-  .signal-title{display:flex;align-items:center;gap:8px;font-size:1.1rem;font-weight:700;color:#f8fafc;margin-bottom:12px}
-  .signal-badges-row{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
-  .badge-trend{padding:6px 14px;border-radius:10px;font-size:0.8rem;font-weight:600;display:flex;align-items:center;gap:6px}
-  .badge-trend.bullish{background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.25)}
-  .badge-trend.bearish{background:rgba(239,68,68,0.15);color:#f87171;border:1px solid rgba(239,68,68,0.25)}
-  .badge-active{padding:6px 14px;border-radius:10px;font-size:0.8rem;font-weight:700;background:linear-gradient(135deg,#06b6d4,#0891b2);color:#fff}
-  .badge-offline{padding:6px 14px;border-radius:10px;font-size:0.8rem;font-weight:700;background:#475569;color:#94a3b8}
-  .badge-closed{padding:6px 14px;border-radius:10px;font-size:0.8rem;font-weight:700;background:#2d3a4f;color:#64748b;border:1px solid #3d4a5f}
-  .badge-smc{padding:4px 10px;border-radius:8px;font-size:0.7rem;font-weight:600;background:rgba(245,158,11,0.15);color:#fbbf24;border:1px solid rgba(245,158,11,0.25)}
-  .badge-resolved{padding:6px 14px;border-radius:10px;font-size:0.8rem;font-weight:700}
-  .badge-resolved.win{background:rgba(34,197,94,0.15);color:#4ade80}
-  .badge-resolved.loss{background:rgba(239,68,68,0.15);color:#f87171}
-  .badge-resolved.expired{background:rgba(148,163,184,0.15);color:#94a3b8}
-  .signal-action-row{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
-  .signal-action{font-size:2.4rem;font-weight:800;line-height:1;letter-spacing:-1px}
-  .signal-action.long{color:#4ade80;text-shadow:0 0 25px rgba(74,222,128,0.3)}
-  .signal-action.short{color:#f87171;text-shadow:0 0 25px rgba(248,113,113,0.3)}
-  .signal-pair{font-size:1.1rem;color:#64748b;font-weight:500}
-  .signal-reason{font-size:0.85rem;color:#94a3b8;margin-bottom:16px;line-height:1.4}
-  .levels-row{display:flex;gap:8px;margin-bottom:8px}
-  .level-box{flex:1;padding:14px 10px;border-radius:14px;text-align:left;background:#0d1321;border:1px solid}
-  .level-box.entry{border-color:rgba(59,130,246,0.25)}
-  .level-box.sl{border-color:rgba(239,68,68,0.25)}
-  .level-box.tp{border-color:rgba(34,197,94,0.25)}
-  .level-label{font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:6px;font-weight:600}
-  .level-value{font-size:1.15rem;font-weight:700;font-family:'SF Mono',monospace;letter-spacing:-0.5px}
-  .level-value.entry{color:#f8fafc}
-  .level-value.sl{color:#f87171}
-  .level-value.tp{color:#4ade80}
-  .level-diff{font-size:0.7rem;color:#64748b;margin-top:2px}
-  .price-live-row{display:flex;justify-content:space-between;align-items:center;padding-top:10px;margin-top:6px;border-top:1px solid rgba(255,255,255,0.05)}
-  .price-live-label{font-size:0.7rem;color:#64748b}
-  .price-live-value{font-size:0.9rem;font-weight:700;font-family:'SF Mono',monospace}
-  .price-move{font-size:0.7rem;font-weight:600;padding:2px 8px;border-radius:6px;margin-left:6px}
-  .price-move.favorable{background:rgba(34,197,94,0.15);color:#4ade80}
-  .price-move.against{background:rgba(239,68,68,0.15);color:#f87171}
-  .signal-footer{display:flex;justify-content:space-between;font-size:0.7rem;color:#64748b;margin-top:10px}
-  .signal-time{font-size:1.15rem}
-  .autotune-bar{margin:0 16px 12px;padding:10px 14px;border-radius:12px;background:#151d2b;border:1px solid #232f42;display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:0.72rem}
-  .autotune-label{font-weight:700;color:#38bdf8}
-  .autotune-detail{color:#94a3b8}
-  .divider{height:1px;background:#1a2332;margin:8px 16px}
-  .section-label-hist{font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:1px;font-weight:700;margin:20px 16px 8px}
-  .history-card{background:#1a2332;border-radius:14px;padding:14px;margin:0 16px 8px;border:1px solid #2d3a4f}
-  .history-top{display:flex;justify-content:space-between;align-items:center}
-  .history-left{font-size:0.85rem;color:#f8fafc;font-weight:600}
-  .history-detail{font-size:0.85rem;color:#94a3b8;font-weight:600;margin-top:2px}
-  .history-levels{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.05)}
-  .history-level-item{display:flex;flex-direction:column}
-  .history-level-label{font-size:0.62rem;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px}
-  .history-level-value{font-size:0.85rem;font-weight:700;font-family:'SF Mono',monospace;color:#e2e8f0}
-  .history-meta{font-size:0.68rem;color:#64748b;margin-top:6px}
-  .history-empty{text-align:center;padding:20px;color:#64748b;font-size:0.8rem}
-  .last-updated{font-size:0.65rem;color:#475569;text-align:center;margin:6px 0}
-  .strategies-list{display:flex;flex-direction:column;gap:10px}
-  .sessions-bar{display:flex;gap:8px;padding:14px 16px 4px;overflow-x:auto}
-  .session-pill{flex:1;min-width:0;padding:10px 6px;border-radius:12px;text-align:center;background:#131a25;border:1px solid #232f42;opacity:0.4;transition:opacity 0.2s}
-  .session-pill.open{opacity:1;background:linear-gradient(180deg,rgba(6,182,212,0.15),rgba(6,182,212,0.03));border-color:rgba(6,182,212,0.4);box-shadow:0 0 14px rgba(6,182,212,0.15)}
-  .session-name{font-size:0.72rem;font-weight:700;color:#94a3b8;white-space:nowrap;display:block}
-  .session-pill.open .session-name{color:#67e8f9}
-  .session-dot{width:7px;height:7px;border-radius:50%;background:#475569;display:inline-block;margin-right:5px}
-  .session-pill.open .session-dot{background:#22d3ee;box-shadow:0 0 6px #22d3ee}
-  @media(max-width:380px){.signal-action{font-size:2rem}.price-value{font-size:1.3rem}.level-value{font-size:1rem}}
-  ::-webkit-scrollbar{width:0;height:0}
-  .period-tabs{display:flex;gap:8px;margin:0 16px 10px}
-  .period-tab{flex:1;padding:9px 0;border-radius:10px;text-align:center;font-size:0.8rem;font-weight:700;background:#151d2b;border:1px solid #232f42;color:#94a3b8;cursor:pointer}
-  .period-tab.active{background:linear-gradient(135deg,#06b6d4,#0891b2);border-color:transparent;color:#fff}
-  .period-list{display:flex;flex-direction:column;gap:8px;margin:0 16px 8px}
-  .period-item{background:#1a2332;border-radius:12px;padding:12px 14px;border:1px solid #2d3a4f;cursor:pointer}
-  .period-item-top{display:flex;justify-content:space-between;align-items:center}
-  .period-item-label{font-size:0.85rem;font-weight:700;color:#f8fafc}
-  .period-item-wr{font-size:0.78rem;font-weight:700}
-  .period-item-wr.positive{color:#4ade80}
-  .period-item-wr.negative{color:#f87171}
-  .period-item-sub{font-size:0.72rem;color:#64748b;margin-top:2px}
-  .period-detail{background:#151d2b;border-radius:12px;border:1px solid #232f42;padding:12px 14px;margin-top:6px}
-  .period-detail-title{font-size:0.8rem;font-weight:700;color:#38bdf8;margin-bottom:8px}
-  .period-strategy-row{display:flex;justify-content:space-between;padding:4px 0;font-size:0.75rem;border-top:1px solid #1e293b}
-  .period-strategy-row:first-of-type{border-top:none}
-  .period-strategy-label{color:#cbd5e1}
-  .period-strategy-value{color:#94a3b8;font-weight:600}
-  .period-empty{text-align:center;padding:16px;color:#64748b;font-size:0.8rem}
-  .pie-block{display:flex;align-items:center;gap:18px;padding:4px 2px 14px}
-  .pie-svg{width:96px;height:96px;flex-shrink:0}
-  .pie-summary-total{font-size:1.3rem;font-weight:800;color:#f8fafc}
-  .pie-summary-wr{font-size:0.85rem;font-weight:700;margin-top:2px}
-  .pie-summary-wr.positive{color:#4ade80}
-  .pie-summary-wr.negative{color:#f87171}
-  .pie-summary-legend{display:flex;gap:12px;margin-top:6px;font-size:0.72rem;color:#94a3b8}
-  .pie-legend-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px}
-  .pie-legend-dot.win{background:#4ade80}
-  .pie-legend-dot.loss{background:#f87171}
-  .asset-selector{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px}
-  .asset-pill{padding:8px 12px;border-radius:10px;font-size:0.78rem;font-weight:700;background:#151d2b;border:1px solid #232f42;color:#94a3b8;cursor:pointer;display:flex;align-items:center;gap:6px}
-  .asset-pill.active{background:linear-gradient(135deg,#06b6d4,#0891b2);border-color:transparent;color:#fff}
-  .asset-pill-count{font-size:0.68rem;background:rgba(255,255,255,0.15);padding:1px 6px;border-radius:8px}
-  .asset-summary-title{font-size:0.8rem;font-weight:700;color:#38bdf8;margin-bottom:8px}
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>PulseTrade PRO</title>
+  <meta name="theme-color" content="#0f172a" />
+  <link rel="manifest" href="/manifest.json" />
+  <style>
+    :root {
+      --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --muted: #94a3b8;
+      --green: #10b981; --red: #ef4444; --blue: #3b82f6; --border: #334155;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 16px; padding-bottom: 80px; }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+    h1 { font-size: 1.2rem; font-weight: 700; }
+    .status { font-size: 0.75rem; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    
+    .section-title { font-size: 0.85rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 20px 0 10px; }
+    
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+    .card h3 { font-size: 0.8rem; color: var(--muted); margin-bottom: 4px; }
+    .card .price { font-size: 1.1rem; font-weight: 600; }
+    .card .change { font-size: 0.75rem; margin-top: 2px; }
+    .up { color: var(--green); } .down { color: var(--red); }
+
+    .signal-card { border-left: 4px solid var(--blue); margin-bottom: 10px; }
+    .signal-card.long { border-left-color: var(--green); }
+    .signal-card.short { border-left-color: var(--red); }
+    .signal-header { display: flex; justify-content: space-between; font-size: 0.85rem; font-weight: 600; margin-bottom: 6px; }
+    .signal-details { font-size: 0.75rem; color: var(--muted); display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+    .signal-details span { display: flex; justify-content: space-between; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.75rem; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; }
+    .avgR-positive { color: var(--green); font-weight: 600; }
+    .avgR-negative { color: var(--red); font-weight: 600; }
+
+    .btn { background: var(--blue); color: white; border: none; padding: 10px 16px; border-radius: 6px; font-size: 0.85rem; cursor: pointer; width: 100%; margin-top: 20px; }
+    .btn:disabled { opacity: 0.5; }
+    
+    .empty { text-align: center; color: var(--muted); font-size: 0.8rem; padding: 20px; }
+    #loading { text-align: center; padding: 40px; color: var(--muted); }
+  </style>
 </head>
 <body>
-<div class="header">
-  <div class="header-left">
-    <div class="logo-icon">📈</div>
-    <div>
-      <div class="header-title">PulseTrade</div>
-      <div class="header-sub">Motor corriendo 24/7 en el servidor</div>
+
+  <header>
+    <h1>📈 PulseTrade PRO</h1>
+    <div class="status"><span class="status-dot"></span> <span id="status-text">Conectando...</span></div>
+  </header>
+
+  <div id="loading">Cargando datos del motor...</div>
+
+  <div id="app" style="display: none;">
+    <div class="section-title">Precios en Vivo</div>
+    <div class="grid" id="prices-grid"></div>
+
+    <div class="section-title">Señales Activas</div>
+    <div id="signals-container"><div class="empty">Sin señales activas en este momento.</div></div>
+
+    <div class="section-title">Rendimiento por Estrategia (Avg R)</div>
+    <div style="overflow-x: auto;">
+      <table id="stats-table">
+        <thead><tr><th>Activo</th><th>Estrategia</th><th>W/L</th><th>Win%</th><th>Avg R</th></tr></thead>
+        <tbody id="stats-body"></tbody>
+      </table>
     </div>
+
+    <div class="section-title">Historial Reciente</div>
+    <div id="history-container"></div>
+
+    <button class="btn" id="btn-notif">🔔 Activar Notificaciones Push</button>
   </div>
-  <div class="header-actions">
-    <button class="header-btn" id="subBtn" title="Notificaciones">🔔</button>
-  </div>
-</div>
 
-<div id="app"></div>
+  <script>
+    const API_URL = window.location.origin;
+    let stateData = null;
 
-<div class="section-label-hist">Historial reciente</div>
-<div id="history"></div>
+    async function fetchState() {
+      try {
+        const res = await fetch(`${API_URL}/api/state`);
+        if (!res.ok) throw new Error('Error de red');
+        stateData = await res.json();
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('app').style.display = 'block';
+        document.getElementById('status-text').innerText = `Actualizado: ${new Date(stateData.updatedAt).toLocaleTimeString()}`;
+        renderPrices();
+        renderSignals();
+        renderStats();
+        renderHistory();
+      } catch (e) {
+        document.getElementById('status-text').innerText = 'Error de conexión';
+        document.getElementById('status-text').style.color = 'var(--red)';
+      }
+    }
 
-<div class="section-label-hist">Historial de resultados</div>
-<div class="period-tabs" id="periodTabs">
-  <div class="period-tab active" data-period="day">Día</div>
-  <div class="period-tab" data-period="week">Semana</div>
-  <div class="period-tab" data-period="month">Mes</div>
-</div>
-<div class="period-list" id="periodList"></div>
-<div id="periodDetail"></div>
+    function renderPrices() {
+      const grid = document.getElementById('prices-grid');
+      grid.innerHTML = '';
+      const prices = stateData.prices || {};
+      Object.keys(prices).forEach(sym => {
+        const p = prices[sym];
+        const changeClass = p.change >= 0 ? 'up' : 'down';
+        const changeSign = p.change >= 0 ? '+' : '';
+        grid.innerHTML += `
+          <div class="card">
+            <h3>${p.name || sym}</h3>
+            <div class="price">${p.last ? p.last.toLocaleString('en-US', {minimumFractionDigits: p.decimals || 2}) : '--'}</div>
+            <div class="change ${changeClass}">${changeSign}${(p.change || 0).toFixed(2)}%</div>
+          </div>`;
+      });
+    }
 
-<div class="last-updated" id="status">Cargando...</div>
+    function renderSignals() {
+      const container = document.getElementById('signals-container');
+      const signals = stateData.customSignals || {};
+      let html = '';
+      let count = 0;
+      Object.keys(signals).forEach(sym => {
+        Object.keys(signals[sym]).forEach(strat => {
+          const s = signals[sym][strat];
+          if (s.type && s.type !== 'no-signal') {
+            count++;
+            const dirClass = s.type === 'long' ? 'long' : 'short';
+            const dirIcon = s.type === 'long' ? '🟢 LONG' : ' SHORT';
+            html += `
+              <div class="card signal-card ${dirClass}">
+                <div class="signal-header">
+                  <span>${sym} ${dirIcon}</span>
+                  <span style="color: var(--muted); font-weight: 400;">${strat.replace(/_/g, ' ')}</span>
+                </div>
+                <div class="signal-details">
+                  <span>Entrada: <b>${s.entry ? s.entry.toFixed(2) : '--'}</b></span>
+                  <span>SL: <b style="color: var(--red)">${s.sl ? s.sl.toFixed(2) : '--'}</b></span>
+                  <span>TP1: <b style="color: var(--green)">${s.tp1 ? s.tp1.toFixed(2) : '--'}</b></span>
+                  <span>TP2: <b style="color: var(--green)">${s.tp2 ? s.tp2.toFixed(2) : '--'}</b></span>
+                </div>
+              </div>`;
+          }
+        });
+      });
+      container.innerHTML = count === 0 ? '<div class="empty">Sin señales activas en este momento.</div>' : html;
+    }
 
-<script>
-const ASSET_ORDER = ['BTCUSD','ETHUSD','EURUSD','XAUUSD'];
-let lastState = null;
+    function renderStats() {
+      const tbody = document.getElementById('stats-body');
+      tbody.innerHTML = '';
+      const stats = stateData.strategyStatsBySymbol || {};
+      Object.keys(stats).forEach(sym => {
+        Object.keys(stats[sym]).forEach(strat => {
+          const s = stats[sym][strat];
+          const total = s.wins + s.losses;
+          if (total === 0) return;
+          const winRate = ((s.wins / total) * 100).toFixed(0);
+          const avgRClass = s.avgR >= 0 ? 'avgR-positive' : 'avgR-negative';
+          const avgRSign = s.avgR >= 0 ? '+' : '';
+          tbody.innerHTML += `
+            <tr>
+              <td>${sym}</td>
+              <td>${strat.replace(/_/g, ' ')}</td>
+              <td>${s.wins}/${s.losses}</td>
+              <td>${winRate}%</td>
+              <td class="${avgRClass}">${avgRSign}${s.avgR.toFixed(2)}</td>
+            </tr>`;
+        });
+      });
+      if (tbody.innerHTML === '') tbody.innerHTML = '<tr><td colspan="5" class="empty">Sin datos de backtest aún.</td></tr>';
+    }
 
-function fmt(n, d) { return (n === null || n === undefined || isNaN(n)) ? '--' : Number(n).toFixed(d); }
-function fmtPips(p) { return (p === null || p === undefined) ? '' : Math.abs(p).toFixed(1) + ' pips'; }
-// Redondea porcentajes de confianza a un entero — antes se mostraban con hasta 14 decimales.
-function fmtPct(p) { return (p === null || p === undefined || isNaN(p)) ? '0' : Math.round(p); }
+    function renderHistory() {
+      const container = document.getElementById('history-container');
+      const history = stateData.history || [];
+      if (history.length === 0) {
+        container.innerHTML = '<div class="empty">Sin historial de señales.</div>';
+        return;
+      }
+      let html = '';
+      history.slice(0, 10).forEach(h => {
+        const resColor = h.result === 'win' ? 'var(--green)' : (h.result === 'loss' ? 'var(--red)' : 'var(--muted)');
+        html += `
+          <div class="card" style="margin-bottom: 8px; padding: 10px;">
+            <div style="display: flex; justify-content: space-between; font-size: 0.8rem;">
+              <b>${h.symbol} ${h.type.toUpperCase()}</b>
+              <span style="color: ${resColor}; text-transform: uppercase;">${h.result}</span>
+            </div>
+            <div style="font-size: 0.7rem; color: var(--muted); margin-top: 4px;">
+              ${h.source || 'smc'} · ${new Date(h.timestamp).toLocaleString()}
+            </div>
+          </div>`;
+      });
+      container.innerHTML = html;
+    }
 
-// Antes: new Date(x).toLocaleTimeString('es-AR') / .toLocaleString('es-AR') sin opciones.
-// Bug detectado: en algunos navegadores/Android, 'es-AR' se resuelve igual con formato
-// de 12 horas y sin mostrar "a.m./p.m.", así que cualquier hora de la tarde/noche (PM)
-// aparecía mostrando la hora "menos 12" sin ningún indicador — ej: 19:49 (7:49 PM) se
-// veía como "07:49", indistinguible de las 7:49 de la mañana. Esto hacía parecer que el
-// historial y las señales activas estaban desactualizados o mal fechados, cuando en
-// realidad el dato guardado (epoch ms) siempre fue correcto — era solo un problema de
-// cómo se mostraba en pantalla. Fix: forzar explícitamente hourCycle:'h23' (24 horas,
-// 00-23) en vez de confiar en que el navegador lo infiera solo del locale.
-const TIME_OPTS = { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' };
-const DATETIME_OPTS = { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' };
-function fmtTime(ts) { return new Date(ts).toLocaleTimeString('es-AR', TIME_OPTS); }
-function fmtDateTime(ts) { return new Date(ts).toLocaleString('es-AR', DATETIME_OPTS); }
-
-async function urlBase64ToUint8Array(base64String) {
-  const padding = '='.repeat((4 - base64String.length % 4) % 4);
-  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const raw = atob(base64);
-  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
-}
-async function setupPush() {
-  const btn = document.getElementById('subBtn');
-  if (!('serviceWorker' in navigator) || !('PushManager' in window)) { btn.disabled = true; return; }
-  const reg = await navigator.serviceWorker.register('/service-worker.js');
-  const existing = await reg.pushManager.getSubscription();
-  if (existing) {
-    btn.classList.add('active');
-    // RE-SYNC: aunque el navegador ya tenga la suscripción guardada localmente, la
-    // volvemos a mandar al servidor cada vez que se abre la app. addSubscription() del
-    // lado del servidor es idempotente (no hace nada si el endpoint ya existe), así que
-    // esto no tiene costo — pero si el servidor perdió el registro (por ejemplo, un
-    // redeploy en Render que borró el disco antes de migrar a Supabase), esto lo repone
-    // solo, sin que el usuario tenga que notar que las notificaciones se cortaron y
-    // volver a tocar la campanita.
-    fetch('/api/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(existing) }).catch(() => {});
-  }
-  btn.addEventListener('click', async () => {
-    if (btn.classList.contains('active')) return;
-    const perm = await Notification.requestPermission();
-    if (perm !== 'granted') return;
-    const { key } = await fetch('/api/vapid-public-key').then(r => r.json());
-    if (!key) return;
-    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: await urlBase64ToUint8Array(key) });
-    await fetch('/api/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sub) });
-    btn.classList.add('active');
-  });
-}
-
-// Sesiones de mercado forex: Sídney, Tokio, Londres, Nueva York. Horarios estándar
-// definidos en UTC (así se referencian siempre en la industria financiera, sin importar
-// desde qué país se mire), pero el chequeo usa la hora UTC real del dispositivo/servidor
-// para determinar abierto/cerrado — el resultado (abierto o cerrado) es el mismo sin
-// importar en qué huso horario esté quien lo mira, porque "las 14 UTC" son el mismo
-// instante en todo el mundo. Incluye el cierre completo de fin de semana: el mercado
-// forex global cierra el viernes ~22:00 UTC y no vuelve a abrir hasta el domingo
-// ~22:00 UTC (cuando arranca Sídney) — sin este chequeo, un domingo a la tarde
-// mostraría sesiones "abiertas" solo porque la hora del día coincide con su rango
-// habitual, aunque el mercado real todavía no haya operado nada esa semana.
-const FOREX_SESSIONS = [
-  { name: 'Sídney', openUTC: 22, closeUTC: 7 },
-  { name: 'Tokio', openUTC: 0, closeUTC: 9 },
-  { name: 'Londres', openUTC: 8, closeUTC: 17 },
-  { name: 'Nueva York', openUTC: 13, closeUTC: 22 }
-];
-function isSessionOpen(s) {
-  const now = new Date();
-  const day = now.getUTCDay(); // 0=domingo, 6=sábado
-  const h = now.getUTCHours();
-  const weekendClosed = (day === 6) || (day === 0 && h < 22) || (day === 5 && h >= 22);
-  if (weekendClosed) return false;
-  if (s.openUTC < s.closeUTC) return h >= s.openUTC && h < s.closeUTC;
-  return h >= s.openUTC || h < s.closeUTC; // Sídney cruza medianoche UTC
-}
-function renderSessionsBar() {
-  return `<div class="sessions-bar">${FOREX_SESSIONS.map(s => {
-    const open = isSessionOpen(s);
-    return `<div class="session-pill ${open ? 'open' : ''}">
-      <span class="session-name"><span class="session-dot"></span>${s.name}</span>
-    </div>`;
-  }).join('')}</div>`;
-}
-
-function renderPriceCard(symbol) {
-  const p = lastState.prices && lastState.prices[symbol];
-  if (!p) return '';
-  const changeClass = p.change < 0 ? 'down' : '';
-  return `<div class="price-card">
-    <div class="price-label">${p.name} · Fuente: ${p.source}</div>
-    <div class="price-main">
-      <span class="price-value">${fmt(p.last, p.decimals)}</span>
-      <span class="price-change ${changeClass}">${p.change >= 0 ? '▲' : '▼'} ${Math.abs(p.change).toFixed(2)}%</span>
-    </div>
-  </div>`;
-}
-
-// Antes SMC tenía su propia tarjeta grande (renderSignalCard) y las 7 estrategias
-// independientes compartían una versión chica aparte (renderCustomSignals), debajo de
-// esa. (19/8: SMC se eliminó del motor por completo — ver engine.js v4.5 — así que ahora
-// las 8 tarjetas de abajo son todas de estrategias independientes, con el mismo peso.)
-// Ahora hay una sola función que arma la tarjeta, igual para las 8: el título cambia,
-// los datos reales que difieren entre estrategias se muestran si existen y se omiten
-// si no, pero la estructura (entrada/SL/TP1/TP2/RR/estado) es idéntica.
-const CUSTOM_STRATEGY_LIST = [
-  { key: 'ny_open_kill_zone', label: 'Kill Zone Apertura NY' },
-  { key: 'pivots_breakout_reversal', label: 'Pivots Breakout & Reversal' },
-  { key: 'price_action_rsi_ema', label: 'Price Action + RSI + EMA' },
-  { key: 'supply_demand', label: 'Supply and Demand' },
-  { key: 'ema_cross_scalping', label: 'EMA Cross Scalping' },
-  { key: 'rsi_divergence', label: 'Divergencia RSI' },
-  { key: 'bollinger_squeeze', label: 'Bollinger Squeeze Breakout' },
-  { key: 'eth_vwap_scalp', label: 'ETH VWAP Trend Scalp' }
-];
-
-// Las 8 independientes + 'smc' como key histórica: se mantiene acá (aunque el motor ya
-// no genera señales nuevas de SMC) porque strategyLabel() la usa para mostrar el label
-// correcto de señales SMC ya cerradas que quedaron en el historial de antes del 19/8 —
-// sacarla rompería ese label para datos viejos, no solo dejaría de sumar señales nuevas.
-const ALL_STRATEGY_LIST = [{ key: 'smc', label: 'Smart Money Concepts (SMC)' }].concat(CUSTOM_STRATEGY_LIST);
-
-function renderStrategySlot(title, d) {
-  if (!d) return `<div class="signal-card no-data"><div class="signal-title">⏳ ${title}</div><div class="signal-reason">Esperando que se cumplan sus condiciones.</div></div>`;
-
-  if (d.type === 'market-closed') {
-    return `<div class="signal-card market-closed-card">
-      <div class="signal-title">🌙 ${title}</div>
-      <div class="signal-badges-row"><span class="badge-closed">Fuera de horario</span></div>
-      <div class="signal-reason">Este activo no cotiza en este momento.</div>
-    </div>`;
-  }
-  if (d.type === 'no-data') {
-    return `<div class="signal-card no-data">
-      <div class="signal-title">⚠️ ${title}</div>
-      <div class="signal-reason">${d.reason || 'No se pudieron obtener velas para este activo.'}</div>
-    </div>`;
-  }
-  if (d.type === 'no-signal') {
-    return `<div class="signal-card no-signal">
-      <div class="signal-title">⏸️ ${title}</div>
-      <div class="signal-reason">Esperando que se cumplan sus condiciones.</div>
-    </div>`;
-  }
-
-  // Señal activa — misma estructura para las 8 estrategias independientes.
-  const s = d.frozen;
-  const isLong = s.type === 'long';
-  const dec = s.decimals;
-  const cur = d.currentPrice;
-  // FIX (badge TP2 distinto): engine.js ahora manda hitTP2 además de hitTP/hitTP1.
-  // Prioridad de badges cuando hay más de uno true: SL primero (la señal falló, incluso
-  // si había tocado TP1 antes), después TP2 (objetivo completo), después TP1 (objetivo
-  // parcial, para las estrategias con tp2 la señal sigue activa esperando TP2).
-  let resolvedBadge = '';
-  if (d.hitSL) resolvedBadge = '<span class="badge-resolved loss">🛑 SL alcanzado</span>';
-  else if (d.hitTP2) resolvedBadge = '<span class="badge-resolved win">🎯 TP2 alcanzado</span>';
-  else if (d.hitTP || d.hitTP1) resolvedBadge = '<span class="badge-resolved win">✅ TP1 alcanzado</span>';
-
-  let moveHtml = '';
-  if (cur !== undefined && cur !== null) {
-    const movedFav = isLong ? cur > s.entry : cur < s.entry;
-    const moveClass = movedFav ? 'favorable' : 'against';
-    moveHtml = `<div class="price-live-row">
-      <span class="price-live-label">Precio actual</span>
-      <span><span class="price-live-value">${fmt(cur, dec)}</span>
-      <span class="price-move ${moveClass}">${movedFav ? '▲' : '▼'} desde la señal</span></span>
-    </div>`;
-  }
-
-  // Estos 4 badges eran exclusivos de la señal SMC (SignalEngine.build calculaba
-  // tendencia, confluencia y kill zone; confianza era un score 0-100), eliminada del
-  // motor el 19/8. Las 8 estrategias independientes no los calculan — cuando no
-  // existen, el badge simplemente no se muestra, en vez de forzar un valor falso.
-  // (Se dejan los campos/CSS por si en el futuro alguna estrategia agrega badges
-  // propios equivalentes.)
-  const confBadge = s.confidence != null ? `<span class="badge-active">Confianza ${fmtPct(s.confidence)}%</span>` : '';
-  const trendBadge = s.trend ? `<span class="badge-trend ${s.trend === 'bullish' ? 'bullish' : 'bearish'}">${s.trend === 'bullish' ? '📈 Tendencia alcista' : '📉 Tendencia bajista'}</span>` : '';
-  const confluenceBadge = s.isConfluence !== undefined ? (s.isConfluence ? `<span class="badge-smc">🔗 Confluencia (${s.strategyLabels.length})</span>` : '<span class="badge-smc">🎯 Individual</span>') : '';
-  const killZoneBadge = s.killZone ? '<span class="badge-smc">🕐 Kill Zone</span>' : '';
-
-  return `<div class="signal-card ${isLong ? 'long' : 'short'}">
-    <div class="signal-title">⚡ ${title}</div>
-    <div class="signal-badges-row">${trendBadge}${confBadge}${confluenceBadge}${killZoneBadge}${resolvedBadge}</div>
-    <div class="signal-action-row">
-      <span class="signal-action ${isLong ? 'long' : 'short'}">${isLong ? 'LONG' : 'SHORT'}</span>
-      <span class="signal-pair">${s.asset ? s.asset.name : ''}</span>
-    </div>
-    <div class="signal-reason">${(s.details || []).join(' · ')}</div>
-    <div class="levels-row">
-      <div class="level-box entry"><div class="level-label">Entrada</div><div class="level-value entry">${fmt(s.entry, dec)}</div></div>
-      <div class="level-box sl"><div class="level-label">Stop Loss</div><div class="level-value sl">${fmt(s.sl, dec)}</div><div class="level-diff">${fmtPips(s.slPips)}</div></div>
-      <div class="level-box tp"><div class="level-label">TP1</div><div class="level-value tp">${fmt(s.tp1, dec)}</div><div class="level-diff">${fmtPips(s.tp1Pips)}</div></div>
-    </div>
-    ${s.tp2 != null ? `<div class="levels-row">
-      <div class="level-box tp"><div class="level-label">TP2</div><div class="level-value tp">${fmt(s.tp2, dec)}</div><div class="level-diff">${fmtPips(s.tp2Pips)}</div></div>
-    </div>` : ''}
-    ${moveHtml}
-    <div class="signal-footer">
-      <span>RR ${s.rr1 || '--'}${s.rr2 ? ' / ' + s.rr2 : ''}</span>
-      <span class="signal-time">Detectada ${fmtTime(s.detectedAt || s.timestamp)}</span>
-    </div>
-  </div>`;
-}
-
-// Arma las tarjetas de las 8 estrategias independientes, pero solo muestra las que
-// tienen una señal activa lista para operar — ninguna se deja fija en pantalla por
-// default. Si ninguna de las 8 tiene señal, un único mensaje limpio en vez de 8
-// tarjetas "esperando" ocupando lugar sin aportar nada operable.
-function renderAllStrategyCards(symbol) {
-  const customBySymbol = (lastState.customSignals && lastState.customSignals[symbol]) || {};
-
-  const slots = CUSTOM_STRATEGY_LIST.map(strat => ({ title: strat.label, d: customBySymbol[strat.key] || null }));
-
-  // Estados especiales (mercado cerrado / sin datos) sí se muestran siempre, aunque
-  // no sean una señal operable — el usuario necesita saber por qué no hay nada.
-  const specialSlot = slots.find(s => s.d && (s.d.type === 'market-closed' || s.d.type === 'no-data'));
-  if (specialSlot) return renderStrategySlot(specialSlot.title, specialSlot.d);
-
-  const activeSlots = slots.filter(s => s.d && s.d.frozen);
-  if (!activeSlots.length) {
-    return `<div class="signal-card no-signal">
-      <div class="signal-title">⏸️ Sin señales activas</div>
-      <div class="signal-reason">Ninguna de las 8 estrategias cargadas encontró un patrón que cumpla todos sus parámetros todavía. El motor sigue analizando en cada ciclo.</div>
-    </div>`;
-  }
-  return `<div class="strategies-list">${activeSlots.map(s => renderStrategySlot(s.title, s.d)).join('')}</div>`;
-}
-
-function renderAutoTune(symbol) {
-  if (!lastState.autoTune || !lastState.autoTune.threshold) return '';
-  const t = lastState.autoTune.threshold[symbol];
-  if (t === undefined) return '';
-  return `<div class="autotune-bar"><span class="autotune-label">🧪 Auto-tune</span><span class="autotune-detail">Umbral de confianza actual para ${symbol}: ${fmtPct(t)}%</span></div>`;
-}
-
-// Un bloque completo por activo: título, precio, tarjeta de señal y auto-tune. Los 4 se
-// concatenan uno debajo del otro, así se ven todos sin tener que elegir una pestaña.
-function renderAssetBlock(symbol) {
-  return `<div class="asset-block" id="block-${symbol}">
-    <div class="asset-block-header"><span class="asset-block-title">${symbol}</span></div>
-    ${renderPriceCard(symbol)}
-    ${renderAllStrategyCards(symbol)}
-    ${renderAutoTune(symbol)}
-  </div>
-  <div class="divider"></div>`;
-}
-
-function renderHistory() {
-  const el = document.getElementById('history');
-  const hist = lastState.history || [];
-  if (!hist.length) { el.innerHTML = '<div class="history-empty">Todavía no hay historial.</div>'; return; }
-  // Bug encontrado 9/8: el array llega desde el servidor ordenado de la señal más
-  // vieja a la más nueva (no al revés como se asumía). slice(0,15) agarraba siempre
-  // las 15 PRIMERAS, es decir las más viejas del array completo — por eso el panel
-  // se veía "clavado" en señales de hace días aunque el motor siguiera generando
-  // señales nuevas normalmente. Fix: tomar las últimas 15 (las más recientes) y
-  // darlas vuelta para mostrar la más nueva arriba de todo.
-  el.innerHTML = hist.slice(-15).reverse().map(h => {
-    const dec = h.decimals ?? 2;
-    const resultBadge = h.result === 'win' ? '✅ Ganó' : h.result === 'loss' ? '🛑 Perdió' : h.result === 'expired' ? '⌛ Expiró (sin datos)' : '⏳ En curso';
-    const resultClass = h.result === 'win' ? 'win' : h.result === 'loss' ? 'loss' : h.result === 'expired' ? 'expired' : '';
-    return `
-    <div class="history-card">
-      <div class="history-top">
-        <div>
-          <div class="history-left">${h.symbol} <span style="color:${h.type === 'long' ? '#4ade80' : '#f87171'}">${(h.type || '').toUpperCase()}</span></div>
-          <div class="history-detail">${fmtDateTime(h.timestamp)}</div>
-        </div>
-        <div class="badge-resolved ${resultClass}">${resultBadge}</div>
-      </div>
-      <div class="history-levels">
-        <div class="history-level-item"><span class="history-level-label">Entrada</span><span class="history-level-value">${fmt(h.entry, dec)}</span></div>
-        <div class="history-level-item"><span class="history-level-label">SL</span><span class="history-level-value">${fmt(h.sl, dec)}</span></div>
-        <div class="history-level-item"><span class="history-level-label">TP1</span><span class="history-level-value">${fmt(h.tp1, dec)}</span></div>
-        <div class="history-level-item"><span class="history-level-label">TP2</span><span class="history-level-value">${fmt(h.tp2, dec)}</span></div>
-      </div>
-      <div class="history-meta">Confianza ${fmtPct(h.confidence)}%${h.rMultiple !== null && h.rMultiple !== undefined ? ` · Resultado ${h.rMultiple > 0 ? '+' : ''}${h.rMultiple.toFixed(2)}R` : ''}</div>
-    </div>`;
-  }).join('');
-}
-
-function render() {
-  document.getElementById('app').innerHTML = renderSessionsBar() + ASSET_ORDER.map(sym => renderAssetBlock(sym)).join('');
-  renderHistory();
-}
-
-async function refresh() {
-  try {
-    lastState = await fetch('/api/state').then(r => r.json());
-    render();
-    document.getElementById('status').textContent = `Actualizado ${fmtTime(lastState.updatedAt)} · ${lastState.subscriberCount} dispositivo(s) recibiendo notificaciones`;
-  } catch (e) {
-    document.getElementById('status').textContent = 'No se pudo conectar con el servidor.';
-  }
-}
-
-// ---------------------------------------------------------
-// Historial navegable por día/semana/mes. Solo lectura: consume
-// /api/history/days y /api/history/:period/:date (server.js), que a su vez leen
-// los keys closed_signals:YYYY-MM-DD que engine.js escribe cuando una señal se
-// resuelve win/loss. Arranca vacío desde que se desplegó este cambio — los días
-// anteriores no tienen datos, es esperado.
-// ---------------------------------------------------------
-let currentPeriod = 'day';
-let closedDays = []; // YYYY-MM-DD ascendente, viene de /api/history/days
-
-function mondayOf(dateStr) {
-  const d = new Date(`${dateStr}T00:00:00`);
-  const dow = d.getDay();
-  const diffToMonday = dow === 0 ? -6 : 1 - dow;
-  d.setDate(d.getDate() + diffToMonday);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-function monthOf(dateStr) { return dateStr.slice(0, 7); } // YYYY-MM
-
-function fmtDayLabel(dateStr) {
-  return new Date(`${dateStr}T00:00:00`).toLocaleDateString('es-AR', { weekday: 'short', day: '2-digit', month: 'short' });
-}
-function fmtWeekLabel(mondayStr) {
-  const d = new Date(`${mondayStr}T00:00:00`);
-  const sunday = new Date(d); sunday.setDate(d.getDate() + 6);
-  const fmtShort = x => x.toLocaleDateString('es-AR', { day: '2-digit', month: 'short' });
-  return `Semana del ${fmtShort(d)} al ${fmtShort(sunday)}`;
-}
-function fmtMonthLabel(monthStr) {
-  const [y, m] = monthStr.split('-');
-  return new Date(`${y}-${m}-01T00:00:00`).toLocaleDateString('es-AR', { month: 'long', year: 'numeric' });
-}
-
-function strategyLabel(key) {
-  const found = ALL_STRATEGY_LIST.find(s => s.key === key);
-  return found ? found.label : key;
-}
-
-async function fetchPeriodSummary(period, anchorDate) {
-  return fetch(`/api/history/${period}/${anchorDate}`).then(r => r.json());
-}
-
-// Torta Ganadas/Perdidas en SVG (donut de dos colores): un círculo rojo de fondo
-// (representa el 100%) y encima un arco verde del largo proporcional a las ganadas —
-// lo que queda expuesto en rojo es la proporción de perdidas. Sin librería externa.
-function pieChartSvg(wins, losses) {
-  const r = 46, circ = +(2 * Math.PI * r).toFixed(2);
-  const total = wins + losses;
-  if (!total) {
-    return `<svg viewBox="0 0 120 120" class="pie-svg"><circle cx="60" cy="60" r="${r}" fill="none" stroke="#232f42" stroke-width="16"/></svg>`;
-  }
-  const winLen = +((wins / total) * circ).toFixed(2);
-  return `<svg viewBox="0 0 120 120" class="pie-svg">
-    <circle cx="60" cy="60" r="${r}" fill="none" stroke="#f87171" stroke-width="16"/>
-    <circle cx="60" cy="60" r="${r}" fill="none" stroke="#4ade80" stroke-width="16"
-      stroke-dasharray="${winLen} ${circ}" transform="rotate(-90 60 60)"/>
-  </svg>`;
-}
-
-// Desglose por activo dentro del período (operaciones/ganadas/perdidas/winrate por
-// estrategia). Se ordena por cantidad de operaciones (no por % de aciertos): con pocas
-// muestras un 100% no es comparable a un 75% con muchas operaciones, así que se muestra
-// primero lo que tiene más volumen y el winrate de cada una queda visible al lado — sin
-// forzar un ranking de "mejor/peor" (ver preferencia del usuario, todavía no hay un
-// mínimo de operaciones definido para eso).
-function renderAssetStrategyBreakdown(assetSummary) {
-  if (!assetSummary || !assetSummary.total) {
-    return '<div class="period-empty">Sin señales cerradas para este activo en este período.</div>';
-  }
-  const rows = [...assetSummary.strategyBreakdown].sort((a, b) => b.count - a.count);
-  return `<div class="asset-summary-title">✅ ${assetSummary.wins} ganadas · 🛑 ${assetSummary.losses} perdidas · Winrate ${assetSummary.winRate}%</div>
-    ${rows.map(r => `<div class="period-strategy-row">
-      <span class="period-strategy-label">${strategyLabel(r.key)}</span>
-      <span class="period-strategy-value">${r.count} op. (${r.wins}G/${r.losses}P) · ${r.winRate}%</span>
-    </div>`).join('')}`;
-}
-
-function renderAssetSelector(bySymbol, selected) {
-  return `<div class="asset-selector">${ASSET_ORDER.map(sym => {
-    const s = bySymbol[sym];
-    const count = s ? s.total : 0;
-    return `<div class="asset-pill ${sym === selected ? 'active' : ''}" data-asset="${sym}">
-      ${sym}${count ? `<span class="asset-pill-count">${count}</span>` : ''}
-    </div>`;
-  }).join('')}</div>`;
-}
-
-// Estado del último summary cargado (para poder cambiar de activo sin volver a pedir
-// al servidor) y qué activo está seleccionado dentro del período actual.
-let currentPeriodSummary = null;
-let currentSelectedAsset = null;
-
-function renderPeriodDetail() {
-  const el = document.getElementById('periodDetail');
-  const summary = currentPeriodSummary;
-  if (!summary || !summary.total) {
-    el.innerHTML = '<div class="period-detail"><div class="period-empty">Sin señales cerradas en este período.</div></div>';
-    return;
-  }
-  const bySymbol = summary.bySymbol || {};
-  // Si no hay activo elegido todavía (o el elegido no tiene datos en este período),
-  // se autoselecciona el de mayor volumen de operaciones cerradas.
-  if (!currentSelectedAsset || !bySymbol[currentSelectedAsset] || !bySymbol[currentSelectedAsset].total) {
-    const withData = ASSET_ORDER.filter(sym => bySymbol[sym] && bySymbol[sym].total);
-    currentSelectedAsset = withData.length
-      ? withData.reduce((best, sym) => (bySymbol[sym].total > bySymbol[best].total ? sym : best), withData[0])
-      : ASSET_ORDER[0];
-  }
-  const wrClass = summary.winRate >= 50 ? 'positive' : 'negative';
-  el.innerHTML = `<div class="period-detail">
-    <div class="pie-block">
-      ${pieChartSvg(summary.wins, summary.losses)}
-      <div>
-        <div class="pie-summary-total">${summary.total} operaciones</div>
-        <div class="pie-summary-wr ${wrClass}">Winrate ${summary.winRate}%</div>
-        <div class="pie-summary-legend">
-          <span><span class="pie-legend-dot win"></span>${summary.wins} ganadas</span>
-          <span><span class="pie-legend-dot loss"></span>${summary.losses} perdidas</span>
-        </div>
-      </div>
-    </div>
-    ${renderAssetSelector(bySymbol, currentSelectedAsset)}
-    <div id="assetBreakdown">${renderAssetStrategyBreakdown(bySymbol[currentSelectedAsset])}</div>
-  </div>`;
-
-  el.querySelectorAll('.asset-pill').forEach(pill => {
-    pill.addEventListener('click', () => {
-      currentSelectedAsset = pill.dataset.asset;
-      el.querySelectorAll('.asset-pill').forEach(p => p.classList.toggle('active', p.dataset.asset === currentSelectedAsset));
-      document.getElementById('assetBreakdown').innerHTML = renderAssetStrategyBreakdown(bySymbol[currentSelectedAsset]);
+    // Notificaciones Push
+    document.getElementById('btn-notif').addEventListener('click', async () => {
+      if (!('serviceWorker' in navigator)) return alert('Tu navegador no soporta notificaciones.');
+      try {
+        const reg = await navigator.serviceWorker.register('/service-worker.js');
+        const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(await getVapidKey()) });
+        await fetch(`${API_URL}/api/subscribe`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(sub) });
+        document.getElementById('btn-notif').innerText = '✅ Notificaciones Activadas';
+        document.getElementById('btn-notif').disabled = true;
+      } catch (e) {
+        alert('Error al activar notificaciones: ' + e.message);
+      }
     });
-  });
-}
 
-async function selectPeriodItem(period, anchorDate) {
-  currentPeriodSummary = await fetchPeriodSummary(period, anchorDate);
-  currentSelectedAsset = null; // nuevo período: recalcular el activo con más volumen
-  renderPeriodDetail();
-}
+    async function getVapidKey() {
+      const res = await fetch(`${API_URL}/api/vapid-public-key`);
+      const data = await res.json();
+      return data.key;
+    }
 
-function renderPeriodList() {
-  const listEl = document.getElementById('periodList');
-  document.getElementById('periodDetail').innerHTML = '';
-  if (!closedDays.length) {
-    listEl.innerHTML = '<div class="period-empty">Todavía no hay señales cerradas registradas para el historial por período.</div>';
-    return;
-  }
-  let groups; // array de { anchorDate, label }
-  if (currentPeriod === 'day') {
-    groups = [...closedDays].reverse().map(d => ({ anchorDate: d, label: fmtDayLabel(d) }));
-  } else if (currentPeriod === 'week') {
-    const seen = new Set();
-    groups = [];
-    [...closedDays].reverse().forEach(d => {
-      const monday = mondayOf(d);
-      if (seen.has(monday)) return;
-      seen.add(monday);
-      groups.push({ anchorDate: monday, label: fmtWeekLabel(monday) });
-    });
-  } else {
-    const seen = new Set();
-    groups = [];
-    [...closedDays].reverse().forEach(d => {
-      const month = monthOf(d);
-      if (seen.has(month)) return;
-      seen.add(month);
-      groups.push({ anchorDate: `${month}-01`, label: fmtMonthLabel(month) });
-    });
-  }
+    function urlBase64ToUint8Array(base64String) {
+      const padding = '='.repeat((4 - base64String.length % 4) % 4);
+      const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+      const rawData = window.atob(base64);
+      const outputArray = new Uint8Array(rawData.length);
+      for (let i = 0; i < rawData.length; ++i) outputArray[i] = rawData.charCodeAt(i);
+      return outputArray;
+    }
 
-  listEl.innerHTML = groups.map((g, i) => `<div class="period-item" data-idx="${i}">
-    <div class="period-item-top">
-      <span class="period-item-label">${g.label}</span>
-    </div>
-  </div>`).join('');
-
-  Array.from(listEl.children).forEach((child, i) => {
-    child.addEventListener('click', () => selectPeriodItem(currentPeriod, groups[i].anchorDate));
-  });
-
-  // Auto-selecciona el más reciente para no dejar la lista vacía de contexto.
-  if (groups.length) selectPeriodItem(currentPeriod, groups[0].anchorDate);
-}
-
-function setupPeriodTabs() {
-  document.getElementById('periodTabs').addEventListener('click', (e) => {
-    const tab = e.target.closest('.period-tab');
-    if (!tab) return;
-    document.querySelectorAll('.period-tab').forEach(t => t.classList.remove('active'));
-    tab.classList.add('active');
-    currentPeriod = tab.dataset.period;
-    renderPeriodList();
-  });
-}
-
-async function loadClosedDaysAndRenderPeriodList() {
-  try {
-    const data = await fetch('/api/history/days').then(r => r.json());
-    closedDays = data.days || [];
-  } catch (e) {
-    closedDays = [];
-  }
-  renderPeriodList();
-}
-
-setupPeriodTabs();
-loadClosedDaysAndRenderPeriodList();
-
-setupPush();
-refresh();
-setInterval(refresh, 30000);
-</script>
+    // Inicio
+    fetchState();
+    setInterval(fetchState, 15000); // Refresca cada 15 segundos
+  </script>
 </body>
 </html>
