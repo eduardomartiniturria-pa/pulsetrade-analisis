@@ -6,7 +6,7 @@
 // - Desactivadas: rsi_divergence (0% winrate), price_action_rsi_ema (0% winrate).
 // - Desactivada ema_cross_scalping SOLO en ETHUSD (0% en ETH, 50% en BTC/XAU).
 // - Blindaje contra señales SMC residuales (eliminadas en v4.5).
-// - Limpieza de errores de sintaxis/espacios rotos heredados del documento original.
+// - Limpieza total de errores de sintaxis/espacios rotos heredados del documento original.
 //
 // [Changelog v4.0 a v4.5 se mantiene: fixes de timezone, 429 en cascada, cuota diaria, etc.]
 // ============================================================
