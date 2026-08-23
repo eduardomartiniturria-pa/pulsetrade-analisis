@@ -1,14 +1,11 @@
 // ============================================================
-// PULSE TRADE v4.6 - MOTOR DE SEÑALES PROFESIONAL (CON FILTRO DE ESTRATEGIAS)
+// PULSE TRADE v4.6.1 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
-// Cambios v4.6 (sesión 23/8):
+// Cambios v4.6.1:
+// - Agregada métrica avgR (R-multiple promedio) a estadísticas en vivo y backtest.
 // - Filtro de estrategias por rendimiento real (ENABLED_STRATEGIES / DISABLED_STRATEGIES_BY_SYMBOL).
-// - Desactivadas: rsi_divergence (0% winrate), price_action_rsi_ema (0% winrate).
-// - Desactivada ema_cross_scalping SOLO en ETHUSD (0% en ETH, 50% en BTC/XAU).
-// - Blindaje contra señales SMC residuales (eliminadas en v4.5).
+// - Desactivadas: rsi_divergence, price_action_rsi_ema, ema_cross_scalping (solo en ETHUSD), smc.
 // - Limpieza total de errores de sintaxis/espacios rotos heredados del documento original.
-//
-// [Changelog v4.0 a v4.5 se mantiene: fixes de timezone, 429 en cascada, cuota diaria, etc.]
 // ============================================================
 const { sendPushToAll } = require('./subscriptions');
 const CustomStrategies = require('./custom-strategies');
@@ -776,8 +773,10 @@ const BacktestEngine = {
       const s = stats[key];
       const total = s.wins + s.losses;
       s.sampleSize = total;
-      s.winRate = total ? s.wins / total : 0;
+      s.winRate = total ? +(s.wins / total).toFixed(2) : 0;
       s.totalR = +s.totalR.toFixed(2);
+      // NUEVO v4.6.1: R-multiple promedio por operación (la métrica profesional clave)
+      s.avgR = total ? +(s.totalR / total).toFixed(2) : 0;
     });
     return stats;
   },
@@ -937,12 +936,19 @@ function updateStrategyStatsBySymbol(entry) {
   const symbol = entry.symbol, key = entry.source || 'smc';
   if (!symbol || !key) return;
   state.strategyStatsBySymbol[symbol] = state.strategyStatsBySymbol[symbol] || {};
-  if (!state.strategyStatsBySymbol[symbol][key]) state.strategyStatsBySymbol[symbol][key] = { wins: 0, losses: 0, totalR: 0 };
+  if (!state.strategyStatsBySymbol[symbol][key]) {
+    state.strategyStatsBySymbol[symbol][key] = { wins: 0, losses: 0, totalR: 0, avgR: 0 };
+  }
   const stats = state.strategyStatsBySymbol[symbol][key];
   if (entry.result === 'win') stats.wins++;
   else stats.losses++;
   const r = entry.rMultiple != null ? entry.rMultiple : (entry.result === 'win' ? 2 : -1);
   stats.totalR = +((stats.totalR || 0) + r).toFixed(2);
+  
+  // NUEVO v4.6.1: Recalcular R promedio en vivo cada vez que se resuelve una operación
+  const totalOps = stats.wins + stats.losses;
+  stats.avgR = totalOps > 0 ? +(stats.totalR / totalOps).toFixed(2) : 0;
+  
   localStorage.setItem('pt_strategy_stats_by_symbol', JSON.stringify(state.strategyStatsBySymbol));
 }
 
@@ -952,7 +958,14 @@ function seedStrategyStatsFromBacktest(resultsBySymbol) {
     Object.entries(r.customStats || {}).forEach(([key, s]) => {
       if (!state.strategyStatsBySymbol[symbol][key]) {
         const totalR = s.totalR != null ? s.totalR : (s.wins * 2 - s.losses);
-        state.strategyStatsBySymbol[symbol][key] = { wins: s.wins, losses: s.losses, totalR, seeded: true };
+        const totalOps = s.wins + s.losses;
+        state.strategyStatsBySymbol[symbol][key] = { 
+          wins: s.wins, 
+          losses: s.losses, 
+          totalR, 
+          avgR: totalOps > 0 ? +(totalR / totalOps).toFixed(2) : 0, // NUEVO v4.6.1
+          seeded: true 
+        };
       }
     });
   });
