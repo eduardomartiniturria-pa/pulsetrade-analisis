@@ -1,15 +1,3 @@
-// ============================================================
-// PULSE TRADE v4.6.2 - MOTOR DE SEÑALES PROFESIONAL
-// ============================================================
-// Cambios v4.6.2:
-// - Ajuste de holgura dinámica para XAUUSD: amplía el SL un 50% y recalcula
-//   los TPs para mantener el mismo ratio Riesgo:Beneficio (RR), evitando
-//   que las mechas del oro barren stops fijos.
-// - Filtro de estrategias por rendimiento real (ENABLED_STRATEGIES / DISABLED_STRATEGIES_BY_SYMBOL).
-// - Desactivadas: rsi_divergence, price_action_rsi_ema, ema_cross_scalping (solo en ETHUSD), smc.
-// - Agregada métrica avgR (R-multiple promedio) a estadísticas en vivo y backtest.
-// - Limpieza total y definitiva de errores de sintaxis/espacios rotos.
-// ============================================================
 const { sendPushToAll } = require('./subscriptions');
 const CustomStrategies = require('./custom-strategies');
 
@@ -68,7 +56,6 @@ const CONFIG = {
     ALPHAVANTAGE: 'https://www.alphavantage.co/query',
     FMP: 'https://financialmodelingprep.com/stable'
   },
-  // v4.6: LISTA BLANCA - Solo estas estrategias están permitidas para operar
   ENABLED_STRATEGIES: [
     'ny_open_kill_zone',
     'pivots_breakout_reversal',
@@ -76,7 +63,6 @@ const CONFIG = {
     'supply_demand',
     'ema_cross_scalping'
   ],
-  // v4.6: LISTA NEGRA POR ACTIVO - Desactiva estrategias específicas que fallan en un activo
   DISABLED_STRATEGIES_BY_SYMBOL: {
     ETHUSD: ['ema_cross_scalping', 'smc'],
     BTCUSD: ['smc'],
