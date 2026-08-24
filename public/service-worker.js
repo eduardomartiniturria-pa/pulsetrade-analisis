@@ -2,6 +2,7 @@
 // Se encarga de: 1) recibir las notificaciones push que manda el servidor
 // (vía subscriptions.js/web-push) y mostrarlas, y 2) abrir/enfocar la app
 // cuando el usuario toca la notificación.
+
 self.addEventListener('install', (event) => {
   self.skipWaiting();
 });
@@ -19,6 +20,7 @@ self.addEventListener('push', (event) => {
   } catch (e) {
     data = { title: 'PulseTrade PRO', body: event.data ? event.data.text() : 'Nueva señal' };
   }
+
   const title = data.title || 'PulseTrade PRO';
   const options = {
     body: data.body || '',
@@ -28,6 +30,7 @@ self.addEventListener('push', (event) => {
     renotify: true,
     data: { symbol: data.symbol || null, signal: data.signal || null }
   };
+
   event.waitUntil(self.registration.showNotification(title, options));
 });
 
