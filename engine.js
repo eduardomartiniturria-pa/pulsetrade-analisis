@@ -77,6 +77,16 @@ const CONFIG = {
     'ema_cross_scalping'
   ],
   // v4.6: LISTA NEGRA POR ACTIVO - Desactiva estrategias específicas que fallan en un activo
+  // v4.7: CIRCUIT BREAKER - auto-desactiva una estrategia en un activo tras N pérdidas
+  // consecutivas, sin esperar a que Soy sume tablas de WhatsApp a mano. Se guarda en
+  // Supabase (state.consecutiveLosses) para sobrevivir reinicios, igual que
+  // activeCustomSignals. No reemplaza DISABLED_STRATEGIES_BY_SYMBOL (que sigue siendo
+  // la lista manual "para siempre"), la complementa con desactivaciones automáticas
+  // temporales que Soy revisa y decide si mantener.
+  CIRCUIT_BREAKER: {
+    enabled: true,
+    consecutiveLossThreshold: 5
+  },
   DISABLED_STRATEGIES_BY_SYMBOL: {
     ETHUSD: ['ema_cross_scalping', 'smc'],
     // ema_cross_scalping: 25% winrate (4 op, 1G/3P) del 12/8 al 23/8. Desactivada.
@@ -153,6 +163,12 @@ let state = {
   autoTuneStats: (() => { try { return JSON.parse(localStorage.getItem('pt_auto_stats_v2') || '{}'); } catch (e) { return {}; } })(),
   patternStats: (() => { try { return JSON.parse(localStorage.getItem('pt_pattern_stats') || '{}'); } catch (e) { return {}; } })(),
   strategyStatsBySymbol: (() => { try { return JSON.parse(localStorage.getItem('pt_strategy_stats_by_symbol') || '{}'); } catch (e) { return {}; } })(),
+  // v4.7: contador de pérdidas consecutivas por "SYMBOL_strategyKey" (se resetea a 0 en cada
+  // ganada) y lista de combinaciones que el circuit breaker apagó solo. Separado a propósito
+  // de DISABLED_STRATEGIES_BY_SYMBOL (que es la lista manual fija en CONFIG) para no pisar
+  // decisiones tomadas a mano por Soy ni perder el motivo de cada apagado automático.
+  consecutiveLosses: (() => { try { return JSON.parse(localStorage.getItem('pt_consecutive_losses') || '{}'); } catch (e) { return {}; } })(),
+  autoDisabledStrategies: (() => { try { return JSON.parse(localStorage.getItem('pt_auto_disabled_strategies') || '{}'); } catch (e) { return {}; } })(),
   backtestCustomStats: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_custom_stats') || '{}'); } catch (e) { return {}; } })(),
   backtestRunning: false,
   soundEnabled: localStorage.getItem('pt_sound_enabled') !== 'false',
@@ -952,6 +968,43 @@ function updateStrategyStatsBySymbol(entry) {
   stats.avgR = totalOps > 0 ? +(stats.totalR / totalOps).toFixed(2) : 0; // v4.6.1: Recalcular R promedio
   
   localStorage.setItem('pt_strategy_stats_by_symbol', JSON.stringify(state.strategyStatsBySymbol));
+
+  checkCircuitBreaker(symbol, key, entry.result);
+}
+
+// v4.7: si una combinación symbol+strategy encadena CIRCUIT_BREAKER.consecutiveLossThreshold
+// pérdidas seguidas, se apaga sola (sin esperar a que Soy sume tablas a mano) y avisa por push.
+// Una ganada en el medio resetea el contador a 0 — es "pérdidas SEGUIDAS", no acumuladas.
+function checkCircuitBreaker(symbol, key, result) {
+  if (!CONFIG.CIRCUIT_BREAKER || !CONFIG.CIRCUIT_BREAKER.enabled) return;
+  const ckey = `${symbol}_${key}`;
+  if (result === 'win') {
+    if (state.consecutiveLosses[ckey]) { state.consecutiveLosses[ckey] = 0; }
+    return;
+  }
+  if (result !== 'loss') return;
+
+  state.consecutiveLosses[ckey] = (state.consecutiveLosses[ckey] || 0) + 1;
+  localStorage.setItem('pt_consecutive_losses', JSON.stringify(state.consecutiveLosses));
+
+  const threshold = CONFIG.CIRCUIT_BREAKER.consecutiveLossThreshold;
+  if (state.consecutiveLosses[ckey] < threshold) return;
+  if (state.autoDisabledStrategies[ckey]) return; // ya estaba apagada, no repetir aviso
+
+  // Apaga la combinación agregándola a DISABLED_STRATEGIES_BY_SYMBOL en memoria (efecto
+  // inmediato en el próximo ciclo, mismo chequeo que ya usa la lista manual) y la registra
+  // en autoDisabledStrategies para diferenciarla de las apagadas a mano y poder listarlas.
+  if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol]) CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] = [];
+  if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
+    CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].push(key);
+  }
+  state.autoDisabledStrategies[ckey] = { symbol, key, disabledAt: Date.now(), lossStreak: state.consecutiveLosses[ckey] };
+  localStorage.setItem('pt_auto_disabled_strategies', JSON.stringify(state.autoDisabledStrategies));
+
+  const title = '🛑 Circuit breaker: estrategia pausada';
+  const body = `${key} en ${symbol} se auto-desactivó tras ${state.consecutiveLosses[ckey]} pérdidas seguidas. Revisala cuando puedas.`;
+  console.log(`[CIRCUIT BREAKER] ${ckey} auto-desactivada tras ${state.consecutiveLosses[ckey]} pérdidas consecutivas`);
+  sendPushToAll({ title, body, symbol, signal: { strategy: key, autoDisabled: true } }).catch(err => console.error('Error enviando push de circuit breaker:', err.message));
 }
 
 function seedStrategyStatsFromBacktest(resultsBySymbol) {
