@@ -1,6 +1,12 @@
 // ============================================================
-// PULSE TRADE v4.6.2 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.6.3 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.6.3:
+// - EURUSD: exchangerate (open.er-api.com) pasado de proveedor primario a último
+//   recurso — su tasa se actualiza 1x/día y quedaba "congelada" horas seguidas,
+//   bloqueando el cierre por SL/TP de señales activas en EURUSD.
+// - Adapter exchangerate: detección de congelamiento (mismo valor >15min) que
+//   rechaza la data en vez de darla por buena, incluso como último recurso.
 // Cambios v4.6.2:
 // - Ajuste de holgura dinámica para XAUUSD: amplía el SL un 50% y recalcula 
 //   los TPs para mantener el mismo ratio Riesgo:Beneficio (RR), evitando 
@@ -136,7 +142,10 @@ const ASSETS = {
     name: 'EUR/USD', market: 'forex', type: 'forex',
     symbols: { twelveData: 'EUR/USD', finnhub: 'OANDA:EUR_USD', alphaVantage: 'EURUSD', fmp: 'EURUSD', exchangerate: 'EUR' },
     decimals: 5, pipSize: 0.0001, is24h: false, timezone: 'UTC',
-    providerPriority: ['exchangerate', 'twelveData', 'alphaVantage']
+    // v4.6.3: exchangerate (open.er-api.com) pasado a último recurso — su tasa se
+    // actualiza 1x/día, no sirve como fuente primaria para seguimiento de SL/TP en vivo.
+    // Ver detección de congelamiento en ProviderAdapters.exchangerate.fetchQuote.
+    providerPriority: ['twelveData', 'alphaVantage', 'exchangerate']
   },
   XAUUSD: {
     name: 'XAU/USD (Oro)', market: 'forex', type: 'commodity',
@@ -406,6 +415,14 @@ const ProviderAdapters = {
   },
   exchangerate: {
     name: 'ExchangeRate-API', requiresKey: false, supports: ['EURUSD'],
+    // v4.6.3: open.er-api.com actualiza su tasa 1x/día. Como ahora es último recurso,
+    // igual puede quedar "vivo" horas con el mismo valor si twelveData y alphaVantage
+    // fallan. Se guarda el último valor+hora vistos (en memoria del proceso) y si el
+    // valor no cambió en más de STALE_AFTER_MS, se rechaza en vez de darlo por bueno —
+    // mejor sin señal de precio que con un precio de hace 24hs para cerrar SL/TP.
+    _lastRate: null,
+    _lastRateAt: null,
+    STALE_AFTER_MS: 15 * 60 * 1000,
     async fetchQuote(symbol) {
       const asset = ASSETS[symbol];
       const cacheKey = `er_quote_${symbol}`;
@@ -416,6 +433,15 @@ const ProviderAdapters = {
       const rate = data.rates[asset.symbols.exchangerate];
       if (!rate) throw new Error('Rate not found');
       const price = 1 / rate;
+      const now = Date.now();
+      if (this._lastRate === rate) {
+        if (this._lastRateAt && (now - this._lastRateAt) > this.STALE_AFTER_MS) {
+          throw new Error(`Tasa congelada: mismo valor desde hace ${Math.round((now - this._lastRateAt) / 60000)}min (open.er-api actualiza 1x/día)`);
+        }
+      } else {
+        this._lastRate = rate;
+        this._lastRateAt = now;
+      }
       const marketData = new MarketData({
         bid: price * 0.9995, ask: price * 1.0005, last: price, open: price, high: price, low: price, close: price, volume: 0,
         timestamp: Date.now(), timeframe: '1d', marketStatus: 'open',
