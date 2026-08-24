@@ -79,8 +79,10 @@ const CONFIG = {
   // v4.6: LISTA NEGRA POR ACTIVO - Desactiva estrategias específicas que fallan en un activo
   DISABLED_STRATEGIES_BY_SYMBOL: {
     ETHUSD: ['ema_cross_scalping', 'smc'],
-    BTCUSD: ['smc'],
-    XAUUSD: ['smc'],
+    // ema_cross_scalping: 25% winrate (4 op, 1G/3P) del 12/8 al 23/8. Desactivada.
+    BTCUSD: ['smc', 'ema_cross_scalping'],
+    // bollinger_squeeze: 33.3% winrate (12 op, 4G/8P) del 12/8 al 23/8. Desactivada.
+    XAUUSD: ['smc', 'bollinger_squeeze'],
     EURUSD: ['smc']
   }
 };
