@@ -71,6 +71,11 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
       // confirmar sin ir a los logs de Render si el filtro de tendencia mayor de
       // supply_demand (necesita >=50) está activo o desactivado en la práctica.
       htfDiagnostics: state.htfDiagnostics || {},
+      // FIX (7.3, sesión 25/8): qué proveedor quedó excluido por agotar su cupo
+      // diario, cuándo y para qué símbolo fue la última vez — antes no había forma
+      // de confirmarlo sin inferirlo de los logs de Render (ver engine.js,
+      // logQuotaExcluded). Complementa a htfDiagnostics con el mismo criterio.
+      providerQuotaExclusions: state.providerQuotaExclusions || {},
       autoTune: {
         threshold: state.autoConfidenceThreshold,
         stats: state.autoTuneStats
