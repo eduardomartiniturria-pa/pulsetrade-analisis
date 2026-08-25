@@ -1,5 +1,5 @@
 // ============================================================
-// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4 (CORREGIDO)
+// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.8 (CORREGIDO)
 // ============================================================
 // Estas 8 estrategias (Kill Zone Apertura NY, Pivots Breakout & Reversal,
 // Price Action + RSI + EMA, Supply and Demand, EMA Cross Scalping,
@@ -1152,8 +1152,72 @@ function detectEthVwapScalp(candles, htfCandles) {
 // ---------------------------------------------------------
 
 // ---------------------------------------------------------
+// SCORING CONTEXTUAL (v4.8, sesión 25/8 — Etapa 3)
+// ---------------------------------------------------------
+// Decisión explícita del usuario: arranca INFORMATIVO (se calcula y se muestra
+// en la tarjeta/notificación), no filtra ni bloquea ninguna señal. Recién con
+// datos reales de cuánto acierta el score se evalúa si conviene usarlo para
+// filtrar — no tiene sentido apagar señales en base a un criterio sin validar.
+//
+// 4 factores, score 0-100 (base 50). Función pura: solo usa lo que ya recibe
+// evaluateAll() más symbolStats (cierra el pendiente anotado en el punto 8 del
+// changelog de este archivo — pasar el historial por símbolo+estrategia como
+// parámetro nuevo, ya que esta función no tiene acceso directo a Supabase/state).
+//   1. RR (reward/risk) de la señal.
+//   2. Alineación con tendencia H1 (reutiliza getHtfTrendDirection).
+//   3. Régimen de volatilidad: ATR actual vs ATR de referencia reciente (detecta
+//      señales que nacen en medio de un pico de volatilidad tipo noticia).
+//   4. Historial reciente de esa combinación símbolo+estrategia (wins/losses de
+//      state.strategyStatsBySymbol, si hay al menos 5 operaciones cerradas).
+function computeContextualScore({ direction, entry, sl, tp1, candles, htfCandles, strategyKey, symbolStats }) {
+  let score = 50;
+  const details = [];
+
+  if (entry != null && sl != null && tp1 != null) {
+    const risk = Math.abs(entry - sl);
+    const reward = Math.abs(tp1 - entry);
+    if (risk > 0) {
+      const rr = reward / risk;
+      if (rr >= 2) { score += 10; details.push(`Score: RR favorable (1:${rr.toFixed(1)})`); }
+      else if (rr < 1.5) { score -= 10; details.push(`Score: RR ajustado (1:${rr.toFixed(1)})`); }
+    }
+  }
+
+  const htfTrend = getHtfTrendDirection(htfCandles);
+  if (htfTrend) {
+    const aligned = (direction === 'long' && htfTrend === 'up') || (direction === 'short' && htfTrend === 'down');
+    if (aligned) { score += 15; details.push('Score: a favor de la tendencia H1'); }
+    else { score -= 15; details.push('Score: en contra de la tendencia H1'); }
+  }
+
+  const atrNow = calculateATR(candles);
+  if (atrNow && candles && candles.length >= 40) {
+    const atrPrior = calculateATR(candles.slice(0, candles.length - 14));
+    if (atrPrior) {
+      const ratio = atrNow / atrPrior;
+      if (ratio > 1.8) { score -= 10; details.push('Score: volatilidad muy por encima de lo reciente (posible noticia)'); }
+      else if (ratio < 0.6) { score += 5; details.push('Score: volatilidad comprimida respecto a lo reciente'); }
+    }
+  }
+
+  if (symbolStats && strategyKey && symbolStats[strategyKey]) {
+    const s = symbolStats[strategyKey];
+    const total = (s.wins || 0) + (s.losses || 0);
+    if (total >= 5) {
+      const wr = s.wins / total;
+      if (wr >= 0.55) { score += 10; details.push(`Score: historial reciente favorable (${s.wins}G/${s.losses}P)`); }
+      else if (wr <= 0.35) { score -= 15; details.push(`Score: historial reciente desfavorable (${s.wins}G/${s.losses}P)`); }
+    }
+  }
+
+  return { score: Math.max(0, Math.min(100, Math.round(score))), details };
+}
+
+// ---------------------------------------------------------
 // EVALUACIÓN CONJUNTA (independiente, sin pasar por evalSide)
 // ---------------------------------------------------------
+
+
 
 // CORREGIDO: antes cada detectX() se llamaba directo. Si una explotaba
 // (dato faltante, undefined.high, etc.), se perdían las señales de las 7
@@ -1168,7 +1232,7 @@ function safeRun(strategyName, fn, ...args) {
   }
 }
 
-function evaluateAll(candles, symbol, asset, htfCandles = null) {
+function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = null) {
   const signals = [];
 
   const kz = safeRun('ny_open_kill_zone', detectNYOpenKillZone, candles);
@@ -1251,11 +1315,24 @@ function evaluateAll(candles, symbol, asset, htfCandles = null) {
     }
   }
 
+  // Score contextual (informativo, no filtra nada — ver nota en computeContextualScore
+  // más arriba). Se calcula acá, en un solo lugar, para las señales que efectivamente
+  // dispararon este ciclo, en vez de repetir la llamada dentro de cada detectX().
+  signals.forEach(sig => {
+    const { score, details: scoreDetails } = computeContextualScore({
+      direction: sig.direction, entry: sig.entry, sl: sig.sl, tp1: sig.tp1,
+      candles, htfCandles, strategyKey: sig.strategy, symbolStats
+    });
+    sig.confidence = score;
+    sig.details = (sig.details || []).concat(scoreDetails);
+  });
+
   return signals;
 }
 
 module.exports = {
   evaluateAll,
+  computeContextualScore,
   detectNYOpenKillZone,
   detectPivotsBreakoutReversal,
   detectPriceActionRsiEma,
@@ -1346,4 +1423,14 @@ module.exports = {
 //    precio típico — dato estimado, no volumen real de mercado. El usuario
 //    decidió que la app solo opere con datos reales. Se mantiene
 //    eth_vwap_scalp (ETHUSD sí tiene volumen real vía Binance/CoinGecko).
+// 10. [NUEVO] (Etapa 3, sesión 25/8) Scoring contextual: cada señal que
+//     dispara ahora trae confidence (0-100) calculado por
+//     computeContextualScore(), en base a RR, alineación H1, régimen de
+//     volatilidad (ATR actual vs reciente) e historial reciente
+//     símbolo+estrategia. Decisión explícita del usuario: arranca
+//     INFORMATIVO, no filtra ni bloquea ninguna señal — evaluar más
+//     adelante, con datos reales, si conviene usarlo como filtro.
+//     evaluateAll() ahora recibe symbolStats como 5º parámetro nuevo
+//     (state.strategyStatsBySymbol[symbol], pasado desde engine.js) — cierra
+//     el pendiente que ya estaba anotado en el punto 8 de este changelog.
 // ============================================================
