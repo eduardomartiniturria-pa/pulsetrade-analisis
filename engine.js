@@ -103,6 +103,22 @@ const CONFIG = {
   // checkHistoryOutcomes contra ese precio — no genera señales nuevas, solo achica la
   // demora en detectar que una señal ya tocó SL o TP.
   CRYPTO_QUICK_CHECK_INTERVAL_MS: 5 * 60 * 1000,
+  // NUEVO (Etapa 3 real — auditoría de filtros de señal, Punto 6): antes ningún costo
+  // de spread se restaba de los resultados. checkHistoryOutcomes calculaba rMultiple
+  // "en limpio" (solo distancia de precio a SL/TP1/TP2), así que los winrates y R
+  // acumulados en las stats (patternStats, strategyStatsBySymbol, autoTune) venían
+  // mejor de lo que serían operando de verdad, sin descontar lo que cobra el bróker
+  // en cada entrada/salida. Estos valores son ESTIMADOS (spread típico retail por
+  // activo, en las mismas unidades "pips" que ya usa toPips()/h.slPips) — ajustalos
+  // con el spread real que veas en tu cuenta de Exness si difiere. El costo se
+  // descuenta UNA vez por operación cerrada (se asume que se paga en la entrada,
+  // no se duplica en la salida).
+  ESTIMATED_SPREAD_PIPS_BY_SYMBOL: {
+    BTCUSD: 20,   // pipSize 1 -> ~$20 de spread típico
+    ETHUSD: 1.5,  // pipSize 1 -> ~$1.5
+    EURUSD: 1.5,  // pipSize 0.0001 -> ~1.5 pips
+    XAUUSD: 3.5   // pipSize 0.1 -> ~0.35 en precio
+  },
   HTF_MAP: { '5m': '1h', '15m': '1h' },
   AUTO_TUNE: {
     minSampleSize: 10,
@@ -1273,7 +1289,15 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
       else { outcome = 'expired'; rHit = 0; }
     }
     if (outcome) {
-      h.result = outcome; h.rMultiple = rHit; changed = true; resolvedEntries.push(h);
+      // NUEVO (Etapa 3 real, Punto 6 — spread/comisión): rHit hasta acá es el R "en
+      // limpio" (solo distancia de precio). Se descuenta el costo estimado de spread
+      // en unidades R (spreadPips / h.slPips = cuánto vale el spread relativo al
+      // riesgo de ESA operación puntual — no es el mismo % en todas, depende de qué
+      // tan ajustado estaba el SL). Se guarda también el bruto (grossRMultiple) sin
+      // tocar, por si en algún momento se quiere comparar "en limpio" vs. real.
+      const spreadPips = CONFIG.ESTIMATED_SPREAD_PIPS_BY_SYMBOL[symbol] || 0;
+      const spreadCostR = h.slPips ? spreadPips / h.slPips : 0;
+      h.result = outcome; h.grossRMultiple = rHit; h.rMultiple = +(rHit - spreadCostR).toFixed(2); changed = true; resolvedEntries.push(h);
     }
   });
   if (changed) {
