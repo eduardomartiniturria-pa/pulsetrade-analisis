@@ -17,7 +17,10 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
   // sin haber tocado su lógica de señales/aprendizaje.
   // startAutoRefreshLoop reemplaza al cron fijo de 5 min: corre solo, y decide internamente
   // cada cuánto refrescar (15 min normal, 1 min dentro de la ventana Kill Zone NY 10:30-13:30 ARG).
-  const { state, ASSETS, CONFIG, refreshAllData, BacktestEngine, startAutoRefreshLoop, stopAutoRefreshLoop } = require('./engine.js');
+  // startCryptoQuickCheckLoop (7.1, medida intermedia): loop aparte, cada 5min fijo, solo
+  // para BTC/ETH — chequea precio actual contra SL/TP de señales en curso, sin generar
+  // señales nuevas ni pedir OHLCV/HTF completo (ver detalle en CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS).
+  const { state, ASSETS, CONFIG, refreshAllData, BacktestEngine, startAutoRefreshLoop, stopAutoRefreshLoop, startCryptoQuickCheckLoop, stopCryptoQuickCheckLoop } = require('./engine.js');
 
   // Se registra ACÁ (no en localStorage.js, que se carga antes y no conoce a engine.js)
   // para que, apenas llegue SIGTERM (redeploy en Render), el motor deje de arrancar
@@ -26,6 +29,7 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
   // generarse y empezar a guardarse DESPUÉS de que ya se había tomado la foto de "qué
   // hay que esperar", y se perdía igual pese a que el flush en sí funcionaba bien.
   onBeforeShutdown(stopAutoRefreshLoop);
+  onBeforeShutdown(stopCryptoQuickCheckLoop);
 
   // El motor original leía las API keys desde localStorage (las cargaba el usuario a mano en el
   // navegador). Aquí vienen del .env del servidor, una sola vez para todos.
@@ -63,6 +67,10 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
       // del panel (renderStrategyStatsTable en index.html). Faltaba exponerlo acá — el campo
       // ya existía en engine.js (state.strategyStatsBySymbol) pero nunca llegaba al frontend.
       strategyStatsBySymbol: state.strategyStatsBySymbol || {},
+      // Cuántas velas HTF (H1) llegó a recibir cada símbolo en el último ciclo — para
+      // confirmar sin ir a los logs de Render si el filtro de tendencia mayor de
+      // supply_demand (necesita >=50) está activo o desactivado en la práctica.
+      htfDiagnostics: state.htfDiagnostics || {},
       autoTune: {
         threshold: state.autoConfidenceThreshold,
         stats: state.autoTuneStats
@@ -253,6 +261,9 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
   // Reemplaza al viejo cron.schedule('*/5 * * * *', runCycle) — NO agregar un cron aparte acá,
   // se duplicarían los requests contra los proveedores y empeoraría el rate limit.
   startAutoRefreshLoop();
+  // Loop aparte (7.1, medida intermedia), fijo cada 5min, solo BTC/ETH — no compite con el
+  // rate limit de arriba porque solo pide precio (getQuote), no OHLCV/HTF.
+  startCryptoQuickCheckLoop();
 })().catch(e => {
   console.error('Error fatal iniciando el servidor:', e);
   process.exit(1);
