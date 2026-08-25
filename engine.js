@@ -210,6 +210,29 @@ let state = {
   refreshPaused: false, wakeLock: null
 };
 
+// FIX (Etapa 3, sesión 25/8): antes, cuando el Circuit Breaker apagaba una combinación
+// symbol+strategy por pérdidas consecutivas, la agregaba solo en memoria a
+// CONFIG.DISABLED_STRATEGIES_BY_SYMBOL (que es lo que realmente filtra qué señales se
+// generan en refreshAsset) y guardaba el registro en state.autoDisabledStrategies (esto
+// sí persistido en Supabase, a propósito, para no mezclarlo con las desactivaciones
+// manuales). El problema: CONFIG es un objeto en memoria que se resetea a sus valores
+// fijos en cada arranque del proceso, así que en cada redeploy (Render manda SIGTERM y
+// levanta un proceso nuevo) la desactivación automática se "olvidaba" y la estrategia
+// volvía a generar señales en ese activo, aunque state.autoDisabledStrategies siguiera
+// recordando (y el panel siguiera mostrando) que había sido auto-apagada. Ahora, apenas
+// arranca el proceso, se vuelve a aplicar sobre CONFIG.DISABLED_STRATEGIES_BY_SYMBOL
+// cada combinación que sigue registrada en autoDisabledStrategies, sin tocar ni duplicar
+// las entradas manuales que ya estuvieran ahí.
+(() => {
+  Object.values(state.autoDisabledStrategies || {}).forEach(({ symbol, key }) => {
+    if (!symbol || !key) return;
+    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol]) CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] = [];
+    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
+      CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].push(key);
+    }
+  });
+})();
+
 function getNow() { return new Date(); }
 
 function isArgKillZoneWindow(nowMs = Date.now()) {
