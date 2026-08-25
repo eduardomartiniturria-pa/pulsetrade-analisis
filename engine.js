@@ -1098,27 +1098,57 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
   state.signalHistory.forEach(h => {
     if (h.symbol !== symbol || h.result !== 'pending') return;
     const isLong = h.type === 'long';
+    const hasTp2 = h.tp2 != null;
     const rTP1 = (h.tp1Pips && h.slPips) ? +(h.tp1Pips / h.slPips).toFixed(2) : 2;
+    const rTP2 = (hasTp2 && h.tp2Pips && h.slPips) ? +(h.tp2Pips / h.slPips).toFixed(2) : null;
     let outcome = null;
     let rHit = rTP1;
+    let tp1AlreadyHit = false;
     const relevantCandles = (candles || []).filter(c => c.time >= h.timestamp);
+    // v4.7 (Etapa 3 — auditoría de cierre de operaciones): antes esta función
+    // cerraba en 'win' apenas la vela tocaba TP1, sin mirar h.tp2 para nada —
+    // h.tp2/h.tp2Pips se guardaban en el historial pero no se usaban acá. Para
+    // estrategias con TP2 real (ny_open_kill_zone, bollinger_squeeze) ahora se
+    // sigue escaneando vela por vela después de tocar TP1: si el precio llega a
+    // TP2 antes que al SL, gana con el R de TP2 (no el de TP1). Si el SL llega
+    // primero (haya pasado o no por TP1 antes), se registra pérdida -1R — el
+    // motor no simula mover el stop a breakeven tras TP1, así que no se inventa
+    // ese comportamiento acá. TP1 solo queda registrado como marca informativa
+    // (tp1AlreadyHit) para el caso de expiración con TP1 ya tocado (ver abajo).
     if (relevantCandles.length) {
       for (const c of relevantCandles) {
         const hitSL = isLong ? c.low <= h.sl : c.high >= h.sl;
         const hitTP1 = isLong ? c.high >= h.tp1 : c.low <= h.tp1;
+        const hitTP2 = hasTp2 && (isLong ? c.high >= h.tp2 : c.low <= h.tp2);
         if (hitSL) { outcome = 'loss'; rHit = -1; break; }
-        if (hitTP1) { outcome = 'win'; rHit = rTP1; break; }
+        if (hasTp2) {
+          if (hitTP2) { outcome = 'win'; rHit = rTP2; break; }
+          if (hitTP1) tp1AlreadyHit = true; // sigue pendiente, esperando TP2 o SL
+        } else if (hitTP1) {
+          outcome = 'win'; rHit = rTP1; break;
+        }
       }
     }
     if (!outcome) {
-      if (isLong && currentPrice >= h.tp1) { outcome = 'win'; rHit = rTP1; }
-      else if (isLong && currentPrice <= h.sl) { outcome = 'loss'; rHit = -1; }
-      else if (!isLong && currentPrice <= h.tp1) { outcome = 'win'; rHit = rTP1; }
+      if (isLong && currentPrice <= h.sl) { outcome = 'loss'; rHit = -1; }
       else if (!isLong && currentPrice >= h.sl) { outcome = 'loss'; rHit = -1; }
+      else if (hasTp2) {
+        if (isLong && currentPrice >= h.tp2) { outcome = 'win'; rHit = rTP2; }
+        else if (!isLong && currentPrice <= h.tp2) { outcome = 'win'; rHit = rTP2; }
+        else if (isLong && currentPrice >= h.tp1) { tp1AlreadyHit = true; }
+        else if (!isLong && currentPrice <= h.tp1) { tp1AlreadyHit = true; }
+      } else {
+        if (isLong && currentPrice >= h.tp1) { outcome = 'win'; rHit = rTP1; }
+        else if (!isLong && currentPrice <= h.tp1) { outcome = 'win'; rHit = rTP1; }
+      }
     }
     const expirationMs = (CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY && CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY[h.source]) || CONFIG.SIGNAL_EXPIRATION_MS;
     if (!outcome && (Date.now() - h.timestamp) > expirationMs) {
-      outcome = 'expired'; rHit = 0;
+      // Si expiró habiendo tocado TP1 en el camino (pero nunca SL ni TP2), se
+      // registra como ganada al R real de TP1 en vez de 'expired'/0R — el precio
+      // sí llegó a un objetivo real antes de que se acabara el tiempo.
+      if (hasTp2 && tp1AlreadyHit) { outcome = 'win'; rHit = rTP1; }
+      else { outcome = 'expired'; rHit = 0; }
     }
     if (outcome) {
       h.result = outcome; h.rMultiple = rHit; changed = true; resolvedEntries.push(h);
@@ -1297,9 +1327,17 @@ function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
   const hitTP1 = hitTP1Now || !!frozen.tp1HitAt;
   const expirationMs = (CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY && CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY[frozen.source]) || CONFIG.SIGNAL_EXPIRATION_MS;
   const ageMs = Date.now() - frozen.timestamp;
-  const isExpired = !hitSL && !hitTP1 && ageMs > expirationMs;
+  // v4.7 (Etapa 3 — auditoría de cierre de operaciones): antes esta función cerraba
+  // la señal apenas tocaba TP1, sin importar si la estrategia definía tp2. hitTP2
+  // se calculaba pero nunca se usaba para nada. Para las estrategias con TP2 real
+  // (ny_open_kill_zone, bollinger_squeeze), el "cierre" que determina si la señal
+  // sigue activa ahora es hasTp2 ? hitTP2 : hitTP1 — TP1 solo actualiza el badge
+  // (frozen.tp1HitAt, sin cambios) pero ya no da de baja la señal por sí solo.
+  const hasTp2 = frozen.tp2 != null;
+  const hitFinalTarget = hasTp2 ? hitTP2 : hitTP1;
+  const isExpired = !hitSL && !hitFinalTarget && ageMs > expirationMs;
   console.log(`[DIAG evaluateCustomSignalOutcome] ${key} | source=${frozen.source} | quote.last=${quote.last} | sl=${frozen.sl} | tp1=${frozen.tp1} | tp2=${frozen.tp2} | hitSL=${hitSL} | hitTP1=${hitTP1} | hitTP2=${hitTP2} | ageMs=${ageMs} | expirationMs=${expirationMs} | isExpired=${isExpired}`);
-  const shouldClose = hitSL || hitTP1 || isExpired;
+  const shouldClose = hitSL || hitFinalTarget || isExpired;
   if (shouldClose) {
     delete state.activeCustomSignals[key];
     try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
