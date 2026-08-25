@@ -692,17 +692,24 @@ function detectSupplyDemand(candles, htfCandles) {
   const prev = candles[candles.length - 2];
 
   let htfTrend = 'neutral';
+  let htfFilterNote = null;
   if (htfCandles && htfCandles.length >= 50) {
     const ema20 = calculateEMASeries(htfCandles, 20);
     const ema50 = calculateEMASeries(htfCandles, 50);
     const i = htfCandles.length - 1;
     if (ema20[i] !== null && ema50[i] !== null) htfTrend = ema20[i] > ema50[i] ? 'bullish' : (ema20[i] < ema50[i] ? 'bearish' : 'neutral');
   } else if (htfCandles && htfCandles.length > 0) {
-    // CORREGIDO: antes esto caía en 'neutral' en silencio. Distinto del caso
-    // "no me pasaron HTF" (sigue sin loguear nada): acá SÍ me pasaron HTF
-    // pero la muestra no alcanza para EMA50, y el filtro de tendencia mayor
-    // queda desactivado sin que se note desde afuera.
+    // FIX (7.2, sesión 25/8): antes esto caía en 'neutral' en silencio (solo quedaba un
+    // console.warn en logs de Render, invisible desde el panel). Ahora, si la señal
+    // termina confirmando de todas formas, el aviso se agrega a result.details para que
+    // se vea en la tarjeta de la señal en la app — no hay que ir a buscarlo a los logs.
+    htfFilterNote = `⚠️ Filtro de tendencia H1 desactivado (${htfCandles.length}/50 velas H1 recibidas)`;
     console.warn(`[supply_demand] htfCandles insuficiente (${htfCandles.length} velas, se necesitan >=50) — filtro de tendencia mayor desactivado`);
+  } else if (!htfCandles) {
+    // FIX (7.2): antes este caso (sin ningún dato HTF, ni siquiera insuficiente) no
+    // generaba ni siquiera el console.warn de arriba — era el más silencioso de los tres.
+    htfFilterNote = '⚠️ Sin datos HTF (H1) disponibles — filtro de tendencia mayor desactivado';
+    console.warn(`[supply_demand] sin htfCandles — filtro de tendencia mayor desactivado`);
   }
 
   const demandZones = zones.filter(z => z.type === 'demand').sort((a, b) => b.high - a.high);
@@ -725,6 +732,7 @@ function detectSupplyDemand(candles, htfCandles) {
         const reward = result.tp1 - result.entry;
         if (risk > 0 && reward / risk >= 2) {
           result.details.push(`Rebote alcista en demanda fresca (${demandHit.touches} toque previo), TP en oferta siguiente`);
+          if (htfFilterNote) result.details.push(htfFilterNote);
         } else {
           result.bullish = false; // no cumple RR mínima 1:2
         }
@@ -748,6 +756,7 @@ function detectSupplyDemand(candles, htfCandles) {
           const reward = result.entry - result.tp1;
           if (risk > 0 && reward / risk >= 2) {
             result.details.push(`Rechazo bajista en oferta fresca (${supplyHit.touches} toque previo), TP en demanda siguiente`);
+            if (htfFilterNote) result.details.push(htfFilterNote);
           } else {
             result.bearish = false; // no cumple RR mínima 1:2
           }
