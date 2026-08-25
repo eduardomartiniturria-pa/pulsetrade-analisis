@@ -1,6 +1,21 @@
 // ============================================================
-// PULSE TRADE v4.6.4 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.7.1 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.7.1 (25/8, auditoría Etapa 3):
+// - CONFIG.PROVIDER_PRIORITY (fallback global): orden corregido, exchangerate al
+//   final. Código muerto en la práctica (los 4 activos actuales definen su propio
+//   providerPriority), corregido para no heredar un orden malo si se agrega un
+//   5º activo sin especificarlo.
+// - Cabecera de versión actualizada: no reflejaba el fix ATR v4.7 ni los fixes del
+//   25/8 (quickPriceCheck, visibilidad H1) que ya estaban en el código.
+// Cambios v4.7 (Etapa 3, auditoría de cierre de operaciones):
+// - checkHistoryOutcomes y evaluateCustomSignalOutcome: para estrategias con TP2 real
+//   (ny_open_kill_zone, bollinger_squeeze), ya no cierran la señal en 'win' apenas toca
+//   TP1 — siguen hasta TP2 o SL. TP1 queda solo como marca informativa (tp1HitAt).
+// - SL adaptado a volatilidad con ATR14 en pivots_breakout_reversal y ema_cross_scalping
+//   (antes % fijo del precio), con fallback automático al % fijo si faltan velas.
+// - Circuit Breaker: auto-desactiva una estrategia en un activo tras 5 pérdidas
+//   consecutivas (CONFIG.CIRCUIT_BREAKER), complementa a DISABLED_STRATEGIES_BY_SYMBOL.
 // Cambios v4.6.4:
 // - fmp: detección de congelamiento (mismo patrón que exchangerate v4.6.3), por
 //   símbolo, ante el freeze de ~30min visto en XAUUSD cuando fmp era el proveedor activo.
@@ -81,7 +96,11 @@ const CONFIG = {
     SEED_CAP: 40,
     YIELD_EVERY: 40
   },
-  PROVIDER_PRIORITY: ['exchangerate', 'twelveData', 'alphaVantage'],
+  // Fallback usado solo si un activo no define su propio providerPriority (hoy los
+  // 4 activos actuales sí lo definen, así que este array no se usa en la práctica).
+  // Orden corregido el 25/8 (mismo criterio que EURUSD desde v4.6.3): exchangerate
+  // (open.er-api.com) al final por actualizar su tasa 1x/día, no como primario.
+  PROVIDER_PRIORITY: ['twelveData', 'alphaVantage', 'exchangerate'],
   ENDPOINTS: {
     BINANCE_SPOT: 'https://api.binance.com/api/v3',
     BINANCE_FUTURES: 'https://fapi.binance.com/fapi/v1',
