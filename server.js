@@ -41,9 +41,6 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     // Se saca gratis en https://www.coingecko.com/en/developers/dashboard
     coingecko: process.env.COINGECKO_API_KEY || null
   };
-  // DEBUG TEMPORAL (24/8, diagnóstico EURUSD congelado) — confirma si cada key llegó al
-  // proceso sin imprimir el valor. Sacar esta línea una vez confirmado.
-  console.log('[DEBUG KEYS]', Object.entries(state.apiKeys).map(([k, v]) => `${k}=${v ? 'OK(' + v.length + ' chars)' : 'FALTA'}`).join(' | '));
   state.lastDisplay = state.lastDisplay || {};
 
   const app = express();
