@@ -825,20 +825,40 @@ const BacktestEngine = {
         const lastIdx = lastSignalIndexByStrategy[sig.strategy] ?? -9999;
         if (i - lastIdx < cfg.COOLDOWN_CANDLES) continue;
         const entry = sig.entry, sl = sig.sl, tp1 = sig.tp1;
+        const tp2 = (sig.tp2 !== undefined && sig.tp2 !== null) ? sig.tp2 : null;
         if (entry == null || sl == null || tp1 == null) continue;
         const isLong = sig.direction === 'long';
         let result = null;
+        let finalTarget = tp1; // el nivel que efectivamente cierra la operación
+        let tp1AlreadyHit = false;
         const horizon = Math.min(candles.length, i + 1 + cfg.MAX_HOLD_CANDLES);
+        // v4.7 (Etapa 3 — consistencia con evaluateCustomSignalOutcome/checkHistoryOutcomes):
+        // antes el backtest cerraba en 'win' apenas tocaba TP1, ignorando tp2 aunque la
+        // estrategia lo definiera (ny_open_kill_zone, bollinger_squeeze) — sembraba stats
+        // de arranque más optimistas de la cuenta pero con el R equivocado (el de TP1, no
+        // el de TP2). Ahora, si hay tp2, sigue escaneando después de tocar TP1 esperando
+        // TP2 o SL, igual que en producción. Si se acaba el horizonte de MAX_HOLD_CANDLES
+        // con TP1 ya tocado (sin SL ni TP2), se cuenta como ganada al R de TP1 — el mismo
+        // criterio que la expiración en checkHistoryOutcomes.
         for (let j = i + 1; j < horizon; j++) {
           const c = candles[j];
           const hitSL = isLong ? c.low <= sl : c.high >= sl;
-          const hitTP = isLong ? c.high >= tp1 : c.low <= tp1;
+          const hitTP1 = isLong ? c.high >= tp1 : c.low <= tp1;
+          const hitTP2 = tp2 != null && (isLong ? c.high >= tp2 : c.low <= tp2);
           if (hitSL) { result = 'loss'; break; }
-          if (hitTP) { result = 'win'; break; }
+          if (tp2 != null) {
+            if (hitTP2) { result = 'win'; finalTarget = tp2; break; }
+            if (hitTP1) tp1AlreadyHit = true;
+          } else if (hitTP1) {
+            result = 'win'; finalTarget = tp1; break;
+          }
+        }
+        if (!result && tp2 != null && tp1AlreadyHit) {
+          result = 'win'; finalTarget = tp1; // se acabó el horizonte con TP1 ya tocado
         }
         if (result) {
           const risk = Math.abs(entry - sl);
-          const reward = Math.abs(tp1 - entry);
+          const reward = Math.abs(finalTarget - entry);
           const rMultiple = result === 'win' ? (risk > 0 ? +(reward / risk).toFixed(2) : 2) : -1;
           events.push({ index: i, strategy: sig.strategy, direction: sig.direction, result, rMultiple });
           lastSignalIndexByStrategy[sig.strategy] = i;
