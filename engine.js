@@ -1,6 +1,17 @@
 // ============================================================
-// PULSE TRADE v4.7.3 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.7.4 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.7.4 (25/8, Etapa 3 — cierre del hallazgo 5/7.3):
+// - Causa raíz confirmada con los datos reales de CONFIG (no con más logs): a 1min
+//   de intervalo, Kill Zone NY (180min) por sí sola necesitaba hasta 1080 llamadas
+//   de twelveData solo entre EURUSD y XAUUSD (3 llamadas/ciclo -quote+OHLCV TF+OHLCV
+//   HTF- x 2 símbolos x 180 ciclos), sumado a ~504/día del resto de la jornada a
+//   15min — superaba el cupo de 800/día dentro de la propia ventana de Kill Zone,
+//   sin llegar a la tarde. killZoneIntervalMs pasó de 60s a 4min (45 ciclos en la
+//   ventana, ~774 llamadas/día totales, con margen). alphaVantage (25/día) sigue
+//   siendo un punto débil aparte: cualquier fallo puntual de twelveData lo agota
+//   casi de inmediato como fallback — no resuelto por este cambio, queda para otra
+//   etapa si se repite.
 // Cambios v4.7.3 (25/8, Etapa 3 — scoring contextual):
 // - refreshAsset() ahora pasa state.strategyStatsBySymbol[symbol] como symbolStats
 //   (5º parámetro nuevo) a CustomStrategies.evaluateAll(), para que el score
@@ -70,9 +81,16 @@ const CONFIG = {
     ema_cross_scalping: 4 * 60 * 60 * 1000,
     ny_open_kill_zone: 4 * 60 * 60 * 1000
   },
+  // FIX (7.3, sesión 25/8, cierre): killZoneIntervalMs pasó de 60s a 4min. Con datos
+  // reales de CONFIG (cupo twelveData 800/día, 3 llamadas por ciclo por símbolo
+  // -quote+OHLCV TF+OHLCV HTF-, EURUSD y XAUUSD con twelveData como proveedor #1):
+  // fuera de Kill Zone ya se gastan ~504 llamadas/día (84 ciclos x 3 x 2 símbolos).
+  // A 1min, Kill Zone (180min) sumaba 1080 llamadas más -> agotaba el cupo dentro
+  // de la propia ventana, sin llegar a la tarde (caso real EURUSD 25/8). A 4min,
+  // Kill Zone suma 270 llamadas (45 ciclos x 6) -> total ~774/día, con margen.
   DYNAMIC_REFRESH: {
     normalIntervalMs: 15 * 60 * 1000,
-    killZoneIntervalMs: 60 * 1000
+    killZoneIntervalMs: 4 * 60 * 1000
   },
   // FIX (7.1, sesión 25/8, "medida intermedia" — integrar MetaApi.cloud queda en pausa):
   // se detectó un caso donde Exness cerró una operación por SL mientras PulseTrade
