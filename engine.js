@@ -1485,7 +1485,6 @@ function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
   const hasTp2 = frozen.tp2 != null;
   const hitFinalTarget = hasTp2 ? hitTP2 : hitTP1;
   const isExpired = !hitSL && !hitFinalTarget && ageMs > expirationMs;
-  console.log(`[DIAG evaluateCustomSignalOutcome] ${key} | source=${frozen.source} | quote.last=${quote.last} | sl=${frozen.sl} | tp1=${frozen.tp1} | tp2=${frozen.tp2} | hitSL=${hitSL} | hitTP1=${hitTP1} | hitTP2=${hitTP2} | ageMs=${ageMs} | expirationMs=${expirationMs} | isExpired=${isExpired}`);
   const shouldClose = hitSL || hitFinalTarget || isExpired;
   if (shouldClose) {
     delete state.activeCustomSignals[key];
