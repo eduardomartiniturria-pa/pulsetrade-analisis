@@ -44,6 +44,17 @@ const CONFIG = {
     normalIntervalMs: 15 * 60 * 1000,
     killZoneIntervalMs: 60 * 1000
   },
+  // FIX (7.1, sesión 25/8, "medida intermedia" — integrar MetaApi.cloud queda en pausa):
+  // se detectó un caso donde Exness cerró una operación por SL mientras PulseTrade
+  // seguía la señal como activa, con el ciclo normal de 15min entre chequeos. No es un
+  // proveedor de precio nuevo (eso sigue en pausa), es acortar la ventana de detección
+  // de SL/TP para BTC/ETH específicamente: son los dos activos 24/7 sin ventana de
+  // mercado cerrado, y los de mayor volatilidad intrabar de los 4. Corre por separado
+  // del ciclo principal (que sigue generando señales nuevas cada 15min/1min): solo pide
+  // el precio actual (1 llamada liviana a getQuote, no OHLCV/HTF completo) y revisa
+  // checkHistoryOutcomes contra ese precio — no genera señales nuevas, solo achica la
+  // demora en detectar que una señal ya tocó SL o TP.
+  CRYPTO_QUICK_CHECK_INTERVAL_MS: 5 * 60 * 1000,
   HTF_MAP: { '5m': '1h', '15m': '1h' },
   AUTO_TUNE: {
     minSampleSize: 10,
@@ -1402,6 +1413,13 @@ async function refreshAsset(symbol, forceRefresh = false) {
       try { const htfOhlcv = await MarketDataProvider.getOHLCV(symbol, htfTF, 60, forceRefresh); htfCandles = htfOhlcv.candles; }
       catch (e) { htfCandles = null; }
     }
+    // FIX (7.2, sesión 25/8): antes la única forma de saber cuántas velas HTF llegan
+    // realmente en producción era buscar a mano en los logs de Render — y en más de un
+    // intento no se encontró nada (Punto D, sesiones previas). Ahora queda guardado en
+    // state, expuesto por /api/state (campo htfDiagnostics), consultable en cualquier
+    // momento sin depender de que el log siga vivo en la ventana de retención de Render.
+    state.htfDiagnostics = state.htfDiagnostics || {};
+    state.htfDiagnostics[symbol] = { tf: htfTF, count: htfCandles ? htfCandles.length : 0, at: Date.now() };
     checkHistoryOutcomes(symbol, quote.last, ohlcv.candles);
     
     try {
@@ -1456,6 +1474,45 @@ async function refreshAllData(forceRefresh = false) {
 
 async function requestWakeLock() {}
 
+// FIX (7.1, medida intermedia): chequeo liviano de precio para BTC/ETH, en paralelo al
+// ciclo principal (ver CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS). No evalúa estrategias ni
+// genera señales nuevas — solo pide el precio actual y lo pasa a checkHistoryOutcomes
+// para detectar más rápido si una señal ya en curso tocó SL o TP, usando las últimas
+// velas ya cacheadas (state.klineHistory) en vez de pedir OHLCV/HTF de nuevo.
+async function quickPriceCheck(symbol) {
+  const asset = ASSETS[symbol];
+  if (!asset || asset.type !== 'crypto') return;
+  if (!isMarketOpenForAsset(symbol)) return;
+  try {
+    const quote = await MarketDataProvider.getQuote(symbol, false);
+    updatePriceUI(symbol, quote, asset);
+    const cachedCandles = (state.klineHistory[symbol] && state.klineHistory[symbol].candles) || [];
+    checkHistoryOutcomes(symbol, quote.last, cachedCandles);
+  } catch (e) {
+    console.warn(`quickPriceCheck: fallo en ${symbol}:`, e.message);
+  }
+}
+
+let cryptoQuickCheckTimer = null;
+async function cryptoQuickCheckTick() {
+  try {
+    for (const symbol of Object.keys(ASSETS)) {
+      if (ASSETS[symbol].type === 'crypto') await quickPriceCheck(symbol);
+    }
+  } finally {
+    cryptoQuickCheckTimer = setTimeout(cryptoQuickCheckTick, CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS);
+  }
+}
+
+function startCryptoQuickCheckLoop() {
+  if (cryptoQuickCheckTimer) return;
+  cryptoQuickCheckTimer = setTimeout(cryptoQuickCheckTick, CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS);
+}
+
+function stopCryptoQuickCheckLoop() {
+  if (cryptoQuickCheckTimer) { clearTimeout(cryptoQuickCheckTimer); cryptoQuickCheckTimer = null; }
+}
+
 let autoRefreshTimer = null;
 async function autoRefreshTick() {
   try {
@@ -1480,5 +1537,6 @@ function stopAutoRefreshLoop() {
 
 module.exports = {
   state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
-  startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isArgKillZoneWindow
+  startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isArgKillZoneWindow,
+  startCryptoQuickCheckLoop, stopCryptoQuickCheckLoop
 };
