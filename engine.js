@@ -1,6 +1,14 @@
 // ============================================================
-// PULSE TRADE v4.7.1 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.7.2 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.7.2 (25/8, Etapa 3 — hallazgo de logs de producción):
+// - Visibilidad de exclusión por cupo diario (7.3): cuando un proveedor queda
+//   afuera de eligible en getQuote/getOHLCV por agotar su cupo (PROVIDER_DAILY_LIMITS),
+//   ahora se loguea explícitamente (logQuotaExcluded) y queda en
+//   state.providerQuotaExclusions, expuesto por /api/state. Antes desaparecía en
+//   silencio de la lista — se detectó así el caso de EURUSD atrapado 2+ horas con
+//   solo exchangerate (congelado) disponible, sin poder confirmar si twelveData
+//   y/o alphaVantage estaban excluidos por cupo o por otra causa.
 // Cambios v4.7.1 (25/8, auditoría Etapa 3):
 // - CONFIG.PROVIDER_PRIORITY (fallback global): orden corregido, exchangerate al
 //   final. Código muerto en la práctica (los 4 activos actuales definen su propio
@@ -367,6 +375,22 @@ function calculateSpread(bid, ask, pipSize = 0.0001) { if (!bid || !ask || bid <
 function addLog(provider, action, symbol) {
   const entry = { time: new Date().toLocaleTimeString('es-ES'), provider, action, symbol };
   state.logs.unshift(entry); if (state.logs.length > 20) state.logs.pop();
+}
+
+// FIX (7.3, sesión 25/8): antes, cuando un proveedor quedaba afuera de `eligible`
+// en getQuote/getOHLCV por haber agotado su cupo diario (PROVIDER_DAILY_LIMITS),
+// simplemente desaparecía de la lista sin dejar rastro — la única pista indirecta
+// era que el mensaje final de error mencionara solo a los proveedores restantes
+// (ver caso EURUSD/exchangerate en logs del 25/8, sin ninguna mención de
+// twelveData/alphaVantage). Misma clase de falla silenciosa que el filtro H1 (7.2).
+// Ahora se deja un log explícito y se guarda en state.providerQuotaExclusions,
+// expuesto por /api/state, para poder confirmar con certeza qué proveedor se agotó
+// y a qué hora, sin tener que inferirlo.
+function logQuotaExcluded(providerName, symbol, usage) {
+  console.warn(`[cupo] ${providerName} excluido para ${symbol}: cupo diario agotado (${usage.used}/${usage.limit})`);
+  addLog(providerName, `CUPO AGOTADO (${usage.used}/${usage.limit})`, symbol);
+  state.providerQuotaExclusions = state.providerQuotaExclusions || {};
+  state.providerQuotaExclusions[providerName] = { used: usage.used, limit: usage.limit, lastSymbol: symbol, at: Date.now() };
 }
 
 function getProviderCooldownMs(errorMessage) {
@@ -755,7 +779,7 @@ const MarketDataProvider = {
       if (!adapter.supports.includes(symbol)) return false;
       if (adapter.requiresKey && !state.apiKeys[providerName]) return false;
       const usage = RequestTracker.getUsage(providerName);
-      if (usage.limit && usage.used >= usage.limit) return false;
+      if (usage.limit && usage.used >= usage.limit) { logQuotaExcluded(providerName, symbol, usage); return false; }
       return true;
     });
     if (eligible.length === 0) throw new Error(`Datos de mercado temporalmente no disponibles para ${symbol}.`);
@@ -799,7 +823,7 @@ const MarketDataProvider = {
       if (!adapter || !adapter.fetchOHLCV || !adapter.supports.includes(symbol)) return false;
       if (adapter.requiresKey && !state.apiKeys[providerName]) return false;
       const usage = RequestTracker.getUsage(providerName);
-      if (usage.limit && usage.used >= usage.limit) return false;
+      if (usage.limit && usage.used >= usage.limit) { logQuotaExcluded(providerName, symbol, usage); return false; }
       return true;
     });
     if (eligible.length > 0) {
