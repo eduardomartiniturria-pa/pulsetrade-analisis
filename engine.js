@@ -1,6 +1,13 @@
 // ============================================================
-// PULSE TRADE v4.7.2 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.7.3 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.7.3 (25/8, Etapa 3 — scoring contextual):
+// - refreshAsset() ahora pasa state.strategyStatsBySymbol[symbol] como symbolStats
+//   (5º parámetro nuevo) a CustomStrategies.evaluateAll(), para que el score
+//   contextual de cada señal pueda considerar el historial reciente real.
+// - resolveCustomSignal(): confidence ya no se hardcodea en null — usa el score
+//   que ahora calcula computeContextualScore() en custom-strategies.js.
+//   Informativo por decisión explícita del usuario, no filtra ninguna señal.
 // Cambios v4.7.2 (25/8, Etapa 3 — hallazgo de logs de producción):
 // - Visibilidad de exclusión por cupo diario (7.3): cuando un proveedor queda
 //   afuera de eligible en getQuote/getOHLCV por agotar su cupo (PROVIDER_DAILY_LIMITS),
@@ -1397,7 +1404,10 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     
     const frozen = {
       type: customSig.direction, symbol, asset, entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips,
-      rr1: formatRR(tp1), rr2: formatRR(tp2), confidence: null,
+      // v4.7.3: antes hardcodeado en null — las señales de las 8 estrategias nunca
+      // traían confidence. Ahora viene calculado por computeContextualScore() dentro
+      // de evaluateAll() (custom-strategies.js). Puramente informativo, ver nota ahí.
+      rr1: formatRR(tp1), rr2: formatRR(tp2), confidence: (customSig.confidence != null ? customSig.confidence : null),
       strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
       details: customSig.details, source: customSig.strategy, regime: 'n/a',
       timestamp: Date.now(), decimals: asset.decimals, detectedAt: Date.now(),
@@ -1489,7 +1499,11 @@ async function refreshAsset(symbol, forceRefresh = false) {
     checkHistoryOutcomes(symbol, quote.last, ohlcv.candles);
     
     try {
-      const rawSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles);
+      // v4.7.3 (Etapa 3 — scoring contextual): se pasa el historial reciente
+      // símbolo+estrategia como symbolStats, 5º parámetro nuevo de evaluateAll().
+      // Cierra el pendiente ya anotado en el changelog de custom-strategies.js
+      // (punto 8): la función es pura, no tiene acceso directo a Supabase/state.
+      const rawSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles, state.strategyStatsBySymbol[symbol] || null);
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
       const filteredSignals = rawSignals.filter(sig => {
         if (!CONFIG.ENABLED_STRATEGIES.includes(sig.strategy)) {
