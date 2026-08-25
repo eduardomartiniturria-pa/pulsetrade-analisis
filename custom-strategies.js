@@ -388,7 +388,11 @@ function findStrictPivotLows(candles) {
 
 function detectPivotsBreakoutReversal(candles) {
   const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, mode: null };
-  if (!candles || candles.length < 10) return result;
+  // v4.7: se sube el mínimo de 10 a 20 velas porque ahora el SL se ancla en ATR14
+  // (ver más abajo) — calculateATR necesita al menos period+1=15 velas para no
+  // devolver null; 20 deja margen para que además los pivotes estrictos (que ya
+  // consumen las primeras 4 y últimas 2 velas del set) tengan datos reales atrás.
+  if (!candles || candles.length < 20) return result;
 
   const PH = findStrictPivotHighs(candles);
   const PL = findStrictPivotLows(candles);
@@ -463,10 +467,22 @@ function detectPivotsBreakoutReversal(candles) {
   if (result.bullish || result.bearish) {
     const entry = result.entry;
     const refLevel = result.bullish ? lastPL.price : lastPH.price;
-    const sl = result.bullish ? refLevel * 0.985 : refLevel * 1.015; // 1.5% del nivel roto
+    // v4.7 (auditoría Etapa 2): antes el colchón del SL era 1.5% FIJO del precio,
+    // sin importar el activo. Un 1.5% en EURUSD (baja volatilidad intradía) es un
+    // colchón enorme relativo a su rango real; el mismo 1.5% en BTCUSD/XAUUSD puede
+    // ser angosto un día de alta volatilidad y disparar el stop por ruido normal.
+    // Se reemplaza por un colchón de 0.5x ATR14 sobre el nivel estructural roto
+    // (el pivote), que sí se adapta a la volatilidad real y reciente de cada activo.
+    // Se conserva el 0.985/1.015 como fallback SOLO si por algún motivo no hay ATR
+    // calculable (candles insuficientes), para no romper la señal en ese caso raro.
+    const atr = calculateATR(candles);
+    const sl = atr
+      ? (result.bullish ? refLevel - atr * 0.5 : refLevel + atr * 0.5)
+      : (result.bullish ? refLevel * 0.985 : refLevel * 1.015);
     const risk = Math.abs(entry - sl);
     result.sl = sl;
     result.tp1 = result.bullish ? entry + risk * 2 : entry - risk * 2; // RR 1:2 fijo
+    if (atr) result.details.push(`SL ajustado por volatilidad (0.5x ATR14 = ${(atr * 0.5).toFixed(5)}) desde el nivel de pivote`);
   }
 
   return result;
@@ -750,7 +766,8 @@ function detectSupplyDemand(candles, htfCandles) {
 // de plantilla, no un resultado verificable. Se implementa la lógica tal
 // cual el Pine Script (cruce + filtros RSI/MACD + TP 2% / SL 1% fijos).
 // Parámetros: EMA9, EMA21, RSI14 (>50 compra / <50 venta), MACD(12,26,9)
-// SL = 1% fijo / TP1 = 2% fijo (RR 1:2)
+// SL = 1x ATR14 / TP1 = 2x ATR14 (RR 1:2) — ver fix v4.7 más abajo.
+// Fallback a 1%/2% fijo del precio SOLO si el ATR no es calculable ese ciclo.
 //
 // FIX (auditoría de estrategias, sesión 14/8): un cruce de EMA en aislamiento
 // es un indicador rezagado — backtests cuantitativos publicados lo ubican
@@ -811,18 +828,35 @@ function detectEmaCrossScalping(candles, htfCandles = null) {
 
   const last = candles[i];
 
+  // v4.7 (auditoría Etapa 2): el 1%/2% fijo venía literal del Pine Script original
+  // (nota arriba: "90% win rate" de marketing, no verificable). Un % fijo del precio
+  // no distingue XAUUSD en día de noticias de EURUSD en rango asiático. Se reemplaza
+  // por ATR14 del propio timeframe de entrada (M15), manteniendo la misma RR 1:2 que
+  // ya tenía. Fallback al 1%/2% original únicamente si el ATR no es calculable.
+  const atrScalp = calculateATR(candles);
+
   if (crossUp && rsiNow > 50 && macdNow > signalNow && htfTrend === 'up') {
     result.bullish = true;
     result.entry = last.close;
-    result.sl = result.entry * (1 - 0.01);  // 1% SL, tal cual el Pine Script
-    result.tp1 = result.entry * (1 + 0.02); // 2% TP, RR 1:2
-    result.details.push(`Cruce EMA9>EMA21 + RSI ${rsiNow.toFixed(1)} (>50) + MACD alcista + tendencia HTF alcista`);
+    if (atrScalp) {
+      result.sl = result.entry - atrScalp;
+      result.tp1 = result.entry + atrScalp * 2;
+    } else {
+      result.sl = result.entry * (1 - 0.01);  // fallback: 1% SL si no hay ATR
+      result.tp1 = result.entry * (1 + 0.02); // fallback: 2% TP, RR 1:2
+    }
+    result.details.push(`Cruce EMA9>EMA21 + RSI ${rsiNow.toFixed(1)} (>50) + MACD alcista + tendencia HTF alcista${atrScalp ? ' (SL/TP por ATR14)' : ''}`);
   } else if (crossDown && rsiNow < 50 && macdNow < signalNow && htfTrend === 'down') {
     result.bearish = true;
     result.entry = last.close;
-    result.sl = result.entry * (1 + 0.01);
-    result.tp1 = result.entry * (1 - 0.02);
-    result.details.push(`Cruce EMA9<EMA21 + RSI ${rsiNow.toFixed(1)} (<50) + MACD bajista + tendencia HTF bajista`);
+    if (atrScalp) {
+      result.sl = result.entry + atrScalp;
+      result.tp1 = result.entry - atrScalp * 2;
+    } else {
+      result.sl = result.entry * (1 + 0.01);
+      result.tp1 = result.entry * (1 - 0.02);
+    }
+    result.details.push(`Cruce EMA9<EMA21 + RSI ${rsiNow.toFixed(1)} (<50) + MACD bajista + tendencia HTF bajista${atrScalp ? ' (SL/TP por ATR14)' : ''}`);
   }
 
   return result;
