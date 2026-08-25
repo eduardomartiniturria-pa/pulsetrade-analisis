@@ -1,6 +1,13 @@
 // ============================================================
-// PULSE TRADE v4.6.3 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.6.4 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.6.4:
+// - fmp: detección de congelamiento (mismo patrón que exchangerate v4.6.3), por
+//   símbolo, ante el freeze de ~30min visto en XAUUSD cuando fmp era el proveedor activo.
+// - CoinGecko OHLCV: reemplazado /coins/{id}/ohlc (granularidad fija de CoinGecko,
+//   topeaba en 48 velas/día sin importar qué se pidiera) por /market_chart, agregado
+//   en velas de 15m/1h genuinas por bucket de tiempo — mismo timeframe que ya
+//   esperaban las estrategias, sin alterar sus condiciones de entrada.
 // Cambios v4.6.3:
 // - EURUSD: exchangerate (open.er-api.com) pasado de proveedor primario a último
 //   recurso — su tasa se actualiza 1x/día y quedaba "congelada" horas seguidas,
@@ -550,15 +557,31 @@ const ProviderAdapters = {
       const cacheKey = `cg_ohlcv_${symbol}_${interval}`;
       const cached = ResponseCache.get(cacheKey); if (cached) return cached;
       const headers = state.apiKeys.coingecko ? { 'x-cg-demo-api-key': state.apiKeys.coingecko } : {};
+      // v4.6.4: el endpoint /coins/{id}/ohlc tiene granularidad FIJA que decide CoinGecko
+      // según 'days' (30min con days=1, 4h con days=3-30) — nunca da velas de 15m reales
+      // sin importar qué pidamos, por eso siempre topeaba en 48 velas/día. Se cambia a
+      // /market_chart, que devuelve precios a intervalos finos (~5min en days=1), y se
+      // agregan acá en velas de 15m/1h GENUINAS por bucket de tiempo — mismo timeframe
+      // que las estrategias esperan, no un timeframe distinto disfrazado.
       const days = (interval === '1h') ? '14' : '1';
-      const url = `${CONFIG.ENDPOINTS.COINGECKO}/coins/${id}/ohlc?vs_currency=usd&days=${days}`;
+      const url = `${CONFIG.ENDPOINTS.COINGECKO}/coins/${id}/market_chart?vs_currency=usd&days=${days}`;
       const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, { headers }, 'coingecko');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
-      if (!Array.isArray(data) || !data.length) throw new Error('Sin datos históricos de CoinGecko');
-      const result = new OHLCVData(data.slice(-limit).map(([t, o, h, l, c]) => ({
-        time: t, open: o, high: h, low: l, close: c, volume: 0
-      })));
+      if (!data.prices || !Array.isArray(data.prices) || !data.prices.length) throw new Error('Sin datos históricos de CoinGecko');
+      const bucketMs = (interval === '1h') ? 60 * 60 * 1000 : 15 * 60 * 1000;
+      const buckets = new Map();
+      for (const [t, price] of data.prices) {
+        const bucketKey = Math.floor(t / bucketMs) * bucketMs;
+        let b = buckets.get(bucketKey);
+        if (!b) { b = { time: bucketKey, open: price, high: price, low: price, close: price, volume: 0 }; buckets.set(bucketKey, b); }
+        else { b.high = Math.max(b.high, price); b.low = Math.min(b.low, price); b.close = price; }
+      }
+      const candles = Array.from(buckets.values()).sort((a, b) => a.time - b.time);
+      // Descartamos la última vela si todavía no cerró (bucket en curso) para no mezclar
+      // una vela a medio formar con las cerradas — mismo criterio que usarían las demás fuentes.
+      if (candles.length && (Date.now() - candles[candles.length - 1].time) < bucketMs) candles.pop();
+      const result = new OHLCVData(candles.slice(-limit));
       ResponseCache.set(cacheKey, result); return result;
     }
   },
@@ -620,6 +643,12 @@ const ProviderAdapters = {
   },
   fmp: {
     name: 'Financial Modeling Prep', requiresKey: true, supports: ['BTCUSD','ETHUSD','EURUSD','XAUUSD'],
+    // v4.6.4: detección de congelamiento genérica, mismo patrón que exchangerate.
+    // Se vio en logs (24/8) que XAUUSD quedó con quote.last idéntico ~30min cuando
+    // fmp era el proveedor activo (twelveData agotado). Por símbolo porque fmp sirve
+    // los 4 activos, no uno solo como exchangerate.
+    _lastQuotes: {},
+    STALE_AFTER_MS: 20 * 60 * 1000,
     async fetchQuote(symbol) {
       if (!state.apiKeys.fmp) throw new Error('API key no configurada');
       const asset = ASSETS[symbol];
@@ -629,7 +658,17 @@ const ProviderAdapters = {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json(); if (data['Error Message']) throw new Error(data['Error Message']);
       const d = data[0]; if (!d) throw new Error('Sin datos');
-      const price = d.price; const bid = price * 0.9995; const ask = price * 1.0005;
+      const price = d.price;
+      const now = Date.now();
+      const last = this._lastQuotes[symbol];
+      if (last && last.price === price) {
+        if (now - last.at > this.STALE_AFTER_MS) {
+          throw new Error(`Precio congelado: mismo valor desde hace ${Math.round((now - last.at) / 60000)}min (FMP)`);
+        }
+      } else {
+        this._lastQuotes[symbol] = { price, at: now };
+      }
+      const bid = price * 0.9995; const ask = price * 1.0005;
       const marketData = new MarketData({
         bid, ask, last: price, open: d.open, high: d.dayHigh, low: d.dayLow, close: d.previousClose, volume: d.volume,
         timestamp: Date.now(), timeframe: '1d', marketStatus: d.isMarketOpen ? 'open' : 'closed',
