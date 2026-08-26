@@ -1169,7 +1169,7 @@ function detectEthVwapScalp(candles, htfCandles) {
 //      señales que nacen en medio de un pico de volatilidad tipo noticia).
 //   4. Historial reciente de esa combinación símbolo+estrategia (wins/losses de
 //      state.strategyStatsBySymbol, si hay al menos 5 operaciones cerradas).
-function computeContextualScore({ direction, entry, sl, tp1, candles, htfCandles, strategyKey, symbolStats }) {
+function computeContextualScore({ direction, entry, sl, tp1, candles, htfCandles, strategyKey, symbolStats, newsContext }) {
   let score = 50;
   const details = [];
 
@@ -1210,6 +1210,21 @@ function computeContextualScore({ direction, entry, sl, tp1, candles, htfCandles
     }
   }
 
+  // v4.8: newsContext = evento real de alto impacto (USD) dentro de ±60min, calculado
+  // en engine.js (NewsCalendar, feed ForexFactory) y pasado acá vía evaluateAll(). A
+  // diferencia del proxy de ATR de arriba ("posible noticia", ya inferido después del
+  // hecho por el salto de volatilidad), esto es un dato real y puede anticiparse ANTES
+  // de que el precio se mueva. Puramente informativo — mismo criterio que el resto del
+  // score: ajusta, no filtra ni bloquea la señal (decisión explícita de Soy).
+  if (newsContext) {
+    const penalty = Math.abs(newsContext.minutesAway) <= 20 ? 20 : 10;
+    score -= penalty;
+    const when = newsContext.minutesAway >= 0
+      ? `en ${newsContext.minutesAway}min`
+      : `hace ${Math.abs(newsContext.minutesAway)}min`;
+    details.push(`Score: noticia de alto impacto cerca (${newsContext.title}, ${when})`);
+  }
+
   return { score: Math.max(0, Math.min(100, Math.round(score))), details };
 }
 
@@ -1232,7 +1247,7 @@ function safeRun(strategyName, fn, ...args) {
   }
 }
 
-function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = null) {
+function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = null, newsContext = null) {
   const signals = [];
 
   const kz = safeRun('ny_open_kill_zone', detectNYOpenKillZone, candles);
@@ -1321,7 +1336,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
   signals.forEach(sig => {
     const { score, details: scoreDetails } = computeContextualScore({
       direction: sig.direction, entry: sig.entry, sl: sig.sl, tp1: sig.tp1,
-      candles, htfCandles, strategyKey: sig.strategy, symbolStats
+      candles, htfCandles, strategyKey: sig.strategy, symbolStats, newsContext
     });
     sig.confidence = score;
     sig.details = (sig.details || []).concat(scoreDetails);
