@@ -475,6 +475,60 @@ const ResponseCache = {
   clearSymbol(symbol) { Object.keys(this.data).forEach(key => { if (key.includes(symbol)) delete this.data[key]; }); }
 };
 
+// v4.8: NewsCalendar — insumo interno para computeContextualScore() (custom-strategies.js).
+// A pedido explícito de Soy: la noticia NO se muestra en la UI ni en la señal como campo
+// nuevo, solo ajusta el score contextual que ya existe (mismo mecanismo que el historial
+// reciente de la estrategia). Fuente: feed público de ForexFactory, sin cuenta ni API key
+// (se descartó Finnhub — /calendar/economic confirmado fuera del tier gratis, ver
+// respaldo de sesión). Cache propio de 30min (no el CACHE_TTL de 30s de ResponseCache,
+// que es para cotizaciones — un calendario semanal no cambia de un ciclo al siguiente).
+const NewsCalendar = {
+  FEED_URL: 'https://nfs.faireconomy.media/ff_calendar_thisweek.json',
+  CACHE_MS: 30 * 60 * 1000,
+  _cache: null,
+  _cacheAt: 0,
+
+  async getEvents() {
+    if (this._cache && (Date.now() - this._cacheAt) < this.CACHE_MS) return this._cache;
+    try {
+      const res = await fetchWithTimeout(this.FEED_URL, CONFIG.REQUEST_TIMEOUT);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (!Array.isArray(data)) throw new Error('Respuesta inesperada del calendario económico');
+      this._cache = data;
+      this._cacheAt = Date.now();
+      return data;
+    } catch (error) {
+      console.warn('[NewsCalendar] fallo al traer calendario económico:', error.message);
+      // Si falla, se sigue usando el cache viejo si existe (mejor un calendario un poco
+      // desactualizado que dejar de scorear por completo), o array vacío si nunca hubo éxito.
+      return this._cache || [];
+    }
+  },
+
+  // Devuelve el evento de mayor impacto dentro de ±windowMinutes del momento actual,
+  // filtrado por moneda (USD afecta a los 4 activos de esta app). null si no hay ninguno.
+  async getNearbyHighImpact(currency = 'USD', windowMinutes = 60) {
+    const events = await this.getEvents();
+    const now = Date.now();
+    const windowMs = windowMinutes * 60 * 1000;
+    let closest = null;
+    let closestDist = Infinity;
+    for (const ev of events) {
+      if (!ev || ev.country !== currency) continue;
+      if ((ev.impact || '').toLowerCase() !== 'high') continue;
+      const ts = Date.parse(ev.date);
+      if (isNaN(ts)) continue;
+      const dist = Math.abs(ts - now);
+      if (dist <= windowMs && dist < closestDist) {
+        closest = { title: ev.title, currency: ev.country, timestamp: ts, minutesAway: Math.round((ts - now) / 60000) };
+        closestDist = dist;
+      }
+    }
+    return closest;
+  }
+};
+
 const ProviderAdapters = {
   binanceSpot: {
     name: 'Binance Spot', requiresKey: false, supports: ['BTCUSD','ETHUSD'],
@@ -1544,7 +1598,12 @@ async function refreshAsset(symbol, forceRefresh = false) {
       // símbolo+estrategia como symbolStats, 5º parámetro nuevo de evaluateAll().
       // Cierra el pendiente ya anotado en el changelog de custom-strategies.js
       // (punto 8): la función es pura, no tiene acceso directo a Supabase/state.
-      const rawSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles, state.strategyStatsBySymbol[symbol] || null);
+      // v4.8: se agrega newsContext (6º parámetro) — evento de alto impacto en USD
+      // dentro de ±60min, si lo hay. Uso exclusivo de computeContextualScore(): ajusta
+      // el mismo score informativo que ya existe, no agrega campos nuevos a la señal
+      // ni se muestra en la UI (decisión explícita de Soy).
+      const newsContext = await NewsCalendar.getNearbyHighImpact('USD', 60);
+      const rawSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles, state.strategyStatsBySymbol[symbol] || null, newsContext);
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
       const filteredSignals = rawSignals.filter(sig => {
         if (!CONFIG.ENABLED_STRATEGIES.includes(sig.strategy)) {
