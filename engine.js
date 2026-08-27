@@ -74,6 +74,12 @@ const CONFIG = {
   MAX_RETRIES: 2,
   RETRY_DELAY: 1000,
   CACHE_TTL: 30000,
+  // Mínimo real de velas 15m que exige la estrategia activa más demandante
+  // (bollinger_squeeze, candles.length >= 90 — confirmado en auditoría de
+  // custom-strategies.js del 25/8, Etapa 1). No confundir con el `limit=100`
+  // que se pide a los proveedores: 100 es un techo de pedido, no un piso
+  // funcional. Re-verificar si custom-strategies.js cambió desde esa fecha.
+  OHLCV_STRATEGY_MIN_CANDLES: 90,
   CONFIDENCE_THRESHOLD: 70,
   SIGNAL_COOLDOWN_MS: 15 * 60 * 1000,
   SIGNAL_EXPIRATION_MS: 72 * 60 * 60 * 1000,
@@ -959,8 +965,14 @@ const MarketDataProvider = {
         try {
           const data = await ProviderAdapters[providerName].fetchOHLCV(symbol, tf, limit);
           if (!data.isValid) throw new Error('Datos insuficientes');
-          if (data.candles.length < limit) {
-            console.warn(`OHLCV ${providerName} ÉXITO pero incompleto: ${symbol} ${tf} — pidió ${limit}, recibió ${data.candles.length}`);
+          if (data.candles.length < CONFIG.OHLCV_STRATEGY_MIN_CANDLES) {
+            // Caso real de riesgo: por debajo de esto, bollinger_squeeze (la estrategia
+            // activa más exigente) no puede evaluar. Merece atención, no es ruido.
+            console.warn(`OHLCV ${providerName} INSUFICIENTE para estrategias: ${symbol} ${tf} — recibió ${data.candles.length}, mínimo requerido ${CONFIG.OHLCV_STRATEGY_MIN_CANDLES}`);
+          } else if (data.candles.length < limit) {
+            // Techo estructural esperado del endpoint gratuito de CoinGecko en 15m
+            // (days=1 → máx. ~96 velas de 15m); no afecta a ninguna estrategia activa.
+            console.info(`OHLCV ${providerName} ${symbol} ${tf} — recibió ${data.candles.length}/${limit} (techo del proveedor, dentro de lo requerido)`);
           }
           state.klineHistory[symbol] = data; return data;
         } catch (error) {
