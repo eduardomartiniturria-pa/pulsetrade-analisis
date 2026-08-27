@@ -69,9 +69,6 @@
   .price-move.against{background:rgba(239,68,68,0.15);color:#f87171}
   .signal-footer{display:flex;justify-content:space-between;font-size:0.7rem;color:#64748b;margin-top:10px}
   .signal-time{font-size:1.15rem}
-  .autotune-bar{margin:0 16px 12px;padding:10px 14px;border-radius:12px;background:#151d2b;border:1px solid #232f42;display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:0.72rem}
-  .autotune-label{font-weight:700;color:#38bdf8}
-  .autotune-detail{color:#94a3b8}
   .divider{height:1px;background:#1a2332;margin:8px 16px}
   .section-label-hist{font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:1px;font-weight:700;margin:20px 16px 8px}
   .history-card{background:#1a2332;border-radius:14px;padding:14px;margin:0 16px 8px;border:1px solid #2d3a4f}
@@ -395,12 +392,10 @@ function renderAllStrategyCards(symbol) {
   return `<div class="strategies-list">${activeSlots.map(s => renderStrategySlot(s.title, s.d)).join('')}</div>`;
 }
 
-function renderAutoTune(symbol) {
-  if (!lastState.autoTune || !lastState.autoTune.threshold) return '';
-  const t = lastState.autoTune.threshold[symbol];
-  if (t === undefined) return '';
-  return `<div class="autotune-bar"><span class="autotune-label">🧪 Auto-tune</span><span class="autotune-detail">Umbral de confianza actual para ${symbol}: ${fmtPct(t)}%</span></div>`;
-}
+// v4.9 (27/8): función renderAutoTune() retirada a pedido de Soy (punto 11 del
+// orden de trabajo) — solo se sacó el bloque visual de la UI. La lógica de
+// auto-tune en sí (state.autoConfidenceThreshold, persistida en engine.js/Supabase)
+// sigue funcionando igual en el backend, no se tocó nada ahí.
 
 // Un bloque completo por activo: título, precio, tarjeta de señal y auto-tune. Los 4 se
 // concatenan uno debajo del otro, así se ven todos sin tener que elegir una pestaña.
@@ -409,7 +404,6 @@ function renderAssetBlock(symbol) {
     <div class="asset-block-header"><span class="asset-block-title">${symbol}</span></div>
     ${renderPriceCard(symbol)}
     ${renderAllStrategyCards(symbol)}
-    ${renderAutoTune(symbol)}
   </div>
   <div class="divider"></div>`;
 }
