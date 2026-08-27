@@ -138,6 +138,11 @@ function getNYTimeParts(ms) {
 // Utilidades de tiempo (hora real de Londres, con DST automático)
 // ---------------------------------------------------------
 
+// v4.9 (27/8): ver justificación completa junto al uso, en evaluateAll().
+// Debe coincidir manualmente con si 'eth_vwap_scalp' está en
+// engine.js:CONFIG.ENABLED_STRATEGIES — no hay lectura cruzada entre archivos.
+const ETH_VWAP_SCALP_ENABLED = false;
+
 function getLondonTimeParts(ms) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'Europe/London', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -191,8 +196,14 @@ function isNYOpenWindow(ms) {
 // volumen acumulado del día da 0, esta función cae automáticamente a un
 // promedio simple del precio típico (equivalente a un VWAP sin ponderar)
 // en vez de dividir por cero, y lo deja registrado con console.warn para
-// poder verificarlo en los logs de producción. En ETHUSD (Binance/CoinGecko)
-// el volumen es real, así que ahí el VWAP es el ponderado verdadero.
+// poder verificarlo en los logs de producción.
+// CORRECCIÓN (27/8): el comentario original acá decía que ETHUSD sí tenía
+// volumen real "vía Binance/CoinGecko". Confirmado con engine.js que es
+// falso en producción: Binance da 451 desde Render (nunca se usa), y el
+// providerPriority de ETHUSD prioriza CoinGecko, cuyo fetchOHLCV (basado en
+// /market_chart) hardcodea volume:0 en cada vela — nunca trae volumen real.
+// Por eso ETHUSD cae al mismo fallback que EURUSD/XAUUSD. Ver ETH_VWAP_SCALP_ENABLED
+// más abajo: por este motivo la estrategia que depende de esto quedó deshabilitada.
 function calculateVWAPSeries(candles) {
   const n = candles.length;
   const vwap = new Array(n).fill(null);
@@ -1327,7 +1338,15 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
   // Las siguientes tres son específicas de UN símbolo (a diferencia de las
   // 7 de arriba, que corren en los 4 activos): requieren htfCandles (H1) y/o
   // VWAP, y quedan filtradas por `symbol` acá mismo.
-  if (symbol === 'ETHUSD') {
+  // v4.9 (27/8): eth_vwap_scalp NO está en engine.js CONFIG.ENABLED_STRATEGIES
+  // (whitelist real de 5) — su resultado siempre se descartaba después, pero
+  // calculateVWAPSeries() se seguía ejecutando en cada ciclo para ETHUSD,
+  // gastando cómputo y generando el warning "VWAP sin volumen confiable" en
+  // logs de forma constante, sin ningún efecto en señales reales. Se corta acá,
+  // en origen. IMPORTANTE: este flag debe reflejar manualmente si 'eth_vwap_scalp'
+  // está en CONFIG.ENABLED_STRATEGIES de engine.js — no se leen entre sí.
+  // Si se reincorpora eth_vwap_scalp a la whitelist, cambiar esto a true.
+  if (ETH_VWAP_SCALP_ENABLED && symbol === 'ETHUSD') {
     const ethVwap = safeRun('eth_vwap_scalp', detectEthVwapScalp, candles, htfCandles);
     if (ethVwap.bullish || ethVwap.bearish) {
       signals.push({
