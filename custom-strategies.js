@@ -1247,7 +1247,15 @@ function safeRun(strategyName, fn, ...args) {
   }
 }
 
-function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = null, newsContext = null) {
+// Sección 13 (27/8): piso mínimo de confianza, decidido por el usuario en 55% —
+// razonamiento: con 5-6 factores en computeContextualScore(), 50% (mitad de la escala)
+// deja pasar señales con apenas mayoría simple a favor; 55% exige una mayoría algo más
+// clara sin ser tan exigente como para dejar la app sin señales antes de tener datos
+// reales del filtro en producción. Se puede pasar como parámetro desde engine.js
+// (CONFIG.MIN_CONFIDENCE_SCORE) — este valor es solo el default si no se pasa nada.
+const DEFAULT_MIN_CONFIDENCE_SCORE = 55;
+
+function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = null, newsContext = null, minConfidenceScore = null) {
   const signals = [];
 
   const kz = safeRun('ny_open_kill_zone', detectNYOpenKillZone, candles);
@@ -1330,9 +1338,10 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
     }
   }
 
-  // Score contextual (informativo, no filtra nada — ver nota en computeContextualScore
-  // más arriba). Se calcula acá, en un solo lugar, para las señales que efectivamente
-  // dispararon este ciclo, en vez de repetir la llamada dentro de cada detectX().
+  // Score contextual (sección 13, 27/8: pasó de informativo a filtro real — a pedido
+  // explícito del usuario. Antes solo se mostraba, no descartaba nada). Se calcula acá,
+  // en un solo lugar, para las señales que efectivamente dispararon este ciclo, en vez
+  // de repetir la llamada dentro de cada detectX().
   signals.forEach(sig => {
     const { score, details: scoreDetails } = computeContextualScore({
       direction: sig.direction, entry: sig.entry, sl: sig.sl, tp1: sig.tp1,
@@ -1342,7 +1351,22 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
     sig.details = (sig.details || []).concat(scoreDetails);
   });
 
-  return signals;
+  // Sección 13 (27/8): piso mínimo de confianza — decidido por el usuario, no
+  // propuesto por el motor. Señal descartada acá NUNCA llega a resolveCustomSignal()
+  // en engine.js (que es quien guarda historial, dispara push y marca cooldown) —
+  // filtrar antes del return es lo que garantiza que una señal por debajo del piso
+  // no deje rastro y no bloquee el cooldown de una señal mejor en el próximo ciclo.
+  const minConfidence = (typeof minConfidenceScore === 'number') ? minConfidenceScore : DEFAULT_MIN_CONFIDENCE_SCORE;
+  const passed = [];
+  signals.forEach(sig => {
+    if (sig.confidence < minConfidence) {
+      console.log(`[CONFIANZA] ${sig.strategy} en ${symbol} descartada — confianza ${sig.confidence}% < piso ${minConfidence}%`);
+    } else {
+      passed.push(sig);
+    }
+  });
+
+  return passed;
 }
 
 module.exports = {
