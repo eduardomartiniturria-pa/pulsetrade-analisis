@@ -179,6 +179,12 @@ const CONFIG = {
     enabled: true,
     consecutiveLossThreshold: 5
   },
+  // v4.9 (sección 13, 27/8): piso mínimo de computeContextualScore() para que una señal
+  // se muestre — decidido por el usuario en 55%, no propuesto por el motor. Antes el
+  // score era puramente informativo (se mostraba pero no filtraba nada). Se pasa como
+  // 7º parámetro a CustomStrategies.evaluateAll(); ese mismo valor se usa como default
+  // interno si algún día se llama sin pasarlo.
+  MIN_CONFIDENCE_SCORE: 55,
   DISABLED_STRATEGIES_BY_SYMBOL: {
     ETHUSD: ['ema_cross_scalping', 'smc'],
     // ema_cross_scalping: 25% winrate (4 op, 1G/3P) del 12/8 al 23/8. Desactivada.
@@ -1603,7 +1609,7 @@ async function refreshAsset(symbol, forceRefresh = false) {
       // el mismo score informativo que ya existe, no agrega campos nuevos a la señal
       // ni se muestra en la UI (decisión explícita de Soy).
       const newsContext = await NewsCalendar.getNearbyHighImpact('USD', 60);
-      const rawSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles, state.strategyStatsBySymbol[symbol] || null, newsContext);
+      const rawSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles, state.strategyStatsBySymbol[symbol] || null, newsContext, CONFIG.MIN_CONFIDENCE_SCORE);
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
       const filteredSignals = rawSignals.filter(sig => {
         if (!CONFIG.ENABLED_STRATEGIES.includes(sig.strategy)) {
