@@ -505,13 +505,21 @@ const ResponseCache = {
 const NewsCalendar = {
   FEED_URL: 'https://nfs.faireconomy.media/ff_calendar_thisweek.json',
   CACHE_MS: 30 * 60 * 1000,
+  // FIX (27/8): backoff tras fallo. Antes, un 429 no actualizaba _cacheAt, así que
+  // el próximo ciclo (y el siguiente símbolo del MISMO ciclo, ver getNearbyHighImpact
+  // llamado 1x por símbolo) volvía a intentar el fetch de inmediato — eso generaba
+  // ráfagas de 4 fetches en segundos contra el feed público, perpetuando el 429.
+  // Confirmado en logs de producción del 27/8 (ráfagas de 4 fallos en <30s por ciclo).
+  BACKOFF_MS: 10 * 60 * 1000,
   _cache: null,
   _cacheAt: 0,
 
   async getEvents() {
     if (this._cache && (Date.now() - this._cacheAt) < this.CACHE_MS) return this._cache;
     try {
-      const res = await fetchWithTimeout(this.FEED_URL, CONFIG.REQUEST_TIMEOUT);
+      const res = await fetchWithTimeout(this.FEED_URL, CONFIG.REQUEST_TIMEOUT, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PulseTradePRO/1.0; +https://pulsetrade-analisis.onrender.com)' }
+      });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       if (!Array.isArray(data)) throw new Error('Respuesta inesperada del calendario económico');
@@ -522,6 +530,9 @@ const NewsCalendar = {
       console.warn('[NewsCalendar] fallo al traer calendario económico:', error.message);
       // Si falla, se sigue usando el cache viejo si existe (mejor un calendario un poco
       // desactualizado que dejar de scorear por completo), o array vacío si nunca hubo éxito.
+      // FIX: se marca _cacheAt igual en el fallo, con un backoff corto (10min) en vez de
+      // dejarlo "vencido" — esto corta el bucle de reintentos inmediatos que generaba el 429.
+      this._cacheAt = Date.now() - this.CACHE_MS + this.BACKOFF_MS;
       return this._cache || [];
     }
   },
