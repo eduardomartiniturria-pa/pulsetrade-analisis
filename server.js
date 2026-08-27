@@ -85,6 +85,9 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
       // nunca al umbral, sin esperar a que Render conserve logs viejos.
       consecutiveLosses: state.consecutiveLosses || {},
       autoDisabledStrategies: state.autoDisabledStrategies || {},
+      // v4.9 (sección 14, 27/8): estado del circuit breaker agregado por estrategia
+      consecutiveLossesAggregate: state.consecutiveLossesAggregate || {},
+      autoDisabledStrategiesAggregate: state.autoDisabledStrategiesAggregate || {},
       autoTune: {
         threshold: state.autoConfidenceThreshold,
         stats: state.autoTuneStats
