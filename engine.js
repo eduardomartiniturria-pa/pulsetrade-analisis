@@ -1771,3 +1771,930 @@ async function refreshAsset(symbol, forceRefresh = false) {
 }
 
 async function refreshAllData(for
+    const eligible = providerList.filter(providerName => {
+      const adapter = ProviderAdapters[providerName];
+      if (!adapter) return false;
+      if (!adapter.supports.includes(symbol)) return false;
+      if (adapter.requiresKey && !state.apiKeys[providerName]) return false;
+      const usage = RequestTracker.getUsage(providerName);
+      if (usage.limit && usage.used >= usage.limit) { logQuotaExcluded(providerName, symbol, usage); return false; }
+      return true;
+    });
+    if (eligible.length === 0) throw new Error(`Datos de mercado temporalmente no disponibles para ${symbol}.`);
+    const readyProviders = eligible.filter(p => !isProviderInCooldown(p));
+    const providersToTry = readyProviders.length > 0 ? readyProviders : eligible;
+    for (const providerName of providersToTry) {
+      const adapter = ProviderAdapters[providerName];
+      addLog(adapter.name, 'INTENTO', symbol);
+      try {
+        const data = await adapter.fetchQuote(symbol);
+        if (!data.isValid) throw new Error('Datos invÃ¡lidos');
+        state.providers[providerName] = 'ok';
+        state.providerStats[providerName] = { lastSuccess: Date.now(), successCount: (state.providerStats[providerName]?.successCount || 0) + 1 };
+        addLog(adapter.name, 'Ã‰XITO', symbol);
+        state.currentProvider = providerName;
+        return data;
+      } catch (error) {
+        state.providers[providerName] = 'fail';
+        state.providerStats[providerName] = {
+          lastSuccess: state.providerStats[providerName]?.lastSuccess || null,
+          lastError: Date.now(), errorCount: (state.providerStats[providerName]?.errorCount || 0) + 1, lastErrorMsg: error.message
+        };
+        markProviderCooldown(providerName, error.message);
+        addLog(adapter.name, 'FALLO: ' + error.message, symbol);
+        console.warn(`Provider ${providerName} fallÃ³ para ${symbol}:`, error.message);
+        await sleep(1500);
+      }
+    }
+    const detailMessages = providersToTry.map((name) => {
+      const stats = state.providerStats[name]; return `${name}: ${stats?.lastErrorMsg || 'fallÃ³'}`;
+    }).join('; ');
+    throw new Error(`Todos los proveedores fallaron: ${detailMessages}`);
+  },
+  async getOHLCV(symbol, tf, limit = 100, forceRefresh = false) {
+    const asset = ASSETS[symbol];
+    if (!asset) return new OHLCVData([]);
+    // FIX (Etapa 3, hallazgo cache klineHistory): antes la cachÃ© se guardaba en
+    // state.klineHistory[symbol], una sola clave por sÃ­mbolo sin distinguir timeframe.
+    // Como getOHLCV se llama tanto para el TF base (15m, ~90-100 velas) como para el
+    // HTF (1h, 60 velas) dentro del mismo ciclo de refreshAsset(), la llamada HTF
+    // pisaba lo que acababa de guardar la llamada TF. Efecto real: si en el ciclo
+    // siguiente los proveedores fallaban al pedir TF, el fallback devolvÃ­a las velas
+    // de 1h del ciclo anterior creyendo que eran de 15m (contaminando evaluateAll());
+    // y quickPriceCheck() (BTC/ETH) podÃ­a terminar escaneando SL/TP intrabar contra
+    // velas de 1h en vez de 15m, con rango de precio por vela ~4x mÃ¡s ancho. Ahora la
+    // cachÃ© queda separada por sÃ­mbolo+timeframe: state.klineHistory[symbol][tf].
+    if (!isMarketOpenForAsset(symbol)) {
+      return (state.klineHistory[symbol] && state.klineHistory[symbol][tf]) || new OHLCVData([]);
+    }
+    const providerList = asset.providerPriority || CONFIG.PROVIDER_PRIORITY;
+    const eligible = providerList.filter(providerName => {
+      const adapter = ProviderAdapters[providerName];
+      if (!adapter || !adapter.fetchOHLCV || !adapter.supports.includes(symbol)) return false;
+      if (adapter.requiresKey && !state.apiKeys[providerName]) return false;
+      const usage = RequestTracker.getUsage(providerName);
+      if (usage.limit && usage.used >= usage.limit) { logQuotaExcluded(providerName, symbol, usage); return false; }
+      return true;
+    });
+    if (eligible.length > 0) {
+      const readyProviders = eligible.filter(p => !isProviderInCooldown(p));
+      const providersToTry = readyProviders.length > 0 ? readyProviders : eligible;
+      for (const providerName of providersToTry) {
+        try {
+          const data = await ProviderAdapters[providerName].fetchOHLCV(symbol, tf, limit);
+          if (!data.isValid) throw new Error('Datos insuficientes');
+          // FIX (Etapa 3, mismo hallazgo): OHLCV_STRATEGY_MIN_CANDLES=90 es el piso
+          // pensado solo para el TF base 15m (bollinger_squeeze). Antes se comparaba
+          // sin distinguir, asÃ­ que el pedido HTF (1h, limit=60) siempre disparaba el
+          // warning de "insuficiente" aunque 60 sea lo esperado y suficiente para el
+          // filtro de tendencia HTF. Ahora el piso de 90 solo se evalÃºa cuando el
+          // pedido es igual o mayor a ese lÃ­mite (o sea, el TF base); para pedidos
+          // mÃ¡s chicos (HTF) se compara contra lo efectivamente pedido (limit).
+          const isBaseTFRequest = limit >= CONFIG.OHLCV_STRATEGY_MIN_CANDLES;
+          const effectiveMin = isBaseTFRequest ? CONFIG.OHLCV_STRATEGY_MIN_CANDLES : limit;
+          if (data.candles.length < effectiveMin) {
+            // Caso real de riesgo: por debajo de esto, la estrategia que hizo este
+            // pedido (bollinger_squeeze en TF base, o el filtro de tendencia HTF de
+            // quien pidiÃ³ HTF) no tiene suficientes velas para evaluar.
+            console.warn(`OHLCV ${providerName} INSUFICIENTE para estrategias: ${symbol} ${tf} â€” recibiÃ³ ${data.candles.length}, mÃ­nimo requerido ${effectiveMin}`);
+          } else if (data.candles.length < limit) {
+            // Techo estructural esperado del endpoint gratuito de CoinGecko en 15m
+            // (days=1 â†’ mÃ¡x. ~96 velas de 15m); no afecta a ninguna estrategia activa.
+            console.info(`OHLCV ${providerName} ${symbol} ${tf} â€” recibiÃ³ ${data.candles.length}/${limit} (techo del proveedor, dentro de lo requerido)`);
+          }
+          if (!state.klineHistory[symbol]) state.klineHistory[symbol] = {};
+          state.klineHistory[symbol][tf] = data;
+          return data;
+        } catch (error) {
+          markProviderCooldown(providerName, error.message);
+          console.warn(`OHLCV ${providerName} fallÃ³:`, error.message);
+          await sleep(1500);
+        }
+      }
+      if (state.klineHistory[symbol] && state.klineHistory[symbol][tf] && state.klineHistory[symbol][tf].candles.length > 0) {
+        return state.klineHistory[symbol][tf];
+      }
+      throw new Error(`No se pudieron obtener velas histÃ³ricas`);
+    }
+    if (state.klineHistory[symbol] && state.klineHistory[symbol][tf] && state.klineHistory[symbol][tf].candles.length > 0) {
+      return state.klineHistory[symbol][tf];
+    }
+    throw new Error('No hay datos histÃ³ricos disponibles');
+  },
+  setApiKey(provider, key) {
+    state.apiKeys[provider] = key;
+    if (state.persistKeys) {
+      const storageKey = { twelveData: 'pt_api_twelve', finnhub: 'pt_api_finnhub', alphaVantage: 'pt_api_alpha', fmp: 'pt_api_fmp' }[provider];
+      if (storageKey) localStorage.setItem(storageKey, key);
+    }
+  }
+};
+
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+const BacktestEngine = {
+  async fetchCandles(symbol, interval) {
+    return this.fetchCandlesTwelveData(symbol, interval);
+  },
+  async fetchCandlesTwelveData(symbol, interval) {
+    if (!state.apiKeys.twelveData) return null;
+    const asset = ASSETS[symbol];
+    const tfMap = { '15m': '15min', '1h': '1h' };
+    const headers = { 'Authorization': `apikey ${state.apiKeys.twelveData}` };
+    const url = `${CONFIG.ENDPOINTS.TWELVEDATA}/time_series?symbol=${asset.symbols.twelveData}&interval=${tfMap[interval] || '15min'}&outputsize=${CONFIG.BACKTEST.TWELVEDATA_CANDLE_LIMIT}&timezone=UTC`;
+    const res = await fetchWithTimeout(url, 10000, { headers }, 'twelveData');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (data.status === 'error' || !data.values) throw new Error(data.message || 'Sin datos histÃ³ricos');
+    return data.values.slice().reverse().map(v => ({
+      time: new Date(v.datetime).getTime(), open: parseFloat(v.open), high: parseFloat(v.high),
+      low: parseFloat(v.low), close: parseFloat(v.close), volume: v.volume ? parseFloat(v.volume) : 0
+    }));
+  },
+  async simulateCustom(candles, symbol, asset) {
+    const cfg = CONFIG.BACKTEST;
+    const events = [];
+    const lastSignalIndexByStrategy = {};
+    for (let i = cfg.MIN_LOOKBACK; i < candles.length - 1; i++) {
+      if (i % cfg.YIELD_EVERY === 0) await sleep(0);
+      const windowStart = Math.max(0, i - cfg.WINDOW_SIZE + 1);
+      const window = candles.slice(windowStart, i + 1);
+      let signals;
+      try { signals = CustomStrategies.evaluateAll(window, symbol, asset, null); }
+      catch (e) { continue; }
+      
+      const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
+      const filteredSignals = signals.filter(sig => {
+        if (!CONFIG.ENABLED_STRATEGIES.includes(sig.strategy)) return false;
+        if (disabledForSymbol.includes(sig.strategy)) return false;
+        return true;
+      });
+
+      for (const sig of filteredSignals) {
+        const lastIdx = lastSignalIndexByStrategy[sig.strategy] ?? -9999;
+        if (i - lastIdx < cfg.COOLDOWN_CANDLES) continue;
+        const entry = sig.entry, sl = sig.sl, tp1 = sig.tp1;
+        const tp2 = (sig.tp2 !== undefined && sig.tp2 !== null) ? sig.tp2 : null;
+        if (entry == null || sl == null || tp1 == null) continue;
+        const isLong = sig.direction === 'long';
+        let result = null;
+        let finalTarget = tp1; // el nivel que efectivamente cierra la operaciÃ³n
+        let tp1AlreadyHit = false;
+        const horizon = Math.min(candles.length, i + 1 + cfg.MAX_HOLD_CANDLES);
+        // v4.7 (Etapa 3 â€” consistencia con evaluateCustomSignalOutcome/checkHistoryOutcomes):
+        // antes el backtest cerraba en 'win' apenas tocaba TP1, ignorando tp2 aunque la
+        // estrategia lo definiera (ny_open_kill_zone, bollinger_squeeze) â€” sembraba stats
+        // de arranque mÃ¡s optimistas de la cuenta pero con el R equivocado (el de TP1, no
+        // el de TP2). Ahora, si hay tp2, sigue escaneando despuÃ©s de tocar TP1 esperando
+        // TP2 o SL, igual que en producciÃ³n. Si se acaba el horizonte de MAX_HOLD_CANDLES
+        // con TP1 ya tocado (sin SL ni TP2), se cuenta como ganada al R de TP1 â€” el mismo
+        // criterio que la expiraciÃ³n en checkHistoryOutcomes.
+        for (let j = i + 1; j < horizon; j++) {
+          const c = candles[j];
+          const hitSL = isLong ? c.low <= sl : c.high >= sl;
+          const hitTP1 = isLong ? c.high >= tp1 : c.low <= tp1;
+          const hitTP2 = tp2 != null && (isLong ? c.high >= tp2 : c.low <= tp2);
+          if (hitSL) { result = 'loss'; break; }
+          if (tp2 != null) {
+            if (hitTP2) { result = 'win'; finalTarget = tp2; break; }
+            if (hitTP1) tp1AlreadyHit = true;
+          } else if (hitTP1) {
+            result = 'win'; finalTarget = tp1; break;
+          }
+        }
+        if (!result && tp2 != null && tp1AlreadyHit) {
+          result = 'win'; finalTarget = tp1; // se acabÃ³ el horizonte con TP1 ya tocado
+        }
+        if (result) {
+          const risk = Math.abs(entry - sl);
+          const reward = Math.abs(finalTarget - entry);
+          const rMultiple = result === 'win' ? (risk > 0 ? +(reward / risk).toFixed(2) : 2) : -1;
+          events.push({ index: i, strategy: sig.strategy, direction: sig.direction, result, rMultiple });
+          lastSignalIndexByStrategy[sig.strategy] = i;
+        }
+      }
+    }
+    return events;
+  },
+  aggregateCustomStats(events) {
+    const stats = {};
+    events.forEach(e => {
+      if (!stats[e.strategy]) stats[e.strategy] = { wins: 0, losses: 0, totalR: 0 };
+      if (e.result === 'win') stats[e.strategy].wins++; else stats[e.strategy].losses++;
+      stats[e.strategy].totalR += (e.rMultiple != null ? e.rMultiple : (e.result === 'win' ? 2 : -1));
+    });
+    Object.keys(stats).forEach(key => {
+      const s = stats[key];
+      const total = s.wins + s.losses;
+      s.sampleSize = total;
+      s.winRate = total ? +(s.wins / total).toFixed(2) : 0;
+      s.totalR = +s.totalR.toFixed(2);
+      s.avgR = total ? +(s.totalR / total).toFixed(2) : 0; // v4.6.1: R-multiple promedio
+    });
+    return stats;
+  },
+  async runSymbol(symbol) {
+    const asset = ASSETS[symbol];
+    let allCustomEvents = [];
+    let candlesAnalyzed = 0;
+    for (const tf of CONFIG.BACKTEST.TIMEFRAMES) {
+      const twelveDataUsage = RequestTracker.getUsage('twelveData');
+      if (twelveDataUsage.limit && twelveDataUsage.used >= twelveDataUsage.limit) {
+        console.warn(`Backtest: cupo diario de twelveData agotado (${twelveDataUsage.used}/${twelveDataUsage.limit}), se corta ${symbol} en ${tf}`);
+        break;
+      }
+      if (isProviderInCooldown('twelveData')) {
+        console.warn(`Backtest: twelveData en cooldown, se corta ${symbol} en ${tf}`);
+        break;
+      }
+      try {
+        const candles = await this.fetchCandles(symbol, tf);
+        if (!candles || !candles.length) continue;
+        candlesAnalyzed += candles.length;
+        const customEvents = await this.simulateCustom(candles, symbol, asset);
+        allCustomEvents = allCustomEvents.concat(customEvents);
+      } catch (e) {
+        console.warn(`Backtest: no se pudo traer historial de ${symbol} en ${tf}:`, e.message);
+        markProviderCooldown('twelveData', e.message);
+      }
+      await sleep(6000);
+    }
+    if (!allCustomEvents.length) return null;
+    const customStats = this.aggregateCustomStats(allCustomEvents);
+    return { symbol, candlesAnalyzed, customStats };
+  },
+  async runAll(force = false) {
+    if (state.backtestRunning) return;
+    const cfg = CONFIG.BACKTEST;
+    const lastRun = parseInt(localStorage.getItem('pt_backtest_last_run') || '0', 10);
+    const lastAttempt = parseInt(localStorage.getItem('pt_backtest_last_attempt') || '0', 10);
+    if (!force && Date.now() - lastRun < cfg.RERUN_INTERVAL_MS) { renderBacktestStatus(); return; }
+    if (!force && Date.now() - lastAttempt < cfg.RETRY_INTERVAL_MS) { renderBacktestStatus(); return; }
+    state.backtestRunning = true;
+    localStorage.setItem('pt_backtest_last_attempt', String(Date.now()));
+    renderBacktestStatus();
+    const results = {};
+    try {
+      for (const symbol of cfg.SYMBOLS) {
+        const r = await this.runSymbol(symbol);
+        if (r) results[symbol] = r;
+        if (isProviderInCooldown('twelveData')) {
+          console.warn('Backtest: twelveData en cooldown, se corta la corrida completa');
+          break;
+        }
+        await sleep(6000);
+      }
+      if (Object.keys(results).length) {
+        seedStrategyStatsFromBacktest(results);
+        const combinedCustomStats = {};
+        Object.values(results).forEach(r => {
+          Object.entries(r.customStats || {}).forEach(([key, s]) => {
+            if (!combinedCustomStats[key]) combinedCustomStats[key] = { wins: 0, losses: 0 };
+            combinedCustomStats[key].wins += s.wins; combinedCustomStats[key].losses += s.losses;
+          });
+        });
+        Object.keys(combinedCustomStats).forEach(key => {
+          const s = combinedCustomStats[key];
+          const total = s.wins + s.losses;
+          s.sampleSize = total;
+          s.winRate = total ? s.wins / total : 0;
+        });
+        state.backtestCustomStats = combinedCustomStats;
+        localStorage.setItem('pt_backtest_custom_stats', JSON.stringify(combinedCustomStats));
+        localStorage.setItem('pt_backtest_last_run', String(Date.now()));
+        state.backtestResults = results;
+      }
+    } catch (e) {
+      console.warn('Backtest: error general', e);
+    } finally {
+      state.backtestRunning = false;
+      renderBacktestStatus();
+      Object.keys(ASSETS).forEach(sym => renderAutoTuneStatus(sym));
+      renderAutoTuneStatus();
+    }
+  }
+};
+
+function renderBacktestStatus() {}
+function fmt(value, decimals) {
+  if (value === null || value === undefined || isNaN(value)) return '--';
+  return Number(value).toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+function toPips(priceA, priceB, asset) {
+  if (priceA === null || priceA === undefined || priceB === null || priceB === undefined) return null;
+  const pipSize = asset && asset.pipSize ? asset.pipSize : 1;
+  return Math.abs(priceA - priceB) / pipSize;
+}
+function fmtPips(pips) {
+  if (pips === null || pips === undefined || isNaN(pips)) return '--';
+  return pips.toFixed(1) + ' pips';
+}
+function pctDiff(a, b) {
+  if (a === null || a === undefined || !b) return 0;
+  return ((a - b) / b) * 100;
+}
+
+function updatePriceUI(symbol, quote, asset) {
+  state.livePrices = state.livePrices || {};
+  state.livePrices[symbol] = {
+    name: asset.name, decimals: asset.decimals, last: quote.last, change: pctDiff(quote.last, quote.open),
+    bid: quote.bid || null, ask: quote.ask || null, spread: quote.spread !== undefined ? quote.spread : null,
+    estimatedSpread: !!quote.estimatedSpread, timestamp: quote.timestamp, source: quote.source
+  };
+}
+
+function renderTradingHoursBar() {}
+function assetFeedSkeleton() { return ''; }
+function renderAssetsFeedSkeleton() {}
+function renderAssetHoursPill() {}
+function renderMarketBanner() {}
+function renderApiError(symbol, message) { if (message) console.warn(`[${symbol}] ${message}`); }
+function setLoading() {}
+function renderSignal(symbol, signalDisplay) { state.lastDisplay = state.lastDisplay || {}; state.lastDisplay[symbol] = signalDisplay; }
+
+function renderCustomSignal(symbol, strategyKey, display) {
+  state.lastCustomDisplay = state.lastCustomDisplay || {};
+  state.lastCustomDisplay[symbol] = state.lastCustomDisplay[symbol] || {};
+  state.lastCustomDisplay[symbol][strategyKey] = display || { type: 'no-signal' };
+}
+function renderConfidence() {}
+
+function pushSignalHistory(signal) {
+  if (signal.type !== 'long' && signal.type !== 'short') return;
+  const entry = {
+    id: Date.now(), symbol: signal.symbol, name: signal.asset.name, type: signal.type,
+    entry: signal.entry, sl: signal.sl, tp1: signal.tp1, tp2: signal.tp2,
+    slPips: signal.slPips, tp1Pips: signal.tp1Pips, tp2Pips: signal.tp2Pips,
+    decimals: signal.decimals, confidence: signal.confidence, result: 'pending', timestamp: signal.timestamp,
+    strategyKeys: signal.strategyKeys || [], rMultiple: null, regime: signal.regime || 'unknown',
+    source: signal.source || 'smc'
+  };
+  state.signalHistory.unshift(entry);
+  if (state.signalHistory.length > CONFIG.HISTORY_LIMIT) state.signalHistory.pop();
+  localStorage.setItem('pt_v4_signals', JSON.stringify(state.signalHistory));
+}
+
+function updatePatternStats(entry) {
+  if (!entry.strategyKeys || !entry.strategyKeys.length) return;
+  entry.strategyKeys.forEach(key => {
+    if (!state.patternStats[key]) state.patternStats[key] = { wins: 0, losses: 0 };
+    if (entry.result === 'win') state.patternStats[key].wins++;
+    else if (entry.result === 'loss') state.patternStats[key].losses++;
+  });
+  localStorage.setItem('pt_pattern_stats', JSON.stringify(state.patternStats));
+}
+
+function updateStrategyStatsBySymbol(entry) {
+  if (entry.result !== 'win' && entry.result !== 'loss') return;
+  const symbol = entry.symbol, key = entry.source || 'smc';
+  if (!symbol || !key) return;
+  state.strategyStatsBySymbol[symbol] = state.strategyStatsBySymbol[symbol] || {};
+  if (!state.strategyStatsBySymbol[symbol][key]) {
+    state.strategyStatsBySymbol[symbol][key] = { wins: 0, losses: 0, totalR: 0, avgR: 0 };
+  }
+  const stats = state.strategyStatsBySymbol[symbol][key];
+  if (entry.result === 'win') stats.wins++;
+  else stats.losses++;
+  const r = entry.rMultiple != null ? entry.rMultiple : (entry.result === 'win' ? 2 : -1);
+  stats.totalR = +((stats.totalR || 0) + r).toFixed(2);
+  
+  const totalOps = stats.wins + stats.losses;
+  stats.avgR = totalOps > 0 ? +(stats.totalR / totalOps).toFixed(2) : 0; // v4.6.1: Recalcular R promedio
+  
+  localStorage.setItem('pt_strategy_stats_by_symbol', JSON.stringify(state.strategyStatsBySymbol));
+
+  checkCircuitBreaker(symbol, key, entry.result);
+  checkCircuitBreakerAggregate(key, entry.result);
+}
+
+// v4.9 (secciÃ³n 14, 27/8): breaker agregado â€” pÃ©rdidas seguidas de una estrategia sin
+// importar el sÃ­mbolo. Umbral 8 (no 5, el mismo que el breaker por sÃ­mbolo): con 4 activos
+// en juego, una racha diluida entre todos tarda mÃ¡s en acumularse que una concentrada en
+// uno solo, asÃ­ que el umbral agregado tiene que ser mÃ¡s alto para no dispararse por
+// varianza normal entre sÃ­mbolos independientes â€” 8 es el doble del umbral por sÃ­mbolo,
+// coherente con "la mitad de las combinaciones fallando seguido" como piso razonable de
+// alarma real. Apaga la estrategia en los 4 sÃ­mbolos a la vez (agrega la key a
+// DISABLED_STRATEGIES_BY_SYMBOL de cada uno de SYMBOLS), separado del registro del breaker
+// por sÃ­mbolo para poder diferenciar en el push y en autoDisabledStrategiesAggregate cuÃ¡l
+// disparÃ³.
+function checkCircuitBreakerAggregate(key, result) {
+  if (!CONFIG.CIRCUIT_BREAKER || !CONFIG.CIRCUIT_BREAKER.enabled) return;
+  if (result === 'win') {
+    if (state.consecutiveLossesAggregate[key]) { state.consecutiveLossesAggregate[key] = 0; }
+    return;
+  }
+  if (result !== 'loss') return;
+
+  state.consecutiveLossesAggregate[key] = (state.consecutiveLossesAggregate[key] || 0) + 1;
+  localStorage.setItem('pt_consecutive_losses_aggregate', JSON.stringify(state.consecutiveLossesAggregate));
+
+  const threshold = CONFIG.CIRCUIT_BREAKER.consecutiveLossThresholdAggregate || (CONFIG.CIRCUIT_BREAKER.consecutiveLossThreshold * 2);
+  if (state.consecutiveLossesAggregate[key] < threshold) return;
+  if (state.autoDisabledStrategiesAggregate[key]) return; // ya estaba apagada, no repetir aviso
+
+  Object.keys(ASSETS || {}).forEach(symbol => {
+    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol]) CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] = [];
+    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
+      CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].push(key);
+    }
+  });
+  state.autoDisabledStrategiesAggregate[key] = { key, disabledAt: Date.now(), lossStreak: state.consecutiveLossesAggregate[key] };
+  localStorage.setItem('pt_auto_disabled_strategies_aggregate', JSON.stringify(state.autoDisabledStrategiesAggregate));
+
+  const title = 'ðŸ›‘ Circuit breaker AGREGADO: estrategia pausada en todos los activos';
+  const body = `${key} se auto-desactivÃ³ en los 4 activos tras ${state.consecutiveLossesAggregate[key]} pÃ©rdidas seguidas repartidas entre sÃ­mbolos. Revisala cuando puedas.`;
+  console.log(`[CIRCUIT BREAKER AGREGADO] ${key} auto-desactivada en todos los sÃ­mbolos tras ${state.consecutiveLossesAggregate[key]} pÃ©rdidas consecutivas`);
+  sendPushToAll({ title, body, signal: { strategy: key, autoDisabled: true, aggregate: true } }).catch(err => console.error('Error enviando push de circuit breaker agregado:', err.message));
+}
+
+// v4.7: si una combinaciÃ³n symbol+strategy encadena CIRCUIT_BREAKER.consecutiveLossThreshold
+// pÃ©rdidas seguidas, se apaga sola (sin esperar a que Soy sume tablas a mano) y avisa por push.
+// Una ganada en el medio resetea el contador a 0 â€” es "pÃ©rdidas SEGUIDAS", no acumuladas.
+function checkCircuitBreaker(symbol, key, result) {
+  if (!CONFIG.CIRCUIT_BREAKER || !CONFIG.CIRCUIT_BREAKER.enabled) return;
+  const ckey = `${symbol}_${key}`;
+  if (result === 'win') {
+    if (state.consecutiveLosses[ckey]) { state.consecutiveLosses[ckey] = 0; }
+    return;
+  }
+  if (result !== 'loss') return;
+
+  state.consecutiveLosses[ckey] = (state.consecutiveLosses[ckey] || 0) + 1;
+  localStorage.setItem('pt_consecutive_losses', JSON.stringify(state.consecutiveLosses));
+
+  const threshold = CONFIG.CIRCUIT_BREAKER.consecutiveLossThreshold;
+  if (state.consecutiveLosses[ckey] < threshold) return;
+  if (state.autoDisabledStrategies[ckey]) return; // ya estaba apagada, no repetir aviso
+
+  // Apaga la combinaciÃ³n agregÃ¡ndola a DISABLED_STRATEGIES_BY_SYMBOL en memoria (efecto
+  // inmediato en el prÃ³ximo ciclo, mismo chequeo que ya usa la lista manual) y la registra
+  // en autoDisabledStrategies para diferenciarla de las apagadas a mano y poder listarlas.
+  if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol]) CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] = [];
+  if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
+    CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].push(key);
+  }
+  state.autoDisabledStrategies[ckey] = { symbol, key, disabledAt: Date.now(), lossStreak: state.consecutiveLosses[ckey] };
+  localStorage.setItem('pt_auto_disabled_strategies', JSON.stringify(state.autoDisabledStrategies));
+
+  const title = 'ðŸ›‘ Circuit breaker: estrategia pausada';
+  const body = `${key} en ${symbol} se auto-desactivÃ³ tras ${state.consecutiveLosses[ckey]} pÃ©rdidas seguidas. Revisala cuando puedas.`;
+  console.log(`[CIRCUIT BREAKER] ${ckey} auto-desactivada tras ${state.consecutiveLosses[ckey]} pÃ©rdidas consecutivas`);
+  sendPushToAll({ title, body, symbol, signal: { strategy: key, autoDisabled: true } }).catch(err => console.error('Error enviando push de circuit breaker:', err.message));
+}
+
+function seedStrategyStatsFromBacktest(resultsBySymbol) {
+  Object.entries(resultsBySymbol).forEach(([symbol, r]) => {
+    state.strategyStatsBySymbol[symbol] = state.strategyStatsBySymbol[symbol] || {};
+    Object.entries(r.customStats || {}).forEach(([key, s]) => {
+      if (!state.strategyStatsBySymbol[symbol][key]) {
+        const totalR = s.totalR != null ? s.totalR : (s.wins * 2 - s.losses);
+        const totalOps = s.wins + s.losses;
+        state.strategyStatsBySymbol[symbol][key] = { 
+          wins: s.wins, 
+          losses: s.losses, 
+          totalR, 
+          avgR: totalOps > 0 ? +(totalR / totalOps).toFixed(2) : 0, // v4.6.1
+          seeded: true 
+        };
+      }
+    });
+  });
+  localStorage.setItem('pt_strategy_stats_by_symbol', JSON.stringify(state.strategyStatsBySymbol));
+}
+
+function checkHistoryOutcomes(symbol, currentPrice, candles) {
+  let changed = false;
+  const resolvedEntries = [];
+  state.signalHistory.forEach(h => {
+    if (h.symbol !== symbol || h.result !== 'pending') return;
+    const isLong = h.type === 'long';
+    const hasTp2 = h.tp2 != null;
+    const rTP1 = (h.tp1Pips && h.slPips) ? +(h.tp1Pips / h.slPips).toFixed(2) : 2;
+    const rTP2 = (hasTp2 && h.tp2Pips && h.slPips) ? +(h.tp2Pips / h.slPips).toFixed(2) : null;
+    let outcome = null;
+    let rHit = rTP1;
+    let tp1AlreadyHit = false;
+    const relevantCandles = (candles || []).filter(c => c.time >= h.timestamp);
+    // v4.7 (Etapa 3 â€” auditorÃ­a de cierre de operaciones): antes esta funciÃ³n
+    // cerraba en 'win' apenas la vela tocaba TP1, sin mirar h.tp2 para nada â€”
+    // h.tp2/h.tp2Pips se guardaban en el historial pero no se usaban acÃ¡. Para
+    // estrategias con TP2 real (ny_open_kill_zone, bollinger_squeeze) ahora se
+    // sigue escaneando vela por vela despuÃ©s de tocar TP1: si el precio llega a
+    // TP2 antes que al SL, gana con el R de TP2 (no el de TP1). Si el SL llega
+    // primero (haya pasado o no por TP1 antes), se registra pÃ©rdida -1R â€” el
+    // motor no simula mover el stop a breakeven tras TP1, asÃ­ que no se inventa
+    // ese comportamiento acÃ¡. TP1 solo queda registrado como marca informativa
+    // (tp1AlreadyHit) para el caso de expiraciÃ³n con TP1 ya tocado (ver abajo).
+    if (relevantCandles.length) {
+      for (const c of relevantCandles) {
+        const hitSL = isLong ? c.low <= h.sl : c.high >= h.sl;
+        const hitTP1 = isLong ? c.high >= h.tp1 : c.low <= h.tp1;
+        const hitTP2 = hasTp2 && (isLong ? c.high >= h.tp2 : c.low <= h.tp2);
+        if (hitSL) { outcome = 'loss'; rHit = -1; break; }
+        if (hasTp2) {
+          if (hitTP2) { outcome = 'win'; rHit = rTP2; break; }
+          if (hitTP1) tp1AlreadyHit = true; // sigue pendiente, esperando TP2 o SL
+        } else if (hitTP1) {
+          outcome = 'win'; rHit = rTP1; break;
+        }
+      }
+    }
+    if (!outcome) {
+      if (isLong && currentPrice <= h.sl) { outcome = 'loss'; rHit = -1; }
+      else if (!isLong && currentPrice >= h.sl) { outcome = 'loss'; rHit = -1; }
+      else if (hasTp2) {
+        if (isLong && currentPrice >= h.tp2) { outcome = 'win'; rHit = rTP2; }
+        else if (!isLong && currentPrice <= h.tp2) { outcome = 'win'; rHit = rTP2; }
+        else if (isLong && currentPrice >= h.tp1) { tp1AlreadyHit = true; }
+        else if (!isLong && currentPrice <= h.tp1) { tp1AlreadyHit = true; }
+      } else {
+        if (isLong && currentPrice >= h.tp1) { outcome = 'win'; rHit = rTP1; }
+        else if (!isLong && currentPrice <= h.tp1) { outcome = 'win'; rHit = rTP1; }
+      }
+    }
+    const expirationMs = (CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY && CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY[h.source]) || CONFIG.SIGNAL_EXPIRATION_MS;
+    if (!outcome && (Date.now() - h.timestamp) > expirationMs) {
+      // Si expirÃ³ habiendo tocado TP1 en el camino (pero nunca SL ni TP2), se
+      // registra como ganada al R real de TP1 en vez de 'expired'/0R â€” el precio
+      // sÃ­ llegÃ³ a un objetivo real antes de que se acabara el tiempo.
+      if (hasTp2 && tp1AlreadyHit) { outcome = 'win'; rHit = rTP1; }
+      else { outcome = 'expired'; rHit = 0; }
+    }
+    if (outcome) {
+      // NUEVO (Etapa 3 real, Punto 6 â€” spread/comisiÃ³n): rHit hasta acÃ¡ es el R "en
+      // limpio" (solo distancia de precio). Se descuenta el costo estimado de spread
+      // en unidades R (spreadPips / h.slPips = cuÃ¡nto vale el spread relativo al
+      // riesgo de ESA operaciÃ³n puntual â€” no es el mismo % en todas, depende de quÃ©
+      // tan ajustado estaba el SL). Se guarda tambiÃ©n el bruto (grossRMultiple) sin
+      // tocar, por si en algÃºn momento se quiere comparar "en limpio" vs. real.
+      const spreadPips = CONFIG.ESTIMATED_SPREAD_PIPS_BY_SYMBOL[symbol] || 0;
+      const spreadCostR = h.slPips ? spreadPips / h.slPips : 0;
+      h.result = outcome; h.grossRMultiple = rHit; h.rMultiple = +(rHit - spreadCostR).toFixed(2); changed = true; resolvedEntries.push(h);
+    }
+  });
+  if (changed) {
+    localStorage.setItem('pt_v4_signals', JSON.stringify(state.signalHistory));
+    resolvedEntries.forEach(entry => { updatePatternStats(entry); updateStrategyStatsBySymbol(entry); appendClosedSignal(entry); });
+    runAutoTune(symbol);
+  }
+}
+
+function runAutoTuneForKey(key, closedEntries) {
+  const cfg = CONFIG.AUTO_TUNE;
+  if (!state.autoTuneStats[key]) state.autoTuneStats[key] = { sampleSize: 0, lastWinRate: null, lastExpectancy: null };
+  const stats = state.autoTuneStats[key];
+  stats.sampleSize = closedEntries.length;
+  if (closedEntries.length < cfg.minSampleSize) return;
+  const recent = closedEntries.slice(0, cfg.windowSize);
+  const wins = recent.filter(h => h.result === 'win').length;
+  const winRate = wins / recent.length;
+  const rawExpectancy = recent.reduce((sum, h) => sum + (h.rMultiple != null ? h.rMultiple : (h.result === 'win' ? 2 : -1)), 0) / recent.length;
+  const shrinkageK = 15;
+  const confidenceWeight = recent.length / (recent.length + shrinkageK);
+  const expectancy = confidenceWeight * rawExpectancy;
+  stats.lastWinRate = winRate; stats.lastExpectancy = expectancy; stats.rawExpectancy = +rawExpectancy.toFixed(2); stats.confidenceWeight = +confidenceWeight.toFixed(2);
+  const currentThreshold = state.autoConfidenceThreshold[key] || CONFIG.CONFIDENCE_THRESHOLD;
+  let newThreshold = currentThreshold;
+  if (expectancy < cfg.targetExpectancyLow) newThreshold = Math.min(cfg.maxThreshold, currentThreshold + cfg.step);
+  else if (expectancy > cfg.targetExpectancyHigh) newThreshold = Math.max(cfg.minThreshold, currentThreshold - cfg.step);
+  if (newThreshold !== currentThreshold) state.autoConfidenceThreshold[key] = newThreshold;
+}
+
+function runAutoTune(symbol) {
+  const closedSymbol = state.signalHistory.filter(h => h.symbol === symbol && (h.result === 'win' || h.result === 'loss'));
+  runAutoTuneForKey(symbol, closedSymbol);
+  ['trending', 'ranging'].forEach(regime => {
+    const closedRegime = closedSymbol.filter(h => h.regime === regime);
+    if (closedRegime.length) runAutoTuneForKey(symbol + '_' + regime, closedRegime);
+  });
+  saveAutoTuneState();
+  renderAutoTuneStatus(symbol);
+}
+function renderAutoTuneStatus() {}
+
+function localDayKey(timestamp) {
+  const d = new Date(timestamp);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function appendClosedSignal(entry) {
+  if (entry.result !== 'win' && entry.result !== 'loss') return;
+  const dayKey = localDayKey(entry.timestamp);
+  const storageKey = `closed_signals:${dayKey}`;
+  let dayList;
+  try { dayList = JSON.parse(localStorage.getItem(storageKey) || '[]'); } catch (e) { dayList = []; }
+  dayList.push({
+    symbol: entry.symbol, type: entry.type, source: entry.source || 'smc',
+    result: entry.result, rMultiple: entry.rMultiple, timestamp: entry.timestamp
+  });
+  localStorage.setItem(storageKey, JSON.stringify(dayList));
+  let daysIndex;
+  try { daysIndex = JSON.parse(localStorage.getItem('closed_signals_days') || '[]'); } catch (e) { daysIndex = []; }
+  if (!daysIndex.includes(dayKey)) {
+    daysIndex.push(dayKey);
+    daysIndex.sort();
+    localStorage.setItem('closed_signals_days', JSON.stringify(daysIndex));
+  }
+}
+
+function historyCardHtml() { return ''; }
+function renderHistory() {}
+function clearHistory() { state.history = []; try { localStorage.setItem('pt_v4_signals', '[]'); } catch (e) {} }
+function renderSettings() {}
+function togglePersistKeys() {}
+function updateApiKey(provider, value) { state.apiKeys[provider] = value; }
+function renderLogs() {}
+function toggleSection() {}
+function toggleView() {}
+function requestNotification() {}
+function playAlertBeep() {}
+function showSignalAlertBanner() {}
+
+function notifyNewSignal(signal) {
+  const asset = ASSETS[signal.symbol];
+  const title = `${signal.type === 'long' ? 'ðŸŸ¢ LONG' : 'ðŸ”´ SHORT'} ${asset ? asset.name : signal.symbol}${signal.source && signal.source !== 'smc' ? ' Â· ' + signal.strategyLabels[0] : ''}`;
+  const confPart = (signal.confidence !== null && signal.confidence !== undefined) ? `Â· Confianza ${signal.confidence}%` : '';
+  const body = `Entrada ${fmt(signal.entry, signal.decimals)} Â· SL ${fmt(signal.sl, signal.decimals)} Â· TP1 ${fmt(signal.tp1, signal.decimals)}${confPart}`;
+  sendPushToAll({ title, body, symbol: signal.symbol, signal }).catch(err => console.error('Error enviando push:', err.message));
+}
+
+function toggleSound() {}
+function toggleStrictMode() { state.strictMode = !state.strictMode; }
+
+function resolveCustomSignal(symbol, quote, customSig, asset) {
+  const key = `${symbol}_${customSig.strategy}`;
+  const existing = state.activeCustomSignals[key];
+  const isNewDirection = !existing || existing.type !== customSig.direction;
+  const lastAt = state.lastCustomSignalAt[key] || 0;
+  const cooldownRemainingMs = CONFIG.SIGNAL_COOLDOWN_MS - (Date.now() - lastAt);
+  const inCooldown = isNewDirection && cooldownRemainingMs > 0;
+  
+  if (isNewDirection && !inCooldown) {
+    let entry = customSig.entry || quote.last;
+    let sl = customSig.sl;
+    let tp1 = customSig.tp1;
+    let tp2 = (customSig.tp2 !== undefined && customSig.tp2 !== null) ? customSig.tp2 : null;
+
+    // --- NUEVO v4.6.2: Ajuste de holgura para XAUUSD (Oro) ---
+    // El oro sufre muchas mechas que barren stops fijos. Ampliamos el SL un 50% 
+    // y recalculamos los TPs para mantener el mismo ratio Riesgo:Beneficio (RR) original.
+    if (symbol === 'XAUUSD' && sl !== null && tp1 !== null) {
+      const risk = Math.abs(entry - sl);
+      const reward1 = Math.abs(tp1 - entry);
+      const originalRR1 = risk > 0 ? (reward1 / risk) : 2; 
+      
+      const slBufferFactor = 1.5; // 50% mÃ¡s de holgura para el SL
+      const newRisk = risk * slBufferFactor;
+      
+      const isLong = customSig.direction === 'long';
+      if (isLong) {
+        sl = entry - newRisk;
+        tp1 = entry + (newRisk * originalRR1);
+        if (tp2 !== null) {
+          const originalRR2 = Math.abs(tp2 - entry) / risk;
+          tp2 = entry + (newRisk * originalRR2);
+        }
+      } else {
+        sl = entry + newRisk;
+        tp1 = entry - (newRisk * originalRR1);
+        if (tp2 !== null) {
+          const originalRR2 = Math.abs(tp2 - entry) / risk;
+          tp2 = entry - (newRisk * originalRR2);
+        }
+      }
+    }
+
+    const slPips = toPips(sl, entry, asset);
+    const tp1Pips = toPips(tp1, entry, asset);
+    const tp2Pips = toPips(tp2, entry, asset);
+    
+    const currentRisk = Math.abs(entry - sl);
+    const formatRR = tp => {
+      if (tp === null || !currentRisk) return null;
+      const reward = Math.abs(tp - entry);
+      const ratio = reward / currentRisk;
+      return `1:${ratio % 1 === 0 ? ratio.toFixed(0) : ratio.toFixed(1)}`;
+    };
+    
+    const frozen = {
+      type: customSig.direction, symbol, asset, entry, sl, tp1, tp2, slPips, tp1Pips, tp2Pips,
+      // v4.7.3: antes hardcodeado en null â€” las seÃ±ales de las 8 estrategias nunca
+      // traÃ­an confidence. Ahora viene calculado por computeContextualScore() dentro
+      // de evaluateAll() (custom-strategies.js). Puramente informativo, ver nota ahÃ­.
+      rr1: formatRR(tp1), rr2: formatRR(tp2), confidence: (customSig.confidence != null ? customSig.confidence : null),
+      strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
+      details: customSig.details, source: customSig.strategy, regime: 'n/a',
+      timestamp: Date.now(), decimals: asset.decimals, detectedAt: Date.now(),
+      tp1HitAt: null
+    };
+    state.activeCustomSignals[key] = frozen;
+    state.lastCustomSignalAt[key] = frozen.detectedAt;
+    try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
+    try { localStorage.setItem('pt_last_custom_signal_at', JSON.stringify(state.lastCustomSignalAt)); } catch (e) {}
+    pushSignalHistory(frozen);
+    notifyNewSignal(frozen);
+  }
+  const frozen = state.activeCustomSignals[key];
+  if (!frozen) return null;
+  return evaluateCustomSignalOutcome(symbol, key, quote, frozen);
+}
+
+function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
+  const isLong = frozen.type === 'long';
+  const hitSL = isLong ? quote.last <= frozen.sl : quote.last >= frozen.sl;
+  const hitTP1Now = isLong ? quote.last >= frozen.tp1 : quote.last <= frozen.tp1;
+  const hitTP2 = frozen.tp2 != null && (isLong ? quote.last >= frozen.tp2 : quote.last <= frozen.tp2);
+  if (hitTP1Now && !frozen.tp1HitAt) frozen.tp1HitAt = Date.now();
+  const hitTP1 = hitTP1Now || !!frozen.tp1HitAt;
+  const expirationMs = (CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY && CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY[frozen.source]) || CONFIG.SIGNAL_EXPIRATION_MS;
+  const ageMs = Date.now() - frozen.timestamp;
+  // v4.7 (Etapa 3 â€” auditorÃ­a de cierre de operaciones): antes esta funciÃ³n cerraba
+  // la seÃ±al apenas tocaba TP1, sin importar si la estrategia definÃ­a tp2. hitTP2
+  // se calculaba pero nunca se usaba para nada. Para las estrategias con TP2 real
+  // (ny_open_kill_zone, bollinger_squeeze), el "cierre" que determina si la seÃ±al
+  // sigue activa ahora es hasTp2 ? hitTP2 : hitTP1 â€” TP1 solo actualiza el badge
+  // (frozen.tp1HitAt, sin cambios) pero ya no da de baja la seÃ±al por sÃ­ solo.
+  const hasTp2 = frozen.tp2 != null;
+  const hitFinalTarget = hasTp2 ? hitTP2 : hitTP1;
+  const isExpired = !hitSL && !hitFinalTarget && ageMs > expirationMs;
+  const shouldClose = hitSL || hitFinalTarget || isExpired;
+  if (shouldClose) {
+    delete state.activeCustomSignals[key];
+    try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
+    state.pendingCustomDisplayReset = state.pendingCustomDisplayReset || {};
+    state.pendingCustomDisplayReset[key] = true;
+  }
+  return { type: frozen.type, frozen, currentPrice: quote.last, hitTP: hitTP1, hitTP1, hitTP2, hitSL };
+}
+
+function refreshActiveCustomSignalsDisplay(symbol, quote, skipStrategies = new Set()) {
+  if (state.pendingCustomDisplayReset) {
+    Object.keys(state.pendingCustomDisplayReset).forEach(pendingKey => {
+      if (!pendingKey.startsWith(symbol + '_')) return;
+      const stratKey = pendingKey.slice(symbol.length + 1);
+      if (state.lastCustomDisplay[symbol]) state.lastCustomDisplay[symbol][stratKey] = { type: 'no-signal' };
+      delete state.pendingCustomDisplayReset[pendingKey];
+    });
+  }
+  Object.keys(state.activeCustomSignals).forEach(key => {
+    if (!key.startsWith(symbol + '_')) return;
+    const frozen = state.activeCustomSignals[key];
+    if (!frozen) return;
+    if (skipStrategies.has(frozen.strategyKeys[0])) return;
+    const display = evaluateCustomSignalOutcome(symbol, key, quote, frozen);
+    renderCustomSignal(symbol, frozen.strategyKeys[0], display);
+  });
+}
+
+async function refreshAsset(symbol, forceRefresh = false) {
+  const asset = ASSETS[symbol];
+  renderMarketBanner(symbol); renderAssetHoursPill(symbol); renderApiError(symbol, null);
+  if (!isMarketOpenForAsset(symbol)) { renderSignal(symbol, { type: 'market-closed' }); return; }
+  try {
+    const [quote, ohlcv] = await Promise.all([
+      MarketDataProvider.getQuote(symbol, forceRefresh),
+      MarketDataProvider.getOHLCV(symbol, state.currentTF, 100, forceRefresh).catch(() => (state.klineHistory[symbol] && state.klineHistory[symbol][state.currentTF]) || new OHLCVData([]))
+    ]);
+    updatePriceUI(symbol, quote, asset);
+    const htfTF = CONFIG.HTF_MAP[state.currentTF] || null;
+    let htfCandles = null;
+    if (htfTF) {
+      try { const htfOhlcv = await MarketDataProvider.getOHLCV(symbol, htfTF, 60, forceRefresh); htfCandles = htfOhlcv.candles; }
+      catch (e) { htfCandles = null; }
+    }
+    // FIX (7.2, sesiÃ³n 25/8): antes la Ãºnica forma de saber cuÃ¡ntas velas HTF llegan
+    // realmente en producciÃ³n era buscar a mano en los logs de Render â€” y en mÃ¡s de un
+    // intento no se encontrÃ³ nada (Punto D, sesiones previas). Ahora queda guardado en
+    // state, expuesto por /api/state (campo htfDiagnostics), consultable en cualquier
+    // momento sin depender de que el log siga vivo en la ventana de retenciÃ³n de Render.
+    state.htfDiagnostics = state.htfDiagnostics || {};
+    state.htfDiagnostics[symbol] = { tf: htfTF, count: htfCandles ? htfCandles.length : 0, at: Date.now() };
+    checkHistoryOutcomes(symbol, quote.last, ohlcv.candles);
+    
+    try {
+      // v4.7.3 (Etapa 3 â€” scoring contextual): se pasa el historial reciente
+      // sÃ­mbolo+estrategia como symbolStats, 5Âº parÃ¡metro nuevo de evaluateAll().
+      // Cierra el pendiente ya anotado en el changelog de custom-strategies.js
+      // (punto 8): la funciÃ³n es pura, no tiene acceso directo a Supabase/state.
+      // v4.8: se agrega newsContext (6Âº parÃ¡metro) â€” evento de alto impacto en USD
+      // dentro de Â±60min, si lo hay. Uso exclusivo de computeContextualScore(): ajusta
+      // el mismo score informativo que ya existe, no agrega campos nuevos a la seÃ±al
+      // ni se muestra en la UI (decisiÃ³n explÃ­cita de Soy).
+      const newsContext = await NewsCalendar.getNearbyHighImpact('USD', 60);
+      const rawSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles, state.strategyStatsBySymbol[symbol] || null, newsContext, CONFIG.MIN_CONFIDENCE_SCORE);
+      const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
+      const filteredSignals = rawSignals.filter(sig => {
+        if (!CONFIG.ENABLED_STRATEGIES.includes(sig.strategy)) {
+          console.log(`[v4.6] ${symbol}: Estrategia '${sig.strategy}' ignorada (no estÃ¡ en ENABLED_STRATEGIES)`);
+          return false;
+        }
+        if (disabledForSymbol.includes(sig.strategy)) {
+          console.log(`[v4.6] ${symbol}: Estrategia '${sig.strategy}' ignorada (desactivada para este activo)`);
+          return false;
+        }
+        return true;
+      });
+
+      const firedThisCycle = new Set();
+      filteredSignals.forEach(sig => {
+        const customDisplay = resolveCustomSignal(symbol, quote, sig, asset);
+        renderCustomSignal(symbol, sig.strategy, customDisplay);
+        firedThisCycle.add(sig.strategy);
+        if (customDisplay) {
+          addLog(quote.source, `[${sig.label}] seÃ±al ${sig.direction === 'long' ? 'LONG' : 'SHORT'} independiente`, symbol);
+        }
+      });
+      refreshActiveCustomSignalsDisplay(symbol, quote, firedThisCycle);
+    } catch (e) {
+      console.warn(`Estrategias independientes fallaron para ${symbol}:`, e.message);
+    }
+  } catch (error) {
+    if (error.message === 'MERCADO_CERRADO') renderSignal(symbol, { type: 'market-closed' });
+    else {
+      renderApiError(symbol, error.message || 'No se pudo obtener informaciÃ³n de ningÃºn proveedor. Revisa tu conexiÃ³n o las claves de API en Ajustes.');
+      renderSignal(symbol, { type: 'no-data', reason: 'Todos los proveedores de datos fallaron para este activo.' });
+    }
+  }
+}
+
+async function refreshAllData(forceRefresh = false) {
+  renderTradingHoursBar();
+  if (forceRefresh) setLoading(true, 'Consultando proveedores de datos...');
+  try {
+    for (const symbol of Object.keys(ASSETS)) {
+      await refreshAsset(symbol, forceRefresh);
+      await sleep(8000);
+    }
+  } finally {
+    if (forceRefresh) setLoading(false);
+  }
+}
+
+async function requestWakeLock() {}
+
+// FIX (7.1, medida intermedia): chequeo liviano de precio para BTC/ETH, en paralelo al
+// ciclo principal (ver CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS). No evalÃºa estrategias ni
+// genera seÃ±ales nuevas â€” solo pide el precio actual y lo pasa a checkHistoryOutcomes
+// para detectar mÃ¡s rÃ¡pido si una seÃ±al ya en curso tocÃ³ SL o TP, usando las Ãºltimas
+// velas ya cacheadas (state.klineHistory) en vez de pedir OHLCV/HTF de nuevo.
+async function quickPriceCheck(symbol) {
+  const asset = ASSETS[symbol];
+  if (!asset || asset.type !== 'crypto') return;
+  if (!isMarketOpenForAsset(symbol)) return;
+  try {
+    const quote = await MarketDataProvider.getQuote(symbol, false);
+    updatePriceUI(symbol, quote, asset);
+    const cachedCandles = (state.klineHistory[symbol] && state.klineHistory[symbol][state.currentTF] && state.klineHistory[symbol][state.currentTF].candles) || [];
+    checkHistoryOutcomes(symbol, quote.last, cachedCandles);
+  } catch (e) {
+    console.warn(`quickPriceCheck: fallo en ${symbol}:`, e.message);
+  }
+}
+
+let cryptoQuickCheckTimer = null;
+async function cryptoQuickCheckTick() {
+  try {
+    for (const symbol of Object.keys(ASSETS)) {
+      if (ASSETS[symbol].type === 'crypto') await quickPriceCheck(symbol);
+    }
+  } finally {
+    cryptoQuickCheckTimer = setTimeout(cryptoQuickCheckTick, CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS);
+  }
+}
+
+function startCryptoQuickCheckLoop() {
+  if (cryptoQuickCheckTimer) return;
+  cryptoQuickCheckTimer = setTimeout(cryptoQuickCheckTick, CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS);
+}
+
+function stopCryptoQuickCheckLoop() {
+  if (cryptoQuickCheckTimer) { clearTimeout(cryptoQuickCheckTimer); cryptoQuickCheckTimer = null; }
+}
+
+let autoRefreshTimer = null;
+async function autoRefreshTick() {
+  try {
+    await refreshAllData(false);
+  } catch (e) {
+    console.warn('autoRefreshTick: error en refreshAllData', e.message);
+  } finally {
+    const delay = getDynamicRefreshIntervalMs();
+    addLog('scheduler', `PrÃ³ximo refresco en ${Math.round(delay / 1000)}s (${isArgKillZoneWindow() ? 'Kill Zone NY activa' : 'horario normal'})`, 'ALL');
+    autoRefreshTimer = setTimeout(autoRefreshTick, delay);
+  }
+}
+
+function startAutoRefreshLoop() {
+  if (autoRefreshTimer) return;
+  autoRefreshTick();
+}
+
+function stopAutoRefreshLoop() {
+  if (autoRefreshTimer) { clearTimeout(autoRefreshTimer); autoRefreshTimer = null; }
+}
+
+module.exports = {
+  state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
+  startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isArgKillZoneWindow,
+  startCryptoQuickCheckLoop, stopCryptoQuickCheckLoop
+};
