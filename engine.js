@@ -1,6 +1,22 @@
 // ============================================================
-// PULSE TRADE v4.7.4 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.7.5 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.7.5 (27/8, Etapa 3 — cierre del hallazgo HTF "insuficiente 60/90"):
+// - Causa raíz confirmada leyendo el código (no solo el log): getOHLCV() cacheaba
+//   en state.klineHistory[symbol], una sola clave por símbolo sin distinguir
+//   timeframe. El pedido HTF (1h, 60 velas) pisaba la caché que acababa de dejar
+//   el pedido de TF base (15m, ~90-100 velas) en el mismo ciclo. Riesgo real (no
+//   solo ruido de log): si los proveedores fallaban al pedir TF, el fallback podía
+//   devolver velas de 1h creyendo que eran de 15m (contaminaba evaluateAll()); y
+//   quickPriceCheck() (BTC/ETH) podía escanear SL/TP intrabar contra velas de 1h
+//   en vez de 15m, con rango de precio por vela ~4x más ancho. Caché separada
+//   ahora por symbol+tf (state.klineHistory[symbol][tf]) en los 4 puntos que la
+//   leían/escribían (getOHLCV x3, refreshAsset fallback, quickPriceCheck).
+// - Efecto colateral del warning en sí (log "OHLCV insuficiente...60, mínimo 90"):
+//   confirmado que era además comparación equivocada — OHLCV_STRATEGY_MIN_CANDLES=90
+//   es el piso de bollinger_squeeze en TF base, se aplicaba también al pedido HTF
+//   (limit=60) sin distinguir. Ahora el piso de 90 solo aplica cuando el pedido es
+//   de TF base (limit >= 90); para HTF se compara contra lo efectivamente pedido.
 // Cambios v4.7.4 (25/8, Etapa 3 — cierre del hallazgo 5/7.3):
 // - Causa raíz confirmada con los datos reales de CONFIG (no con más logs): a 1min
 //   de intervalo, Kill Zone NY (180min) por sí sola necesitaba hasta 1080 llamadas
@@ -951,7 +967,19 @@ const MarketDataProvider = {
   async getOHLCV(symbol, tf, limit = 100, forceRefresh = false) {
     const asset = ASSETS[symbol];
     if (!asset) return new OHLCVData([]);
-    if (!isMarketOpenForAsset(symbol)) return state.klineHistory[symbol] || new OHLCVData([]);
+    // FIX (Etapa 3, hallazgo cache klineHistory): antes la caché se guardaba en
+    // state.klineHistory[symbol], una sola clave por símbolo sin distinguir timeframe.
+    // Como getOHLCV se llama tanto para el TF base (15m, ~90-100 velas) como para el
+    // HTF (1h, 60 velas) dentro del mismo ciclo de refreshAsset(), la llamada HTF
+    // pisaba lo que acababa de guardar la llamada TF. Efecto real: si en el ciclo
+    // siguiente los proveedores fallaban al pedir TF, el fallback devolvía las velas
+    // de 1h del ciclo anterior creyendo que eran de 15m (contaminando evaluateAll());
+    // y quickPriceCheck() (BTC/ETH) podía terminar escaneando SL/TP intrabar contra
+    // velas de 1h en vez de 15m, con rango de precio por vela ~4x más ancho. Ahora la
+    // caché queda separada por símbolo+timeframe: state.klineHistory[symbol][tf].
+    if (!isMarketOpenForAsset(symbol)) {
+      return (state.klineHistory[symbol] && state.klineHistory[symbol][tf]) || new OHLCVData([]);
+    }
     const providerList = asset.providerPriority || CONFIG.PROVIDER_PRIORITY;
     const eligible = providerList.filter(providerName => {
       const adapter = ProviderAdapters[providerName];
@@ -968,26 +996,42 @@ const MarketDataProvider = {
         try {
           const data = await ProviderAdapters[providerName].fetchOHLCV(symbol, tf, limit);
           if (!data.isValid) throw new Error('Datos insuficientes');
-          if (data.candles.length < CONFIG.OHLCV_STRATEGY_MIN_CANDLES) {
-            // Caso real de riesgo: por debajo de esto, bollinger_squeeze (la estrategia
-            // activa más exigente) no puede evaluar. Merece atención, no es ruido.
-            console.warn(`OHLCV ${providerName} INSUFICIENTE para estrategias: ${symbol} ${tf} — recibió ${data.candles.length}, mínimo requerido ${CONFIG.OHLCV_STRATEGY_MIN_CANDLES}`);
+          // FIX (Etapa 3, mismo hallazgo): OHLCV_STRATEGY_MIN_CANDLES=90 es el piso
+          // pensado solo para el TF base 15m (bollinger_squeeze). Antes se comparaba
+          // sin distinguir, así que el pedido HTF (1h, limit=60) siempre disparaba el
+          // warning de "insuficiente" aunque 60 sea lo esperado y suficiente para el
+          // filtro de tendencia HTF. Ahora el piso de 90 solo se evalúa cuando el
+          // pedido es igual o mayor a ese límite (o sea, el TF base); para pedidos
+          // más chicos (HTF) se compara contra lo efectivamente pedido (limit).
+          const isBaseTFRequest = limit >= CONFIG.OHLCV_STRATEGY_MIN_CANDLES;
+          const effectiveMin = isBaseTFRequest ? CONFIG.OHLCV_STRATEGY_MIN_CANDLES : limit;
+          if (data.candles.length < effectiveMin) {
+            // Caso real de riesgo: por debajo de esto, la estrategia que hizo este
+            // pedido (bollinger_squeeze en TF base, o el filtro de tendencia HTF de
+            // quien pidió HTF) no tiene suficientes velas para evaluar.
+            console.warn(`OHLCV ${providerName} INSUFICIENTE para estrategias: ${symbol} ${tf} — recibió ${data.candles.length}, mínimo requerido ${effectiveMin}`);
           } else if (data.candles.length < limit) {
             // Techo estructural esperado del endpoint gratuito de CoinGecko en 15m
             // (days=1 → máx. ~96 velas de 15m); no afecta a ninguna estrategia activa.
             console.info(`OHLCV ${providerName} ${symbol} ${tf} — recibió ${data.candles.length}/${limit} (techo del proveedor, dentro de lo requerido)`);
           }
-          state.klineHistory[symbol] = data; return data;
+          if (!state.klineHistory[symbol]) state.klineHistory[symbol] = {};
+          state.klineHistory[symbol][tf] = data;
+          return data;
         } catch (error) {
           markProviderCooldown(providerName, error.message);
           console.warn(`OHLCV ${providerName} falló:`, error.message);
           await sleep(1500);
         }
       }
-      if (state.klineHistory[symbol] && state.klineHistory[symbol].candles.length > 0) return state.klineHistory[symbol];
+      if (state.klineHistory[symbol] && state.klineHistory[symbol][tf] && state.klineHistory[symbol][tf].candles.length > 0) {
+        return state.klineHistory[symbol][tf];
+      }
       throw new Error(`No se pudieron obtener velas históricas`);
     }
-    if (state.klineHistory[symbol] && state.klineHistory[symbol].candles.length > 0) return state.klineHistory[symbol];
+    if (state.klineHistory[symbol] && state.klineHistory[symbol][tf] && state.klineHistory[symbol][tf].candles.length > 0) {
+      return state.klineHistory[symbol][tf];
+    }
     throw new Error('No hay datos históricos disponibles');
   },
   setApiKey(provider, key) {
@@ -1662,7 +1706,7 @@ async function refreshAsset(symbol, forceRefresh = false) {
   try {
     const [quote, ohlcv] = await Promise.all([
       MarketDataProvider.getQuote(symbol, forceRefresh),
-      MarketDataProvider.getOHLCV(symbol, state.currentTF, 100, forceRefresh).catch(() => state.klineHistory[symbol] || new OHLCVData([]))
+      MarketDataProvider.getOHLCV(symbol, state.currentTF, 100, forceRefresh).catch(() => (state.klineHistory[symbol] && state.klineHistory[symbol][state.currentTF]) || new OHLCVData([]))
     ]);
     updatePriceUI(symbol, quote, asset);
     const htfTF = CONFIG.HTF_MAP[state.currentTF] || null;
@@ -1726,84 +1770,4 @@ async function refreshAsset(symbol, forceRefresh = false) {
   }
 }
 
-async function refreshAllData(forceRefresh = false) {
-  renderTradingHoursBar();
-  if (forceRefresh) setLoading(true, 'Consultando proveedores de datos...');
-  try {
-    for (const symbol of Object.keys(ASSETS)) {
-      await refreshAsset(symbol, forceRefresh);
-      await sleep(8000);
-    }
-  } finally {
-    if (forceRefresh) setLoading(false);
-  }
-}
-
-async function requestWakeLock() {}
-
-// FIX (7.1, medida intermedia): chequeo liviano de precio para BTC/ETH, en paralelo al
-// ciclo principal (ver CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS). No evalúa estrategias ni
-// genera señales nuevas — solo pide el precio actual y lo pasa a checkHistoryOutcomes
-// para detectar más rápido si una señal ya en curso tocó SL o TP, usando las últimas
-// velas ya cacheadas (state.klineHistory) en vez de pedir OHLCV/HTF de nuevo.
-async function quickPriceCheck(symbol) {
-  const asset = ASSETS[symbol];
-  if (!asset || asset.type !== 'crypto') return;
-  if (!isMarketOpenForAsset(symbol)) return;
-  try {
-    const quote = await MarketDataProvider.getQuote(symbol, false);
-    updatePriceUI(symbol, quote, asset);
-    const cachedCandles = (state.klineHistory[symbol] && state.klineHistory[symbol].candles) || [];
-    checkHistoryOutcomes(symbol, quote.last, cachedCandles);
-  } catch (e) {
-    console.warn(`quickPriceCheck: fallo en ${symbol}:`, e.message);
-  }
-}
-
-let cryptoQuickCheckTimer = null;
-async function cryptoQuickCheckTick() {
-  try {
-    for (const symbol of Object.keys(ASSETS)) {
-      if (ASSETS[symbol].type === 'crypto') await quickPriceCheck(symbol);
-    }
-  } finally {
-    cryptoQuickCheckTimer = setTimeout(cryptoQuickCheckTick, CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS);
-  }
-}
-
-function startCryptoQuickCheckLoop() {
-  if (cryptoQuickCheckTimer) return;
-  cryptoQuickCheckTimer = setTimeout(cryptoQuickCheckTick, CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS);
-}
-
-function stopCryptoQuickCheckLoop() {
-  if (cryptoQuickCheckTimer) { clearTimeout(cryptoQuickCheckTimer); cryptoQuickCheckTimer = null; }
-}
-
-let autoRefreshTimer = null;
-async function autoRefreshTick() {
-  try {
-    await refreshAllData(false);
-  } catch (e) {
-    console.warn('autoRefreshTick: error en refreshAllData', e.message);
-  } finally {
-    const delay = getDynamicRefreshIntervalMs();
-    addLog('scheduler', `Próximo refresco en ${Math.round(delay / 1000)}s (${isArgKillZoneWindow() ? 'Kill Zone NY activa' : 'horario normal'})`, 'ALL');
-    autoRefreshTimer = setTimeout(autoRefreshTick, delay);
-  }
-}
-
-function startAutoRefreshLoop() {
-  if (autoRefreshTimer) return;
-  autoRefreshTick();
-}
-
-function stopAutoRefreshLoop() {
-  if (autoRefreshTimer) { clearTimeout(autoRefreshTimer); autoRefreshTimer = null; }
-}
-
-module.exports = {
-  state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
-  startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isArgKillZoneWindow,
-  startCryptoQuickCheckLoop, stopCryptoQuickCheckLoop
-};
+async function refreshAllData(for
