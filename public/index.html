@@ -125,6 +125,24 @@
   .asset-pill.active{background:linear-gradient(135deg,#06b6d4,#0891b2);border-color:transparent;color:#fff}
   .asset-pill-count{font-size:0.68rem;background:rgba(255,255,255,0.15);padding:1px 6px;border-radius:8px}
   .asset-summary-title{font-size:0.8rem;font-weight:700;color:#38bdf8;margin-bottom:8px}
+  /* Desglose visual por activo (reemplaza al selector con click): todos los activos
+     con actividad en el período se muestran juntos, cada uno con sus estrategias como
+     mini-barras ganadas/perdidas — sin necesidad de tocar nada para verlas todas. */
+  .asset-block{background:#151d2b;border-radius:12px;border:1px solid #232f42;padding:12px 14px;margin-bottom:10px}
+  .asset-block-header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px}
+  .asset-block-name{font-size:0.9rem;font-weight:800;color:#f8fafc;letter-spacing:0.3px}
+  .asset-block-wr{font-size:0.72rem;font-weight:700}
+  .asset-block-wr.positive{color:#4ade80}
+  .asset-block-wr.negative{color:#f87171}
+  .asset-block-summary{font-size:0.68rem;color:#94a3b8;margin-bottom:8px}
+  .strategy-bar-row{margin-bottom:7px}
+  .strategy-bar-row:last-child{margin-bottom:0}
+  .strategy-bar-top{display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:3px}
+  .strategy-bar-label{color:#cbd5e1;font-weight:600}
+  .strategy-bar-value{color:#64748b;font-weight:600}
+  .strategy-bar-track{display:flex;height:7px;border-radius:4px;overflow:hidden;background:#0d1420}
+  .strategy-bar-win{background:#4ade80}
+  .strategy-bar-loss{background:#f87171}
 </style>
 </head>
 <body>
@@ -522,32 +540,43 @@ function pieChartSvg(wins, losses) {
 // primero lo que tiene más volumen y el winrate de cada una queda visible al lado — sin
 // forzar un ranking de "mejor/peor" (ver preferencia del usuario, todavía no hay un
 // mínimo de operaciones definido para eso).
-function renderAssetStrategyBreakdown(assetSummary) {
-  if (!assetSummary || !assetSummary.total) {
-    return '<div class="period-empty">Sin señales cerradas para este activo en este período.</div>';
-  }
+// Una fila de estrategia = mini-barra horizontal ganadas(verde)/perdidas(rojo),
+// proporcional a esa estrategia. Reemplaza a la fila de solo texto: de un vistazo
+// se ve qué estrategia ganó o perdió más, sin tener que leer cada número.
+function strategyBarRow(r) {
+  const winPct = r.count ? +((r.wins / r.count) * 100).toFixed(1) : 0;
+  const lossPct = 100 - winPct;
+  return `<div class="strategy-bar-row">
+    <div class="strategy-bar-top">
+      <span class="strategy-bar-label">${strategyLabel(r.key)}</span>
+      <span class="strategy-bar-value">${r.wins}G/${r.losses}P · ${r.winRate}%</span>
+    </div>
+    <div class="strategy-bar-track">
+      <div class="strategy-bar-win" style="width:${winPct}%"></div>
+      <div class="strategy-bar-loss" style="width:${lossPct}%"></div>
+    </div>
+  </div>`;
+}
+
+// Un bloque por activo, con su propio winrate y todas sus estrategias como
+// mini-barras — se muestran TODOS los activos con actividad juntos, sin click.
+// (Nombre distinto a renderAssetBlock(symbol), que ya existe para las tarjetas
+// en vivo del dashboard — mismo nombre las hubiera pisado entre sí.)
+function renderPeriodAssetBlock(sym, assetSummary) {
   const rows = [...assetSummary.strategyBreakdown].sort((a, b) => b.count - a.count);
-  return `<div class="asset-summary-title">✅ ${assetSummary.wins} ganadas · 🛑 ${assetSummary.losses} perdidas · Winrate ${assetSummary.winRate}%</div>
-    ${rows.map(r => `<div class="period-strategy-row">
-      <span class="period-strategy-label">${strategyLabel(r.key)}</span>
-      <span class="period-strategy-value">${r.count} op. (${r.wins}G/${r.losses}P) · ${r.winRate}%</span>
-    </div>`).join('')}`;
+  const wrClass = assetSummary.winRate >= 50 ? 'positive' : 'negative';
+  return `<div class="asset-block">
+    <div class="asset-block-header">
+      <span class="asset-block-name">${sym}</span>
+      <span class="asset-block-wr ${wrClass}">Winrate ${assetSummary.winRate}%</span>
+    </div>
+    <div class="asset-block-summary">✅ ${assetSummary.wins} ganadas · 🛑 ${assetSummary.losses} perdidas · ${assetSummary.total} op.</div>
+    ${rows.map(strategyBarRow).join('')}
+  </div>`;
 }
 
-function renderAssetSelector(bySymbol, selected) {
-  return `<div class="asset-selector">${ASSET_ORDER.map(sym => {
-    const s = bySymbol[sym];
-    const count = s ? s.total : 0;
-    return `<div class="asset-pill ${sym === selected ? 'active' : ''}" data-asset="${sym}">
-      ${sym}${count ? `<span class="asset-pill-count">${count}</span>` : ''}
-    </div>`;
-  }).join('')}</div>`;
-}
-
-// Estado del último summary cargado (para poder cambiar de activo sin volver a pedir
-// al servidor) y qué activo está seleccionado dentro del período actual.
+// Estado del último summary cargado.
 let currentPeriodSummary = null;
-let currentSelectedAsset = null;
 
 function renderPeriodDetail() {
   const el = document.getElementById('periodDetail');
@@ -557,14 +586,13 @@ function renderPeriodDetail() {
     return;
   }
   const bySymbol = summary.bySymbol || {};
-  // Si no hay activo elegido todavía (o el elegido no tiene datos en este período),
-  // se autoselecciona el de mayor volumen de operaciones cerradas.
-  if (!currentSelectedAsset || !bySymbol[currentSelectedAsset] || !bySymbol[currentSelectedAsset].total) {
-    const withData = ASSET_ORDER.filter(sym => bySymbol[sym] && bySymbol[sym].total);
-    currentSelectedAsset = withData.length
-      ? withData.reduce((best, sym) => (bySymbol[sym].total > bySymbol[best].total ? sym : best), withData[0])
-      : ASSET_ORDER[0];
-  }
+  // Todos los activos con al menos 1 operación cerrada en el período, ordenados por
+  // volumen (más operaciones primero) — así lo más relevante queda arriba sin tener
+  // que buscarlo.
+  const activeAssets = ASSET_ORDER
+    .filter(sym => bySymbol[sym] && bySymbol[sym].total)
+    .sort((a, b) => bySymbol[b].total - bySymbol[a].total);
+
   const wrClass = summary.winRate >= 50 ? 'positive' : 'negative';
   el.innerHTML = `<div class="period-detail">
     <div class="pie-block">
@@ -578,22 +606,12 @@ function renderPeriodDetail() {
         </div>
       </div>
     </div>
-    ${renderAssetSelector(bySymbol, currentSelectedAsset)}
-    <div id="assetBreakdown">${renderAssetStrategyBreakdown(bySymbol[currentSelectedAsset])}</div>
+    ${activeAssets.map(sym => renderPeriodAssetBlock(sym, bySymbol[sym])).join('')}
   </div>`;
-
-  el.querySelectorAll('.asset-pill').forEach(pill => {
-    pill.addEventListener('click', () => {
-      currentSelectedAsset = pill.dataset.asset;
-      el.querySelectorAll('.asset-pill').forEach(p => p.classList.toggle('active', p.dataset.asset === currentSelectedAsset));
-      document.getElementById('assetBreakdown').innerHTML = renderAssetStrategyBreakdown(bySymbol[currentSelectedAsset]);
-    });
-  });
 }
 
 async function selectPeriodItem(period, anchorDate) {
   currentPeriodSummary = await fetchPeriodSummary(period, anchorDate);
-  currentSelectedAsset = null; // nuevo período: recalcular el activo con más volumen
   renderPeriodDetail();
 }
 
