@@ -200,8 +200,11 @@ const CONFIG = {
     // ema_cross_scalping: 25% winrate (4 op, 1G/3P) del 12/8 al 23/8. Desactivada.
     BTCUSD: ['smc', 'ema_cross_scalping'],
     // bollinger_squeeze: 33.3% winrate (12 op, 4G/8P) del 12/8 al 23/8. Desactivada.
-    XAUUSD: ['smc', 'bollinger_squeeze'],
-    EURUSD: ['smc']
+    // pivots_breakout_reversal: -8.09R (3G/14P) en XAUUSD y -4.29R (0G/4P) en EURUSD
+    // al 27/8. Desactivada en ambos símbolos. Se mantiene activa en BTCUSD (+0.94R)
+    // y en observación en ETHUSD (-3.28R).
+    XAUUSD: ['smc', 'bollinger_squeeze', 'pivots_breakout_reversal'],
+    EURUSD: ['smc', 'pivots_breakout_reversal']
   }
 };
 
