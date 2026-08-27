@@ -76,6 +76,15 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
       // de confirmarlo sin inferirlo de los logs de Render (ver engine.js,
       // logQuotaExcluded). Complementa a htfDiagnostics con el mismo criterio.
       providerQuotaExclusions: state.providerQuotaExclusions || {},
+      // Sección 14 (26/8): racha de pérdidas consecutivas por símbolo+estrategia
+      // (consecutiveLosses, ckey = "SYMBOL_strategyKey") y qué combinaciones ya se
+      // auto-desactivaron por circuit breaker (autoDisabledStrategies, con cuándo y
+      // con qué racha). Antes solo existían en engine.js (state.consecutiveLosses /
+      // state.autoDisabledStrategies) sin exponerse acá — no había forma de confirmar
+      // si el circuit breaker venía acumulando pérdidas por combinación sin llegar
+      // nunca al umbral, sin esperar a que Render conserve logs viejos.
+      consecutiveLosses: state.consecutiveLosses || {},
+      autoDisabledStrategies: state.autoDisabledStrategies || {},
       autoTune: {
         threshold: state.autoConfidenceThreshold,
         stats: state.autoTuneStats
