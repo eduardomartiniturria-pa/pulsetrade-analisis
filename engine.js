@@ -177,7 +177,11 @@ const CONFIG = {
   // temporales que Soy revisa y decide si mantener.
   CIRCUIT_BREAKER: {
     enabled: true,
-    consecutiveLossThreshold: 5
+    consecutiveLossThreshold: 5,
+    // v4.9 (sección 14, 27/8): umbral del breaker agregado por estrategia (suma los 4
+    // símbolos) — 8, el doble del umbral por símbolo. Ver razonamiento completo junto a
+    // checkCircuitBreakerAggregate().
+    consecutiveLossThresholdAggregate: 8
   },
   // v4.9 (sección 13, 27/8): piso mínimo de computeContextualScore() para que una señal
   // se muestre — decidido por el usuario en 55%, no propuesto por el motor. Antes el
@@ -270,6 +274,16 @@ let state = {
   // decisiones tomadas a mano por Soy ni perder el motivo de cada apagado automático.
   consecutiveLosses: (() => { try { return JSON.parse(localStorage.getItem('pt_consecutive_losses') || '{}'); } catch (e) { return {}; } })(),
   autoDisabledStrategies: (() => { try { return JSON.parse(localStorage.getItem('pt_auto_disabled_strategies') || '{}'); } catch (e) { return {}; } })(),
+  // v4.9 (sección 14, 27/8): circuit breaker agregado por estrategia sola (suma los 4
+  // símbolos). El breaker original (arriba) es por combinación símbolo+estrategia — una
+  // racha mala repartida entre BTC/ETH/EUR/XAU nunca concentra 5 seguidas en ninguna
+  // combinación individual y por eso nunca se disparó en la racha del 24-26/8 (confirmado
+  // con datos reales de /api/state: máximo visto fue 4, ninguna combinación llegó a 5,
+  // pese a que ny_open_kill_zone sumaba 7 pérdidas repartidas entre los 4 activos). Esta
+  // capa cubre ese caso: cuenta pérdidas seguidas de una estrategia sin importar el
+  // símbolo, resetea con cualquier ganada de esa estrategia en cualquier símbolo.
+  consecutiveLossesAggregate: (() => { try { return JSON.parse(localStorage.getItem('pt_consecutive_losses_aggregate') || '{}'); } catch (e) { return {}; } })(),
+  autoDisabledStrategiesAggregate: (() => { try { return JSON.parse(localStorage.getItem('pt_auto_disabled_strategies_aggregate') || '{}'); } catch (e) { return {}; } })(),
   backtestCustomStats: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_custom_stats') || '{}'); } catch (e) { return {}; } })(),
   backtestRunning: false,
   soundEnabled: localStorage.getItem('pt_sound_enabled') !== 'false',
@@ -1233,6 +1247,47 @@ function updateStrategyStatsBySymbol(entry) {
   localStorage.setItem('pt_strategy_stats_by_symbol', JSON.stringify(state.strategyStatsBySymbol));
 
   checkCircuitBreaker(symbol, key, entry.result);
+  checkCircuitBreakerAggregate(key, entry.result);
+}
+
+// v4.9 (sección 14, 27/8): breaker agregado — pérdidas seguidas de una estrategia sin
+// importar el símbolo. Umbral 8 (no 5, el mismo que el breaker por símbolo): con 4 activos
+// en juego, una racha diluida entre todos tarda más en acumularse que una concentrada en
+// uno solo, así que el umbral agregado tiene que ser más alto para no dispararse por
+// varianza normal entre símbolos independientes — 8 es el doble del umbral por símbolo,
+// coherente con "la mitad de las combinaciones fallando seguido" como piso razonable de
+// alarma real. Apaga la estrategia en los 4 símbolos a la vez (agrega la key a
+// DISABLED_STRATEGIES_BY_SYMBOL de cada uno de SYMBOLS), separado del registro del breaker
+// por símbolo para poder diferenciar en el push y en autoDisabledStrategiesAggregate cuál
+// disparó.
+function checkCircuitBreakerAggregate(key, result) {
+  if (!CONFIG.CIRCUIT_BREAKER || !CONFIG.CIRCUIT_BREAKER.enabled) return;
+  if (result === 'win') {
+    if (state.consecutiveLossesAggregate[key]) { state.consecutiveLossesAggregate[key] = 0; }
+    return;
+  }
+  if (result !== 'loss') return;
+
+  state.consecutiveLossesAggregate[key] = (state.consecutiveLossesAggregate[key] || 0) + 1;
+  localStorage.setItem('pt_consecutive_losses_aggregate', JSON.stringify(state.consecutiveLossesAggregate));
+
+  const threshold = CONFIG.CIRCUIT_BREAKER.consecutiveLossThresholdAggregate || (CONFIG.CIRCUIT_BREAKER.consecutiveLossThreshold * 2);
+  if (state.consecutiveLossesAggregate[key] < threshold) return;
+  if (state.autoDisabledStrategiesAggregate[key]) return; // ya estaba apagada, no repetir aviso
+
+  Object.keys(ASSETS || {}).forEach(symbol => {
+    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol]) CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] = [];
+    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
+      CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].push(key);
+    }
+  });
+  state.autoDisabledStrategiesAggregate[key] = { key, disabledAt: Date.now(), lossStreak: state.consecutiveLossesAggregate[key] };
+  localStorage.setItem('pt_auto_disabled_strategies_aggregate', JSON.stringify(state.autoDisabledStrategiesAggregate));
+
+  const title = '🛑 Circuit breaker AGREGADO: estrategia pausada en todos los activos';
+  const body = `${key} se auto-desactivó en los 4 activos tras ${state.consecutiveLossesAggregate[key]} pérdidas seguidas repartidas entre símbolos. Revisala cuando puedas.`;
+  console.log(`[CIRCUIT BREAKER AGREGADO] ${key} auto-desactivada en todos los símbolos tras ${state.consecutiveLossesAggregate[key]} pérdidas consecutivas`);
+  sendPushToAll({ title, body, signal: { strategy: key, autoDisabled: true, aggregate: true } }).catch(err => console.error('Error enviando push de circuit breaker agregado:', err.message));
 }
 
 // v4.7: si una combinación symbol+strategy encadena CIRCUIT_BREAKER.consecutiveLossThreshold
