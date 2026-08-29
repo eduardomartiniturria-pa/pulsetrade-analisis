@@ -188,7 +188,8 @@ const CONFIG = {
     'pivots_breakout_reversal',
     'bollinger_squeeze',
     'supply_demand',
-    'ema_cross_scalping'
+    'ema_cross_scalping',
+    'eth_momentum_breakout' // v4.10 (29/8), solo ETHUSD — ver custom-strategies.js
   ],
   // v4.6: LISTA NEGRA POR ACTIVO - Desactiva estrategias específicas que fallan en un activo
   // v4.7: CIRCUIT BREAKER - auto-desactiva una estrategia en un activo tras N pérdidas
@@ -212,8 +213,10 @@ const CONFIG = {
   // interno si algún día se llama sin pasarlo.
   MIN_CONFIDENCE_SCORE: 55,
   DISABLED_STRATEGIES_BY_SYMBOL: {
-    ETHUSD: ['ema_cross_scalping', 'smc'],
+    ETHUSD: ['ema_cross_scalping', 'smc', 'bollinger_squeeze'],
     // ema_cross_scalping: 25% winrate (4 op, 1G/3P) del 12/8 al 23/8. Desactivada.
+    // bollinger_squeeze: -12.32R (10G/33P) al 28/8, la peor combinación de toda la
+    // app. Desactivada en ETHUSD (se mantiene activa en BTCUSD/EURUSD, positiva ahí).
     BTCUSD: ['smc', 'ema_cross_scalping'],
     // bollinger_squeeze: 33.3% winrate (12 op, 4G/8P) del 12/8 al 23/8. Desactivada.
     // pivots_breakout_reversal: -8.09R (3G/14P) en XAUUSD y -4.29R (0G/4P) en EURUSD
@@ -535,7 +538,14 @@ const NewsCalendar = {
   // llamado 1x por símbolo) volvía a intentar el fetch de inmediato — eso generaba
   // ráfagas de 4 fetches en segundos contra el feed público, perpetuando el 429.
   // Confirmado en logs de producción del 27/8 (ráfagas de 4 fallos en <30s por ciclo).
-  BACKOFF_MS: 10 * 60 * 1000,
+  // AJUSTE (28/8): subido de 10min a 8h. El fix del 27/8 solo bajó la frecuencia de
+  // reintentos, no resolvió el 429 — faireconomy.media rechaza de forma sostenida la
+  // IP de Render (0 llamadas exitosas en 4hs de logs revisados). No hay alternativa
+  // gratis confiable a la vista, así que esto no "arregla" el feed: solo corta el
+  // ruido en el log de reintentos que igual iban a seguir fallando. El ajuste de
+  // score por noticias sigue sin aplicarse. Si en algún momento se paga un feed
+  // (FMP Starter, Finnhub paga, Trading Economics), este valor debería bajar de nuevo.
+  BACKOFF_MS: 8 * 60 * 60 * 1000,
   _cache: null,
   _cacheAt: 0,
 
@@ -1733,7 +1743,7 @@ async function refreshAsset(symbol, forceRefresh = false) {
       // dentro de ±60min, si lo hay. Uso exclusivo de computeContextualScore(): ajusta
       // el mismo score informativo que ya existe, no agrega campos nuevos a la señal
       // ni se muestra en la UI (decisión explícita de Soy).
-      const newsContext = await NewsCalendar.getNearbyHighImpact('USD', 60);
+       const newsContext = await NewsCalendar.getNearbyHighImpact('USD', 60);
       const rawSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles, state.strategyStatsBySymbol[symbol] || null, newsContext, CONFIG.MIN_CONFIDENCE_SCORE);
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
       const filteredSignals = rawSignals.filter(sig => {
