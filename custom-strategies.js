@@ -143,6 +143,11 @@ function getNYTimeParts(ms) {
 // engine.js:CONFIG.ENABLED_STRATEGIES — no hay lectura cruzada entre archivos.
 const ETH_VWAP_SCALP_ENABLED = false;
 
+// v4.10 (29/8): ESTRATEGIA NUEVA — ver detectEthMomentumBreakout() más abajo.
+// Debe coincidir manualmente con si 'eth_momentum_breakout' está en
+// engine.js:CONFIG.ENABLED_STRATEGIES — no hay lectura cruzada entre archivos.
+const ETH_MOMENTUM_BREAKOUT_ENABLED = true;
+
 function getLondonTimeParts(ms) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'Europe/London', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -1157,10 +1162,89 @@ function detectEthVwapScalp(candles, htfCandles) {
 // y XAU VWAP Reversion Scalp. Ambas dependían de calculateVWAPSeries() en
 // EURUSD/XAUUSD, instrumentos OTC sin volumen de mercado centralizado — el
 // VWAP caía a un fallback de promedio de precio típico (dato estimado, no
-// real). El usuario prefiere que la app solo opere con datos reales. Se
-// mantiene eth_vwap_scalp porque ETHUSD sí tiene volumen real vía
-// Binance/CoinGecko.
+// real). El usuario prefiere que la app solo opere con datos reales.
+// CORRECCIÓN (27/8, ver comentario dentro de calculateVWAPSeries): la
+// justificación original de que "se mantiene eth_vwap_scalp porque ETHUSD sí
+// tiene volumen real" era falsa — CoinGecko (proveedor real de ETHUSD) da
+// volume:0 hardcodeado en /market_chart. eth_vwap_scalp quedó apagada
+// (ETH_VWAP_SCALP_ENABLED = false) por el mismo motivo que las otras dos.
 // ---------------------------------------------------------
+
+// ---------------------------------------------------------
+// ESTRATEGIA 9: ETH MOMENTUM BREAKOUT — ATR (id: eth_momentum_breakout) — solo ETHUSD
+// ---------------------------------------------------------
+// Agregada 29/8 a pedido del usuario, tras revisar strategyStatsBySymbol real:
+// en ETHUSD las dos peores estrategias (bollinger_squeeze -12.32R, pivots_
+// breakout_reversal -5.40R) son ambas de tipo reversión/contra-tendencia; la
+// única positiva (ny_open_kill_zone, +1.78R) es de tipo momentum/continuación.
+// Esta estrategia sigue esa misma línea, evitando a propósito el problema de
+// VWAP: no usa volumen en absoluto, solo precio (OHLC) + ATR, que sí son datos
+// reales en los 4 activos.
+// Corre sobre `candles` (M15, mismo timeframe base que las otras 7 — no se
+// agrega ningún fetch nuevo para no gastar cuota extra) y usa htfCandles (H1)
+// solo para el sesgo direccional vía getH1Bias(), igual que ema_cross_scalping.
+// LÓGICA:
+//   1. Consolidación: rango (máximo-mínimo) de las últimas 20 velas (sin
+//      contar la actual) <= 1.5x ATR14 — es decir, rango angosto relativo a
+//      la volatilidad reciente, no un valor fijo en precio.
+//   2. Ruptura: la vela actual cierra por fuera de ese rango, con cuerpo real
+//      (no solo mecha) de al menos 50% de su rango total — filtra rupturas
+//      débiles.
+//   3. Confirmación H1: getH1Bias() debe coincidir con la dirección de la
+//      ruptura (long solo si H1 alcista, short solo si H1 bajista) — sin
+//      esto, no dispara. Si no hay coincidencia, no es "señal débil": es
+//      directamente descartada, igual que en ema_cross_scalping.
+//   4. SL: extremo opuesto del rango de consolidación, con un colchón de
+//      0.25x ATR14 (mismo criterio de holgura por volatilidad que ya usa
+//      pivots_breakout_reversal, a otra escala).
+//   5. TP1 = 1:2, TP2 = 1:3 (mismo esquema de RR que bollinger_squeeze).
+function detectEthMomentumBreakout(candles, htfCandles) {
+  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null };
+  if (!candles || candles.length < 40) return result;
+
+  const atr = calculateATR(candles, 14);
+  if (atr === null || atr <= 0) return result;
+
+  const i = candles.length - 1;
+  const last = candles[i];
+  const lookback = 20;
+  const window = candles.slice(Math.max(0, i - lookback), i); // sin incluir la vela actual
+  if (window.length < lookback) return result;
+
+  const rangeHigh = Math.max(...window.map(c => c.high));
+  const rangeLow = Math.min(...window.map(c => c.low));
+  const rangeSize = rangeHigh - rangeLow;
+  if (rangeSize > atr * 1.5) return result; // no hubo consolidación real, sin señal
+
+  const candleRange = last.high - last.low;
+  const body = Math.abs(last.close - last.open);
+  const hasRealBody = candleRange > 0 && (body / candleRange) >= 0.5;
+  if (!hasRealBody) return result;
+
+  const h1 = getH1Bias(htfCandles);
+
+  if (last.close > rangeHigh && h1.bias === 'long') {
+    result.bullish = true;
+    result.entry = last.close;
+    result.sl = rangeLow - atr * 0.25;
+    result.details.push(`Ruptura alcista de consolidación (rango ${rangeSize.toFixed(2)} <= 1.5x ATR14) con cuerpo real, a favor de H1 (${h1.reason})`);
+  } else if (last.close < rangeLow && h1.bias === 'short') {
+    result.bearish = true;
+    result.entry = last.close;
+    result.sl = rangeHigh + atr * 0.25;
+    result.details.push(`Ruptura bajista de consolidación (rango ${rangeSize.toFixed(2)} <= 1.5x ATR14) con cuerpo real, a favor de H1 (${h1.reason})`);
+  } else if ((last.close > rangeHigh || last.close < rangeLow) && h1.bias === 'no_trade') {
+    result.details.push(`Ruptura detectada pero sin sesgo H1 claro (${h1.reason}) — descartada`);
+  }
+
+  if (result.bullish || result.bearish) {
+    const risk = Math.abs(result.entry - result.sl);
+    result.tp1 = result.bullish ? result.entry + risk * 2 : result.entry - risk * 2; // RR 1:2
+    result.tp2 = result.bullish ? result.entry + risk * 3 : result.entry - risk * 3; // RR 1:3
+  }
+
+  return result;
+}
 
 // ---------------------------------------------------------
 // SCORING CONTEXTUAL (v4.8, sesión 25/8 — Etapa 3)
@@ -1357,6 +1441,20 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
     }
   }
 
+  // v4.10 (29/8): ESTRATEGIA NUEVA — ver justificación completa junto a
+  // detectEthMomentumBreakout() más arriba. Mismo patrón de filtro por
+  // símbolo que eth_vwap_scalp.
+  if (ETH_MOMENTUM_BREAKOUT_ENABLED && symbol === 'ETHUSD') {
+    const ethMom = safeRun('eth_momentum_breakout', detectEthMomentumBreakout, candles, htfCandles);
+    if (ethMom.bullish || ethMom.bearish) {
+      signals.push({
+        strategy: 'eth_momentum_breakout', label: 'ETH Momentum Breakout (ATR)',
+        direction: ethMom.bullish ? 'long' : 'short', entry: ethMom.entry, sl: ethMom.sl, tp1: ethMom.tp1, tp2: ethMom.tp2,
+        details: ethMom.details, independent: true
+      });
+    }
+  }
+
   // Score contextual (sección 13, 27/8: pasó de informativo a filtro real — a pedido
   // explícito del usuario. Antes solo se mostraba, no descartaba nada). Se calcula acá,
   // en un solo lugar, para las señales que efectivamente dispararon este ciclo, en vez
@@ -1399,6 +1497,7 @@ module.exports = {
   detectRsiDivergence,
   detectBollingerSqueeze,
   detectEthVwapScalp,
+  detectEthMomentumBreakout,
   calculateRSISeries,
   calculateMACDSeries,
   calculateSMASeries,
