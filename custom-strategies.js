@@ -135,8 +135,14 @@ function getNYTimeParts(ms) {
 }
 
 // ---------------------------------------------------------
-// Utilidades de tiempo (hora real de Londres, con DST automático)
+// Flags de estrategias por símbolo (ver uso en evaluateAll())
 // ---------------------------------------------------------
+// NOTA (limpieza, esta revisión): getLondonTimeParts() vivía acá y se
+// eliminó — quedó sin ningún llamador tras sacar las funciones de sesión
+// de Open Market NY (isLondonSession/isLondonNYOverlap/isNYOpenWindow, ver
+// nota más abajo). Todas las estrategias activas usan exclusivamente hora
+// de Nueva York (getNYTimeParts). Si se necesita hora de Londres de nuevo,
+// se reincorpora junto con lo que la use, no antes.
 
 // v4.9 (27/8): ver justificación completa junto al uso, en evaluateAll().
 // Debe coincidir manualmente con si 'eth_vwap_scalp' está en
@@ -148,44 +154,18 @@ const ETH_VWAP_SCALP_ENABLED = false;
 // engine.js:CONFIG.ENABLED_STRATEGIES — no hay lectura cruzada entre archivos.
 const ETH_MOMENTUM_BREAKOUT_ENABLED = true;
 
-function getLondonTimeParts(ms) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'Europe/London', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: 'numeric', minute: 'numeric', hour12: false
-  }).formatToParts(new Date(ms));
-  const get = t => parts.find(p => p.type === t).value;
-  return {
-    weekday: get('weekday'),
-    dateKey: `${get('year')}-${get('month')}-${get('day')}`,
-    hour: parseInt(get('hour'), 10) % 24,
-    minute: parseInt(get('minute'), 10)
-  };
-}
-
-// Ventanas de sesión estándar (hora de Londres). Definidas acá para que
-// las tres estrategias VWAP compartan el mismo criterio de sesión.
-//   - Londres: 08:00-16:30 hora de Londres.
-//   - Apertura NY: 13:30-16:00 hora de Londres (= 8:30-11:00 NY aprox, ya
-//     incluye el solape con Londres).
-//   - Solape Londres-NY: 13:00-16:00 hora de Londres.
-function isLondonSession(ms) {
-  const p = getLondonTimeParts(ms);
-  if (p.weekday === 'Sat' || p.weekday === 'Sun') return false;
-  const m = p.hour * 60 + p.minute;
-  return m >= 8 * 60 && m <= 16 * 60 + 30;
-}
-function isLondonNYOverlap(ms) {
-  const p = getLondonTimeParts(ms);
-  if (p.weekday === 'Sat' || p.weekday === 'Sun') return false;
-  const m = p.hour * 60 + p.minute;
-  return m >= 13 * 60 && m <= 16 * 60;
-}
-function isNYOpenWindow(ms) {
-  const p = getLondonTimeParts(ms);
-  if (p.weekday === 'Sat' || p.weekday === 'Sun') return false;
-  const m = p.hour * 60 + p.minute;
-  return m >= 13 * 60 + 30 && m <= 16 * 60;
-}
+// NOTA (limpieza, esta revisión): existían acá 3 funciones de ventana de
+// sesión (isLondonSession, isLondonNYOverlap, isNYOpenWindow) que definían
+// el concepto de "Open Market NY" (13:30-16:00 hora Londres = 8:30-11:00 NY
+// aprox., más amplio que el rango puntual 9:30-9:45 de Kill Zone). Quedaron
+// huérfanas desde que se sacaron eur_london_pullback_vwap y
+// xau_vwap_reversion (únicas que las usaban) — ninguna estrategia activa
+// las llamaba, y el nombre "ny_open_kill_zone" que tenía Kill Zone hacía
+// pensar que ya usaba esta ventana ampliada, cuando en realidad opera solo
+// con 9:30-9:45 (ver detectKillZoneNY). Se eliminó el código muerto en vez
+// de dejarlo "por las dudas": si se implementa una estrategia real de Open
+// Market NY, se define de cero, con su propio nombre y enganchada a
+// ENABLED_STRATEGIES — no reflotando funciones sin uso.
 
 // ---------------------------------------------------------
 // VWAP intradía con bandas de desvío estándar
@@ -279,6 +259,13 @@ function getH1Bias(htfCandles) {
 // ---------------------------------------------------------
 // ESTRATEGIA 1: KILL ZONE APERTURA DE NUEVA YORK (9:30 AM real)
 // ---------------------------------------------------------
+// v4.11 (30/8): función y key renombrados de detectNYOpenKillZone /
+// 'ny_open_kill_zone' a detectKillZoneNY / 'kill_zone_ny'. El nombre viejo
+// mezclaba "ny_open" (Open Market NY, ventana 8:30-11:00 NY) con
+// "kill_zone" (este método, vela única 9:30-9:45) en un solo identificador,
+// aunque el código SIEMPRE ejecutó solo los parámetros de Kill Zone — no
+// era un bug de lógica, era un nombre ambiguo. Ahora coincide 1:1 con
+// engine.js:CONFIG.ENABLED_STRATEGIES ('kill_zone_ny').
 // Implementación fiel al método de la infografía. Sin agregados propios
 // (nada de Silver Bullet, MACD, Order Blocks ni FVG acá):
 //   1. Vela de referencia: 9:30-9:45 hora de Nueva York (una sola, TF 15m,
@@ -297,7 +284,7 @@ function getH1Bias(htfCandles) {
 // Gestión de riesgo sugerida por la infografía (no está en el código,
 // es decisión de tamaño de posición): 0.5%-1% del capital por operación.
 
-function detectNYOpenKillZone(candles) {
+function detectKillZoneNY(candles) {
   const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, mode: null };
   if (!candles || candles.length < 5) return result;
 
@@ -1353,10 +1340,10 @@ const DEFAULT_MIN_CONFIDENCE_SCORE = 55;
 function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = null, newsContext = null, minConfidenceScore = null) {
   const signals = [];
 
-  const kz = safeRun('ny_open_kill_zone', detectNYOpenKillZone, candles);
+  const kz = safeRun('kill_zone_ny', detectKillZoneNY, candles);
   if (kz.bullish || kz.bearish) {
     signals.push({
-      strategy: 'ny_open_kill_zone', label: 'Kill Zone Apertura NY (9:30 AM)',
+      strategy: 'kill_zone_ny', label: 'Kill Zone Apertura NY (9:30 AM)',
       direction: kz.bullish ? 'long' : 'short', entry: kz.entry, sl: kz.sl, tp1: kz.tp1, tp2: kz.tp2,
       details: kz.details, independent: true
     });
@@ -1489,7 +1476,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
 module.exports = {
   evaluateAll,
   computeContextualScore,
-  detectNYOpenKillZone,
+  detectKillZoneNY,
   detectPivotsBreakoutReversal,
   detectPriceActionRsiEma,
   detectSupplyDemand,
@@ -1590,4 +1577,16 @@ module.exports = {
 //     evaluateAll() ahora recibe symbolStats como 5º parámetro nuevo
 //     (state.strategyStatsBySymbol[symbol], pasado desde engine.js) — cierra
 //     el pendiente que ya estaba anotado en el punto 8 de este changelog.
+// 11. [NAMING] (sesión 30/8) detectNYOpenKillZone -> detectKillZoneNY,
+//     key 'ny_open_kill_zone' -> 'kill_zone_ny' (coincide con
+//     ENABLED_STRATEGIES). El comportamiento no cambió: siempre ejecutó
+//     únicamente los parámetros de Kill Zone (vela 9:30-9:45 NY), el
+//     nombre viejo solo sugería que mezclaba Open Market NY.
+// 12. [LIMPIEZA] (sesión 30/8) Se eliminó código muerto: isLondonSession,
+//     isLondonNYOverlap, isNYOpenWindow y getLondonTimeParts. Definían la
+//     ventana de Open Market NY (8:30-11:00 NY aprox.) pero ninguna
+//     estrategia activa las llamaba desde que se sacaron
+//     eur_london_pullback_vwap y xau_vwap_reversion (punto 9). Si se
+//     implementa Open Market NY como estrategia real, se hace de cero con
+//     su propio nombre — no reflotando funciones huérfanas.
 // ============================================================
