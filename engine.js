@@ -101,7 +101,7 @@ const CONFIG = {
   SIGNAL_EXPIRATION_MS: 72 * 60 * 60 * 1000,
   SIGNAL_EXPIRATION_MS_BY_STRATEGY: {
     ema_cross_scalping: 4 * 60 * 60 * 1000,
-    ny_open_kill_zone: 4 * 60 * 60 * 1000
+    kill_zone_ny: 4 * 60 * 60 * 1000
   },
   // FIX (7.3, sesión 25/8, cierre): killZoneIntervalMs pasó de 60s a 4min. Con datos
   // reales de CONFIG (cupo twelveData 800/día, 3 llamadas por ciclo por símbolo
@@ -184,7 +184,7 @@ const CONFIG = {
   },
   // v4.6: LISTA BLANCA - Solo estas estrategias están permitidas para operar
   ENABLED_STRATEGIES: [
-    'ny_open_kill_zone',
+    'kill_zone_ny',
     'pivots_breakout_reversal',
     'bollinger_squeeze',
     'supply_demand',
@@ -351,20 +351,30 @@ let state = {
 
 function getNow() { return new Date(); }
 
-function isArgKillZoneWindow(nowMs = Date.now()) {
+// FIX (30/8): antes esta función calculaba la ventana en hora Argentina fija
+// (10:30-13:30 ARG), asumiendo un offset ARG=NY+1h que solo es correcto
+// mientras rige EDT (horario de verano de EE.UU., marzo-noviembre). Argentina
+// no tiene horario de verano, así que en temporada EST (noviembre-marzo) el
+// offset real pasa a ser 2h y la ventana se corría una hora, dejando de cubrir
+// bien 9:30-12:30 NY justo en esos meses. Mismo bug que ya se había corregido
+// en custom-strategies.js (ver getNYTimeParts) — acá se aplica el mismo
+// criterio: calcular directamente en America/New_York en vez de un offset fijo.
+// Renombrada de isArgKillZoneWindow a isKillZoneWindow porque ya no depende
+// de hora Argentina.
+function isKillZoneWindow(nowMs = Date.now()) {
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Argentina/Buenos_Aires', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false
+    timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false
   }).formatToParts(new Date(nowMs));
   const weekday = parts.find(p => p.type === 'weekday').value;
   if (weekday === 'Sat' || weekday === 'Sun') return false;
   const hour = parseInt(parts.find(p => p.type === 'hour').value, 10) % 24;
   const minute = parseInt(parts.find(p => p.type === 'minute').value, 10);
   const minutesNow = hour * 60 + minute;
-  return minutesNow >= (10 * 60 + 30) && minutesNow < (13 * 60 + 30);
+  return minutesNow >= (9 * 60 + 30) && minutesNow < (12 * 60 + 30);
 }
 
 function getDynamicRefreshIntervalMs() {
-  return isArgKillZoneWindow() ? CONFIG.DYNAMIC_REFRESH.killZoneIntervalMs : CONFIG.DYNAMIC_REFRESH.normalIntervalMs;
+  return isKillZoneWindow() ? CONFIG.DYNAMIC_REFRESH.killZoneIntervalMs : CONFIG.DYNAMIC_REFRESH.normalIntervalMs;
 }
 
 function saveAutoTuneState() {
@@ -1743,7 +1753,7 @@ async function refreshAsset(symbol, forceRefresh = false) {
       // dentro de ±60min, si lo hay. Uso exclusivo de computeContextualScore(): ajusta
       // el mismo score informativo que ya existe, no agrega campos nuevos a la señal
       // ni se muestra en la UI (decisión explícita de Soy).
-       const newsContext = await NewsCalendar.getNearbyHighImpact('USD', 60);
+      const newsContext = await NewsCalendar.getNearbyHighImpact('USD', 60);
       const rawSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles, state.strategyStatsBySymbol[symbol] || null, newsContext, CONFIG.MIN_CONFIDENCE_SCORE);
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
       const filteredSignals = rawSignals.filter(sig => {
@@ -1842,7 +1852,7 @@ async function autoRefreshTick() {
     console.warn('autoRefreshTick: error en refreshAllData', e.message);
   } finally {
     const delay = getDynamicRefreshIntervalMs();
-    addLog('scheduler', `Próximo refresco en ${Math.round(delay / 1000)}s (${isArgKillZoneWindow() ? 'Kill Zone NY activa' : 'horario normal'})`, 'ALL');
+    addLog('scheduler', `Próximo refresco en ${Math.round(delay / 1000)}s (${isKillZoneWindow() ? 'Kill Zone NY activa' : 'horario normal'})`, 'ALL');
     autoRefreshTimer = setTimeout(autoRefreshTick, delay);
   }
 }
@@ -1858,6 +1868,6 @@ function stopAutoRefreshLoop() {
 
 module.exports = {
   state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
-  startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isArgKillZoneWindow,
+  startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isKillZoneWindow,
   startCryptoQuickCheckLoop, stopCryptoQuickCheckLoop
 };
