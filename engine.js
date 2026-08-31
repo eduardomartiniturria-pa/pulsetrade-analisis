@@ -141,6 +141,22 @@ const CONFIG = {
     EURUSD: 1.5,  // pipSize 0.0001 -> ~1.5 pips
     XAUUSD: 3.5   // pipSize 0.1 -> ~0.35 en precio
   },
+  // NUEVO (30/8): checkHistoryOutcomes marca "win" apenas la mecha (high/low) de
+  // una vela del proveedor de datos (Twelve Data/FMP/AlphaVantage) toca TP1/TP2.
+  // Caso real detectado: XAUUSD marcó "win" en la app sin que el broker del
+  // usuario (Exness) mostrara ese mismo mínimo — cada feed tiene su propia mecha,
+  // sobre todo en Oro. Este buffer exige que el precio vaya ESE TANTO MÁS ALLÁ del
+  // TP (en pips, mismas unidades que ESTIMATED_SPREAD_PIPS_BY_SYMBOL) antes de
+  // confirmar el toque — un margen de tolerancia a la diferencia entre feeds, no
+  // una garantía de que va a coincidir siempre con Exness. Por ahora solo XAUUSD
+  // (activo donde se reportó el caso); los demás símbolos quedan en 0 (sin
+  // cambio de comportamiento) hasta que haya evidencia de que lo necesitan.
+  TP_CONFIRMATION_BUFFER_PIPS_BY_SYMBOL: {
+    BTCUSD: 0,
+    ETHUSD: 0,
+    EURUSD: 0,
+    XAUUSD: 15  // pipSize 0.1 -> 1.5 en precio
+  },
   HTF_MAP: { '5m': '1h', '15m': '1h' },
   AUTO_TUNE: {
     minSampleSize: 10,
@@ -1438,12 +1454,23 @@ function seedStrategyStatsFromBacktest(resultsBySymbol) {
 function checkHistoryOutcomes(symbol, currentPrice, candles) {
   let changed = false;
   const resolvedEntries = [];
+  // NUEVO (30/8): ver TP_CONFIRMATION_BUFFER_PIPS_BY_SYMBOL en CONFIG — exige que
+  // el precio vaya este tanto más allá de TP1/TP2 antes de confirmar el toque,
+  // para amortiguar diferencias de mecha entre el feed de datos y el broker real
+  // del usuario (Exness). No toca la lógica de SL: el objetivo es reducir falsos
+  // "win", no ocultar pérdidas reales.
+  const asset = ASSETS[symbol];
+  const pipSize = (asset && asset.pipSize) || 1;
+  const bufferPips = (CONFIG.TP_CONFIRMATION_BUFFER_PIPS_BY_SYMBOL && CONFIG.TP_CONFIRMATION_BUFFER_PIPS_BY_SYMBOL[symbol]) || 0;
+  const tpBuffer = bufferPips * pipSize;
   state.signalHistory.forEach(h => {
     if (h.symbol !== symbol || h.result !== 'pending') return;
     const isLong = h.type === 'long';
     const hasTp2 = h.tp2 != null;
     const rTP1 = (h.tp1Pips && h.slPips) ? +(h.tp1Pips / h.slPips).toFixed(2) : 2;
     const rTP2 = (hasTp2 && h.tp2Pips && h.slPips) ? +(h.tp2Pips / h.slPips).toFixed(2) : null;
+    const tp1Level = isLong ? h.tp1 + tpBuffer : h.tp1 - tpBuffer;
+    const tp2Level = hasTp2 ? (isLong ? h.tp2 + tpBuffer : h.tp2 - tpBuffer) : null;
     let outcome = null;
     let rHit = rTP1;
     let tp1AlreadyHit = false;
@@ -1461,8 +1488,8 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
     if (relevantCandles.length) {
       for (const c of relevantCandles) {
         const hitSL = isLong ? c.low <= h.sl : c.high >= h.sl;
-        const hitTP1 = isLong ? c.high >= h.tp1 : c.low <= h.tp1;
-        const hitTP2 = hasTp2 && (isLong ? c.high >= h.tp2 : c.low <= h.tp2);
+        const hitTP1 = isLong ? c.high >= tp1Level : c.low <= tp1Level;
+        const hitTP2 = hasTp2 && (isLong ? c.high >= tp2Level : c.low <= tp2Level);
         if (hitSL) { outcome = 'loss'; rHit = -1; break; }
         if (hasTp2) {
           if (hitTP2) { outcome = 'win'; rHit = rTP2; break; }
@@ -1476,13 +1503,13 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
       if (isLong && currentPrice <= h.sl) { outcome = 'loss'; rHit = -1; }
       else if (!isLong && currentPrice >= h.sl) { outcome = 'loss'; rHit = -1; }
       else if (hasTp2) {
-        if (isLong && currentPrice >= h.tp2) { outcome = 'win'; rHit = rTP2; }
-        else if (!isLong && currentPrice <= h.tp2) { outcome = 'win'; rHit = rTP2; }
-        else if (isLong && currentPrice >= h.tp1) { tp1AlreadyHit = true; }
-        else if (!isLong && currentPrice <= h.tp1) { tp1AlreadyHit = true; }
+        if (isLong && currentPrice >= tp2Level) { outcome = 'win'; rHit = rTP2; }
+        else if (!isLong && currentPrice <= tp2Level) { outcome = 'win'; rHit = rTP2; }
+        else if (isLong && currentPrice >= tp1Level) { tp1AlreadyHit = true; }
+        else if (!isLong && currentPrice <= tp1Level) { tp1AlreadyHit = true; }
       } else {
-        if (isLong && currentPrice >= h.tp1) { outcome = 'win'; rHit = rTP1; }
-        else if (!isLong && currentPrice <= h.tp1) { outcome = 'win'; rHit = rTP1; }
+        if (isLong && currentPrice >= tp1Level) { outcome = 'win'; rHit = rTP1; }
+        else if (!isLong && currentPrice <= tp1Level) { outcome = 'win'; rHit = rTP1; }
       }
     }
     const expirationMs = (CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY && CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY[h.source]) || CONFIG.SIGNAL_EXPIRATION_MS;
@@ -1503,6 +1530,23 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
       const spreadPips = CONFIG.ESTIMATED_SPREAD_PIPS_BY_SYMBOL[symbol] || 0;
       const spreadCostR = h.slPips ? spreadPips / h.slPips : 0;
       h.result = outcome; h.grossRMultiple = rHit; h.rMultiple = +(rHit - spreadCostR).toFixed(2); changed = true; resolvedEntries.push(h);
+      // FIX (30/8): esta función resuelve el historial mirando la mecha (high/low)
+      // de las velas del proveedor de datos, pero el widget en vivo
+      // (activeCustomSignals / evaluateCustomSignalOutcome) solo mira quote.last
+      // (el tick actual) y nunca se enteraba de esta resolución. Resultado real
+      // detectado: una señal quedaba "win" en signalHistory mientras el widget en
+      // vivo la seguía mostrando "abierta, sin tocar TP1" — dos estados
+      // contradictorios para el mismo id. Se sincroniza acá: si hay una entrada
+      // activa para este symbol+estrategia con el mismo timestamp (mismo id de
+      // señal), se da de baja también del tracker en vivo.
+      if (h.strategyKeys && h.strategyKeys[0]) {
+        const liveKey = `${h.symbol}_${h.strategyKeys[0]}`;
+        const activeEntry = state.activeCustomSignals[liveKey];
+        if (activeEntry && activeEntry.timestamp === h.timestamp) {
+          delete state.activeCustomSignals[liveKey];
+          try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
+        }
+      }
     }
   });
   if (changed) {
@@ -1687,73 +1731,7 @@ function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
   // (ny_open_kill_zone, bollinger_squeeze), el "cierre" que determina si la señal
   // sigue activa ahora es hasTp2 ? hitTP2 : hitTP1 — TP1 solo actualiza el badge
   // (frozen.tp1HitAt, sin cambios) pero ya no da de baja la señal por sí solo.
-  const hasTp2 = frozen.tp2 != null;
-  const hitFinalTarget = hasTp2 ? hitTP2 : hitTP1;
-  const isExpired = !hitSL && !hitFinalTarget && ageMs > expirationMs;
-  const shouldClose = hitSL || hitFinalTarget || isExpired;
-  if (shouldClose) {
-    delete state.activeCustomSignals[key];
-    try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
-    state.pendingCustomDisplayReset = state.pendingCustomDisplayReset || {};
-    state.pendingCustomDisplayReset[key] = true;
-  }
-  return { type: frozen.type, frozen, currentPrice: quote.last, hitTP: hitTP1, hitTP1, hitTP2, hitSL };
-}
-
-function refreshActiveCustomSignalsDisplay(symbol, quote, skipStrategies = new Set()) {
-  if (state.pendingCustomDisplayReset) {
-    Object.keys(state.pendingCustomDisplayReset).forEach(pendingKey => {
-      if (!pendingKey.startsWith(symbol + '_')) return;
-      const stratKey = pendingKey.slice(symbol.length + 1);
-      if (state.lastCustomDisplay[symbol]) state.lastCustomDisplay[symbol][stratKey] = { type: 'no-signal' };
-      delete state.pendingCustomDisplayReset[pendingKey];
-    });
-  }
-  Object.keys(state.activeCustomSignals).forEach(key => {
-    if (!key.startsWith(symbol + '_')) return;
-    const frozen = state.activeCustomSignals[key];
-    if (!frozen) return;
-    if (skipStrategies.has(frozen.strategyKeys[0])) return;
-    const display = evaluateCustomSignalOutcome(symbol, key, quote, frozen);
-    renderCustomSignal(symbol, frozen.strategyKeys[0], display);
-  });
-}
-
-async function refreshAsset(symbol, forceRefresh = false) {
-  const asset = ASSETS[symbol];
-  renderMarketBanner(symbol); renderAssetHoursPill(symbol); renderApiError(symbol, null);
-  if (!isMarketOpenForAsset(symbol)) { renderSignal(symbol, { type: 'market-closed' }); return; }
-  try {
-    const [quote, ohlcv] = await Promise.all([
-      MarketDataProvider.getQuote(symbol, forceRefresh),
-      MarketDataProvider.getOHLCV(symbol, state.currentTF, 100, forceRefresh).catch(() => (state.klineHistory[symbol] && state.klineHistory[symbol][state.currentTF]) || new OHLCVData([]))
-    ]);
-    updatePriceUI(symbol, quote, asset);
-    const htfTF = CONFIG.HTF_MAP[state.currentTF] || null;
-    let htfCandles = null;
-    if (htfTF) {
-      try { const htfOhlcv = await MarketDataProvider.getOHLCV(symbol, htfTF, 60, forceRefresh); htfCandles = htfOhlcv.candles; }
-      catch (e) { htfCandles = null; }
-    }
-    // FIX (7.2, sesión 25/8): antes la única forma de saber cuántas velas HTF llegan
-    // realmente en producción era buscar a mano en los logs de Render — y en más de un
-    // intento no se encontró nada (Punto D, sesiones previas). Ahora queda guardado en
-    // state, expuesto por /api/state (campo htfDiagnostics), consultable en cualquier
-    // momento sin depender de que el log siga vivo en la ventana de retención de Render.
-    state.htfDiagnostics = state.htfDiagnostics || {};
-    state.htfDiagnostics[symbol] = { tf: htfTF, count: htfCandles ? htfCandles.length : 0, at: Date.now() };
-    checkHistoryOutcomes(symbol, quote.last, ohlcv.candles);
-    
-    try {
-      // v4.7.3 (Etapa 3 — scoring contextual): se pasa el historial reciente
-      // símbolo+estrategia como symbolStats, 5º parámetro nuevo de evaluateAll().
-      // Cierra el pendiente ya anotado en el changelog de custom-strategies.js
-      // (punto 8): la función es pura, no tiene acceso directo a Supabase/state.
-      // v4.8: se agrega newsContext (6º parámetro) — evento de alto impacto en USD
-      // dentro de ±60min, si lo hay. Uso exclusivo de computeContextualScore(): ajusta
-      // el mismo score informativo que ya existe, no agrega campos nuevos a la señal
-      // ni se muestra en la UI (decisión explícita de Soy).
-      const newsContext = await NewsCalendar.getNearbyHighImpact('USD', 60);
+  const newsContext = await NewsCalendar.getNearbyHighImpact('USD', 60);
       const rawSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles, state.strategyStatsBySymbol[symbol] || null, newsContext, CONFIG.MIN_CONFIDENCE_SCORE);
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
       const filteredSignals = rawSignals.filter(sig => {
