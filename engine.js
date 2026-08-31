@@ -1645,8 +1645,33 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
   const lastAt = state.lastCustomSignalAt[key] || 0;
   const cooldownRemainingMs = CONFIG.SIGNAL_COOLDOWN_MS - (Date.now() - lastAt);
   const inCooldown = isNewDirection && cooldownRemainingMs > 0;
-  
-  if (isNewDirection && !inCooldown) {
+
+  // FIX (31/8): CONFIG.AUTO_TUNE calcula state.autoConfidenceThreshold[symbol] hace
+  // rato (sube hasta 90 si a la estrategia le viene yendo mal, baja hasta 65 si le
+  // viene yendo bien) pero nunca se leía en ningún lado — se calculaba y quedaba
+  // guardado sin frenar nada. Confirmado con las estadísticas reales (semana 24-30/8:
+  // Kill Zone Apertura NY cayó de 66.7% a 11.8% winrate operando igual de seguido, sin
+  // que nada la frenara). Acá se conecta: una señal detectada con confianza por debajo
+  // del umbral adaptativo de su símbolo ya NO se cuenta como operación real — no se
+  // guarda en signalHistory, no se trackea en activeCustomSignals, no dispara
+  // notificación push. Sigue siendo visible (se manda a renderCustomSignal) para que no
+  // desaparezca de la pantalla, pero marcada como informativa (belowConfidenceThreshold)
+  // para diferenciarla de una operación tomada de verdad.
+  const confidenceThreshold = state.autoConfidenceThreshold[symbol] || CONFIG.CONFIDENCE_THRESHOLD;
+  const meetsConfidenceThreshold = customSig.confidence == null || customSig.confidence >= confidenceThreshold;
+
+  let belowThresholdDisplay = null;
+  if (isNewDirection && !inCooldown && !meetsConfidenceThreshold) {
+    belowThresholdDisplay = {
+      type: customSig.direction, symbol, belowConfidenceThreshold: true,
+      confidence: customSig.confidence, confidenceThreshold,
+      strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
+      detectedAt: Date.now()
+    };
+    addLog(quote.source, `[${customSig.label}] señal ${customSig.direction === 'long' ? 'LONG' : 'SHORT'} detectada pero confianza ${customSig.confidence}% < umbral ${confidenceThreshold}% — no se opera`, symbol);
+  }
+
+  if (isNewDirection && !inCooldown && meetsConfidenceThreshold) {
     let entry = customSig.entry || quote.last;
     let sl = customSig.sl;
     let tp1 = customSig.tp1;
@@ -1712,7 +1737,7 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     notifyNewSignal(frozen);
   }
   const frozen = state.activeCustomSignals[key];
-  if (!frozen) return null;
+  if (!frozen) return belowThresholdDisplay;
   return evaluateCustomSignalOutcome(symbol, key, quote, frozen);
 }
 
@@ -1731,7 +1756,73 @@ function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
   // (ny_open_kill_zone, bollinger_squeeze), el "cierre" que determina si la señal
   // sigue activa ahora es hasTp2 ? hitTP2 : hitTP1 — TP1 solo actualiza el badge
   // (frozen.tp1HitAt, sin cambios) pero ya no da de baja la señal por sí solo.
-  const newsContext = await NewsCalendar.getNearbyHighImpact('USD', 60);
+  const hasTp2 = frozen.tp2 != null;
+  const hitFinalTarget = hasTp2 ? hitTP2 : hitTP1;
+  const isExpired = !hitSL && !hitFinalTarget && ageMs > expirationMs;
+  const shouldClose = hitSL || hitFinalTarget || isExpired;
+  if (shouldClose) {
+    delete state.activeCustomSignals[key];
+    try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
+    state.pendingCustomDisplayReset = state.pendingCustomDisplayReset || {};
+    state.pendingCustomDisplayReset[key] = true;
+  }
+  return { type: frozen.type, frozen, currentPrice: quote.last, hitTP: hitTP1, hitTP1, hitTP2, hitSL };
+}
+
+function refreshActiveCustomSignalsDisplay(symbol, quote, skipStrategies = new Set()) {
+  if (state.pendingCustomDisplayReset) {
+    Object.keys(state.pendingCustomDisplayReset).forEach(pendingKey => {
+      if (!pendingKey.startsWith(symbol + '_')) return;
+      const stratKey = pendingKey.slice(symbol.length + 1);
+      if (state.lastCustomDisplay[symbol]) state.lastCustomDisplay[symbol][stratKey] = { type: 'no-signal' };
+      delete state.pendingCustomDisplayReset[pendingKey];
+    });
+  }
+  Object.keys(state.activeCustomSignals).forEach(key => {
+    if (!key.startsWith(symbol + '_')) return;
+    const frozen = state.activeCustomSignals[key];
+    if (!frozen) return;
+    if (skipStrategies.has(frozen.strategyKeys[0])) return;
+    const display = evaluateCustomSignalOutcome(symbol, key, quote, frozen);
+    renderCustomSignal(symbol, frozen.strategyKeys[0], display);
+  });
+}
+
+async function refreshAsset(symbol, forceRefresh = false) {
+  const asset = ASSETS[symbol];
+  renderMarketBanner(symbol); renderAssetHoursPill(symbol); renderApiError(symbol, null);
+  if (!isMarketOpenForAsset(symbol)) { renderSignal(symbol, { type: 'market-closed' }); return; }
+  try {
+    const [quote, ohlcv] = await Promise.all([
+      MarketDataProvider.getQuote(symbol, forceRefresh),
+      MarketDataProvider.getOHLCV(symbol, state.currentTF, 100, forceRefresh).catch(() => (state.klineHistory[symbol] && state.klineHistory[symbol][state.currentTF]) || new OHLCVData([]))
+    ]);
+    updatePriceUI(symbol, quote, asset);
+    const htfTF = CONFIG.HTF_MAP[state.currentTF] || null;
+    let htfCandles = null;
+    if (htfTF) {
+      try { const htfOhlcv = await MarketDataProvider.getOHLCV(symbol, htfTF, 60, forceRefresh); htfCandles = htfOhlcv.candles; }
+      catch (e) { htfCandles = null; }
+    }
+    // FIX (7.2, sesión 25/8): antes la única forma de saber cuántas velas HTF llegan
+    // realmente en producción era buscar a mano en los logs de Render — y en más de un
+    // intento no se encontró nada (Punto D, sesiones previas). Ahora queda guardado en
+    // state, expuesto por /api/state (campo htfDiagnostics), consultable en cualquier
+    // momento sin depender de que el log siga vivo en la ventana de retención de Render.
+    state.htfDiagnostics = state.htfDiagnostics || {};
+    state.htfDiagnostics[symbol] = { tf: htfTF, count: htfCandles ? htfCandles.length : 0, at: Date.now() };
+    checkHistoryOutcomes(symbol, quote.last, ohlcv.candles);
+    
+    try {
+      // v4.7.3 (Etapa 3 — scoring contextual): se pasa el historial reciente
+      // símbolo+estrategia como symbolStats, 5º parámetro nuevo de evaluateAll().
+      // Cierra el pendiente ya anotado en el changelog de custom-strategies.js
+      // (punto 8): la función es pura, no tiene acceso directo a Supabase/state.
+      // v4.8: se agrega newsContext (6º parámetro) — evento de alto impacto en USD
+      // dentro de ±60min, si lo hay. Uso exclusivo de computeContextualScore(): ajusta
+      // el mismo score informativo que ya existe, no agrega campos nuevos a la señal
+      // ni se muestra en la UI (decisión explícita de Soy).
+       const newsContext = await NewsCalendar.getNearbyHighImpact('USD', 60);
       const rawSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles, state.strategyStatsBySymbol[symbol] || null, newsContext, CONFIG.MIN_CONFIDENCE_SCORE);
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
       const filteredSignals = rawSignals.filter(sig => {
@@ -1751,7 +1842,7 @@ function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
         const customDisplay = resolveCustomSignal(symbol, quote, sig, asset);
         renderCustomSignal(symbol, sig.strategy, customDisplay);
         firedThisCycle.add(sig.strategy);
-        if (customDisplay) {
+        if (customDisplay && !customDisplay.belowConfidenceThreshold) {
           addLog(quote.source, `[${sig.label}] señal ${sig.direction === 'long' ? 'LONG' : 'SHORT'} independiente`, symbol);
         }
       });
