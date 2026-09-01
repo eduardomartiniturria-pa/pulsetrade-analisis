@@ -365,6 +365,25 @@ let state = {
   });
 })();
 
+// FIX (1/9): state.autoConfidenceThreshold se calculaba en runAutoTune() desde hace
+// tiempo pero nunca se leía en ningún lado (ver FIX 31/8 en resolveCustomSignal, que
+// recién lo conectó). Mientras estuvo desconectado, escaló sin ningún control hasta
+// CONFIG.AUTO_TUNE.maxThreshold (90) en los 4 símbolos a la vez — un valor que nunca
+// fue validado contra operaciones reales, se acumuló en el vacío. No representa una
+// decisión informada del sistema operando: es ruido de un gate que corrió ciego.
+// Reset único a CONFIG.CONFIDENCE_THRESHOLD (70) la primera vez que corre este código
+// tras el deploy — no toca autoTuneStats (winRate/expectancy siguen siendo datos
+// válidos, no se pierden), solo el umbral. Se marca con una key de una sola vez para
+// no resetear en cada redeploy futuro y dejar que vuelva a evolucionar desde acá con
+// el gate ya realmente conectado.
+if (!localStorage.getItem('pt_threshold_reset_v1')) {
+  const resetThreshold = {};
+  Object.keys(ASSETS).forEach(sym => { resetThreshold[sym] = CONFIG.CONFIDENCE_THRESHOLD; });
+  state.autoConfidenceThreshold = resetThreshold;
+  localStorage.setItem('pt_auto_threshold_v2', JSON.stringify(resetThreshold));
+  localStorage.setItem('pt_threshold_reset_v1', 'true');
+}
+
 function getNow() { return new Date(); }
 
 // FIX (30/8): antes esta función calculaba la ventana en hora Argentina fija
