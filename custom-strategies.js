@@ -1282,13 +1282,33 @@ function computeContextualScore({ direction, entry, sl, tp1, candles, htfCandles
     }
   }
 
+  // FIX (1/9): antes el factor de historial usaba un corte binario (total >= 5) sin
+  // ponderar por tamaño de muestra — con 5-6 operaciones cerradas ya aplicaba el
+  // castigo/bonus completo (+10/-15), tratando un winrate estadísticamente poco
+  // confiable (con n=6 el intervalo de confianza real ronda 10%-65%) como si fuera
+  // certeza. Esto generaba una espiral: historial malo (aún con muestra chica) -> score
+  // bajo -> la estrategia no vuelve a operar -> nunca junta más muestra -> queda
+  // castigada indefinidamente. Corregido reusando el mismo shrinkage bayesiano que ya
+  // usa runAutoTune() en engine.js (mismo K=15, mismo criterio en todo el motor en vez
+  // de dos lógicas distintas para el mismo problema): el peso escala de forma gradual
+  // con el tamaño de muestra en vez de un corte de golpe, y el mínimo para que el
+  // factor participe sube de 5 a 10 (alineado con CONFIG.AUTO_TUNE.minSampleSize).
   if (symbolStats && strategyKey && symbolStats[strategyKey]) {
     const s = symbolStats[strategyKey];
     const total = (s.wins || 0) + (s.losses || 0);
-    if (total >= 5) {
+    if (total >= 10) {
       const wr = s.wins / total;
-      if (wr >= 0.55) { score += 10; details.push(`Score: historial reciente favorable (${s.wins}G/${s.losses}P)`); }
-      else if (wr <= 0.35) { score -= 15; details.push(`Score: historial reciente desfavorable (${s.wins}G/${s.losses}P)`); }
+      const shrinkageK = 15;
+      const sampleWeight = total / (total + shrinkageK);
+      if (wr >= 0.55) {
+        const bonus = Math.round(10 * sampleWeight);
+        score += bonus;
+        details.push(`Score: historial reciente favorable (${s.wins}G/${s.losses}P, peso muestra ${sampleWeight.toFixed(2)})`);
+      } else if (wr <= 0.35) {
+        const penalty = Math.round(15 * sampleWeight);
+        score -= penalty;
+        details.push(`Score: historial reciente desfavorable (${s.wins}G/${s.losses}P, peso muestra ${sampleWeight.toFixed(2)})`);
+      }
     }
   }
 
