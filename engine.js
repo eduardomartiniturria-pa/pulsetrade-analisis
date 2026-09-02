@@ -585,35 +585,53 @@ const NewsCalendar = {
   // Confirmado en logs de producción del 27/8 (ráfagas de 4 fallos en <30s por ciclo).
   // AJUSTE (28/8): subido de 10min a 8h. El fix del 27/8 solo bajó la frecuencia de
   // reintentos, no resolvió el 429 — faireconomy.media rechaza de forma sostenida la
-  // IP de Render (0 llamadas exitosas en 4hs de logs revisados). No hay alternativa
-  // gratis confiable a la vista, así que esto no "arregla" el feed: solo corta el
-  // ruido en el log de reintentos que igual iban a seguir fallando. El ajuste de
-  // score por noticias sigue sin aplicarse. Si en algún momento se paga un feed
-  // (FMP Starter, Finnhub paga, Trading Economics), este valor debería bajar de nuevo.
-  BACKOFF_MS: 8 * 60 * 60 * 1000,
+  // IP de Render (0 llamadas exitosas en 4hs de logs revisados).
+  // FIX (2/9): el bloqueo era específicamente a la IP de Render, no al feed en sí.
+  // Se agrega un proxy público (allorigins) como primer intento: el pedido sale con
+  // otra IP y evita el 429 sin costo. Si el proxy también falla, se reintenta directo
+  // como respaldo (por si algún día se levanta el bloqueo o el proxy está caído).
+  // Con esto activo, el fallo pasa a ser más esporádico que sostenido — se baja el
+  // backoff de 8h a 30min (igual al CACHE_MS) para no tardar tanto en recuperarse de
+  // un corte transitorio del proxy. Si vuelve a fallar de forma sostenida, revisar
+  // logs antes de subirlo de nuevo — no asumir que es el mismo bloqueo de antes.
+  PROXY_URL: 'https://api.allorigins.win/raw?url=',
+  BACKOFF_MS: 30 * 60 * 1000,
   _cache: null,
   _cacheAt: 0,
+
+  async _fetchJson(url) {
+    const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PulseTradePRO/1.0; +https://pulsetrade-analisis.onrender.com)' }
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!Array.isArray(data)) throw new Error('Respuesta inesperada del calendario económico');
+    return data;
+  },
 
   async getEvents() {
     if (this._cache && (Date.now() - this._cacheAt) < this.CACHE_MS) return this._cache;
     try {
-      const res = await fetchWithTimeout(this.FEED_URL, CONFIG.REQUEST_TIMEOUT, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PulseTradePRO/1.0; +https://pulsetrade-analisis.onrender.com)' }
-      });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      if (!Array.isArray(data)) throw new Error('Respuesta inesperada del calendario económico');
+      const data = await this._fetchJson(this.PROXY_URL + encodeURIComponent(this.FEED_URL));
       this._cache = data;
       this._cacheAt = Date.now();
       return data;
-    } catch (error) {
-      console.warn('[NewsCalendar] fallo al traer calendario económico:', error.message);
-      // Si falla, se sigue usando el cache viejo si existe (mejor un calendario un poco
-      // desactualizado que dejar de scorear por completo), o array vacío si nunca hubo éxito.
-      // FIX: se marca _cacheAt igual en el fallo, con un backoff corto (10min) en vez de
-      // dejarlo "vencido" — esto corta el bucle de reintentos inmediatos que generaba el 429.
-      this._cacheAt = Date.now() - this.CACHE_MS + this.BACKOFF_MS;
-      return this._cache || [];
+    } catch (proxyError) {
+      console.warn('[NewsCalendar] fallo vía proxy, reintentando directo:', proxyError.message);
+      try {
+        const data = await this._fetchJson(this.FEED_URL);
+        this._cache = data;
+        this._cacheAt = Date.now();
+        return data;
+      } catch (directError) {
+        console.warn('[NewsCalendar] fallo al traer calendario económico (proxy y directo):', directError.message);
+        // Si falla, se sigue usando el cache viejo si existe (mejor un calendario un poco
+        // desactualizado que dejar de scorear por completo), o array vacío si nunca hubo éxito.
+        // Se marca _cacheAt igual en el fallo, con backoff, para no reintentar de inmediato
+        // y evitar ráfagas (ver FIX 27/8 más arriba).
+        this._cacheAt = Date.now() - this.CACHE_MS + this.BACKOFF_MS;
+        return this._cache || [];
+      }
     }
   },
 
@@ -1699,7 +1717,7 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     // --- NUEVO v4.6.2: Ajuste de holgura para XAUUSD (Oro) ---
     // El oro sufre muchas mechas que barren stops fijos. Ampliamos el SL un 50% 
     // y recalculamos los TPs para mantener el mismo ratio Riesgo:Beneficio (RR) original.
-    if (symbol === 'XAUUSD' && sl !== null && tp1 !== null) {
+        if (symbol === 'XAUUSD' && sl !== null && tp1 !== null) {
       const risk = Math.abs(entry - sl);
       const reward1 = Math.abs(tp1 - entry);
       const originalRR1 = risk > 0 ? (reward1 / risk) : 2; 
