@@ -257,6 +257,120 @@ function getH1Bias(htfCandles) {
 }
 
 // ---------------------------------------------------------
+// ESTRATEGIA NUEVA: SESSION BREAKOUT + VWAP REVERSION (EURUSD / XAUUSD)
+// ---------------------------------------------------------
+// Origen: estrategia armada por el usuario (Soy) a partir de una charla con
+// otro asistente externo, organizada y adaptada acá al patrón del archivo —
+// no es una recomendación propia de PulseTrade.
+// NOTA HISTÓRICA IMPORTANTE: existieron antes eur_london_pullback_vwap y
+// xau_vwap_reversion (ver notas arriba, cerca de getNYTimeParts), eliminadas
+// como código muerto porque nada las llamaba — no por mal rendimiento
+// documentado. Esta es una implementación nueva, con nombre propio
+// (session_breakout_vwap), no una reactivación de aquellas.
+// Símbolos: solo EURUSD y XAUUSD (filtro por símbolo en evaluateAll, mismo
+// patrón que eth_vwap_scalp/eth_momentum_breakout).
+// Ventanas horarias fijas en hora de Córdoba, Argentina (UTC-3, sin horario
+// de verano): 05:00-08:00 y 10:00-13:00. Fuera de esas ventanas, sin señal.
+// Dos modos, se evalúan en orden (A tiene prioridad si dispara ese ciclo):
+//   A) Breakout de rango de sesión: rompe el rango de las ~2.5h previas
+//      (10 velas M15) con cierre a favor del VWAP del día.
+//   B) Reversión a VWAP: RSI en extremo (<30 / >70) + vela de rechazo,
+//      apuntando de vuelta al VWAP como objetivo (no un múltiplo fijo de R).
+// LIMITACIÓN CONOCIDA (ver calculateVWAPSeries más arriba): EURUSD/XAUUSD no
+// tienen volumen real confiable según el proveedor activo -> el VWAP acá cae
+// al fallback de precio típico promedio, no es VWAP ponderado por volumen
+// real de mercado. Sigue siendo útil como referencia de nivel medio del día,
+// pero no es VWAP institucional puro.
+// FLAG MANUAL: debe coincidir con si 'session_breakout_vwap' está en
+// engine.js:CONFIG.ENABLED_STRATEGIES — no hay lectura cruzada entre
+// archivos. Arranca en false (dormant) hasta validar en demo.
+const SESSION_BREAKOUT_VWAP_ENABLED = true;
+
+function getCordobaTimeParts(ms) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Argentina/Cordoba', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: 'numeric', minute: 'numeric', hour12: false
+  }).formatToParts(new Date(ms));
+  const get = t => parts.find(p => p.type === t).value;
+  return {
+    weekday: get('weekday'),
+    dateKey: `${get('year')}-${get('month')}-${get('day')}`,
+    hour: parseInt(get('hour'), 10) % 24,
+    minute: parseInt(get('minute'), 10)
+  };
+}
+
+function isCordobaSessionWindow(parts) {
+  const m = parts.hour * 60 + parts.minute;
+  const inWindow1 = m >= (5 * 60) && m < (8 * 60);   // 05:00-08:00
+  const inWindow2 = m >= (10 * 60) && m < (13 * 60); // 10:00-13:00
+  return inWindow1 || inWindow2;
+}
+
+function detectSessionBreakoutVwap(candles) {
+  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, mode: null };
+  if (!candles || candles.length < 30) return result;
+
+  const last = candles[candles.length - 1];
+  const lastCB = getCordobaTimeParts(last.time);
+  if (lastCB.weekday === 'Sat' || lastCB.weekday === 'Sun') return result;
+  if (!isCordobaSessionWindow(lastCB)) return result;
+
+  const { vwap } = calculateVWAPSeries(candles);
+  const lastVwap = vwap[vwap.length - 1];
+  if (lastVwap == null) return result;
+
+  // --- Modo A: breakout del rango de sesión (~2.5h previas, 10 velas M15) ---
+  const rangeLookback = 10;
+  const rangeCandles = candles.slice(-1 - rangeLookback, -1);
+  if (rangeCandles.length >= 6) {
+    const rangeHigh = Math.max(...rangeCandles.map(c => c.high));
+    const rangeLow = Math.min(...rangeCandles.map(c => c.low));
+    const entry = last.close;
+    if (last.close > rangeHigh && last.close > lastVwap) {
+      result.bullish = true; result.entry = entry; result.sl = rangeLow; result.mode = 'breakout';
+      result.details.push(`Ruptura alcista del rango de sesión (${rangeLow.toFixed(5)}-${rangeHigh.toFixed(5)}), precio sobre VWAP (${lastVwap.toFixed(5)})`);
+    } else if (last.close < rangeLow && last.close < lastVwap) {
+      result.bearish = true; result.entry = entry; result.sl = rangeHigh; result.mode = 'breakout';
+      result.details.push(`Ruptura bajista del rango de sesión (${rangeLow.toFixed(5)}-${rangeHigh.toFixed(5)}), precio bajo VWAP (${lastVwap.toFixed(5)})`);
+    }
+  }
+
+  // --- Modo B: reversión a VWAP (solo si no disparó el breakout este ciclo) ---
+  if (!result.bullish && !result.bearish) {
+    const rsiSeries = calculateRSISeries(candles, 14);
+    const lastRsi = rsiSeries[rsiSeries.length - 1];
+    if (lastRsi != null) {
+      const isRejectionBull = last.close > last.open && (last.open - last.low) > (last.high - last.close) * 1.5;
+      const isRejectionBear = last.close < last.open && (last.high - last.close) > (last.close - last.low) * 1.5;
+      if (lastRsi < 30 && isRejectionBull) {
+        result.bullish = true; result.entry = last.close; result.sl = last.low; result.mode = 'vwap_reversion';
+        result.details.push(`RSI en sobreventa (${lastRsi.toFixed(1)}) con vela de rechazo, buscando reversión hacia VWAP (${lastVwap.toFixed(5)})`);
+      } else if (lastRsi > 70 && isRejectionBear) {
+        result.bearish = true; result.entry = last.close; result.sl = last.high; result.mode = 'vwap_reversion';
+        result.details.push(`RSI en sobrecompra (${lastRsi.toFixed(1)}) con vela de rechazo, buscando reversión hacia VWAP (${lastVwap.toFixed(5)})`);
+      }
+    }
+  }
+
+  if (!result.bullish && !result.bearish) return result;
+
+  const risk = Math.abs(result.entry - result.sl);
+  if (result.mode === 'breakout') {
+    result.tp1 = result.bullish ? result.entry + risk * 1.5 : result.entry - risk * 1.5;
+    result.tp2 = result.bullish ? result.entry + risk * 2 : result.entry - risk * 2;
+  } else {
+    // vwap_reversion: el objetivo es el VWAP mismo, no un múltiplo fijo de R
+    // (el oro/EUR no siempre retestean el VWAP exacto — se prioriza fidelidad
+    // a la estrategia original sobre inventar un TP2 que nadie pidió)
+    result.tp1 = lastVwap;
+    result.tp2 = null;
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------
 // ESTRATEGIA 1: KILL ZONE APERTURA DE NUEVA YORK (9:30 AM real)
 // ---------------------------------------------------------
 // v4.11 (30/8): función y key renombrados de detectNYOpenKillZone /
@@ -1462,6 +1576,19 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
     }
   }
 
+  // Estrategia nueva, filtro por símbolo (mismo patrón que eth_vwap_scalp/
+  // eth_momentum_breakout arriba): solo EURUSD y XAUUSD.
+  if (SESSION_BREAKOUT_VWAP_ENABLED && (symbol === 'EURUSD' || symbol === 'XAUUSD')) {
+    const sbv = safeRun('session_breakout_vwap', detectSessionBreakoutVwap, candles);
+    if (sbv.bullish || sbv.bearish) {
+      signals.push({
+        strategy: 'session_breakout_vwap', label: 'Session Breakout + VWAP Reversion',
+        direction: sbv.bullish ? 'long' : 'short', entry: sbv.entry, sl: sbv.sl, tp1: sbv.tp1, tp2: sbv.tp2,
+        details: sbv.details, mode: sbv.mode, independent: true
+      });
+    }
+  }
+
   // Score contextual (sección 13, 27/8: pasó de informativo a filtro real — a pedido
   // explícito del usuario. Antes solo se mostraba, no descartaba nada). Se calcula acá,
   // en un solo lugar, para las señales que efectivamente dispararon este ciclo, en vez
@@ -1505,6 +1632,7 @@ module.exports = {
   detectBollingerSqueeze,
   detectEthVwapScalp,
   detectEthMomentumBreakout,
+  detectSessionBreakoutVwap,
   calculateRSISeries,
   calculateMACDSeries,
   calculateSMASeries,
