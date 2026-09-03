@@ -206,7 +206,8 @@ const CONFIG = {
     'bollinger_squeeze',
     'supply_demand',
     'ema_cross_scalping',
-    'eth_momentum_breakout' // v4.10 (29/8), solo ETHUSD — ver custom-strategies.js
+    'eth_momentum_breakout', // v4.10 (29/8), solo ETHUSD — ver custom-strategies.js
+    'session_breakout_vwap' // sesión 03/09, solo EURUSD/XAUUSD — ver custom-strategies.js
   ],
   // v4.6: LISTA NEGRA POR ACTIVO - Desactiva estrategias específicas que fallan en un activo
   // v4.7: CIRCUIT BREAKER - auto-desactiva una estrategia en un activo tras N pérdidas
@@ -1725,7 +1726,7 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
   const inCooldown = isNewDirection && cooldownRemainingMs > 0;
 
   // FIX (31/8): CONFIG.AUTO_TUNE calcula state.autoConfidenceThreshold[symbol] hace
-// rato (sube hasta 90 si a la estrategia le viene yendo mal, baja hasta 65 si le
+  // rato (sube hasta 90 si a la estrategia le viene yendo mal, baja hasta 65 si le
   // viene yendo bien) pero nunca se leía en ningún lado — se calculaba y quedaba
   // guardado sin frenar nada. Confirmado con las estadísticas reales (semana 24-30/8:
   // Kill Zone Apertura NY cayó de 66.7% a 11.8% winrate operando igual de seguido, sin
