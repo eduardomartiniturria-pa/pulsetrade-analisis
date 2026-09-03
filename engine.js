@@ -192,7 +192,7 @@ const CONFIG = {
     BINANCE_SPOT: 'https://api.binance.com/api/v3',
     BINANCE_FUTURES: 'https://fapi.binance.com/fapi/v1',
     COINGECKO: 'https://api.coingecko.com/api/v3',
-    BYBIT: 'https://api.bybit.com/v5',
+    OKX: 'https://www.okx.com/api/v5',
     EXCHANGERATE: 'https://open.er-api.com/v6/latest',
     TWELVEDATA: 'https://api.twelvedata.com',
     FINNHUB: 'https://finnhub.io/api/v1',
@@ -267,24 +267,27 @@ class OHLCVData {
 const ASSETS = {
   BTCUSD: {
     name: 'BTC/USD', market: 'crypto', type: 'crypto',
-    symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', coingecko: 'bitcoin', bybit: 'BTCUSDT' },
+    symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', coingecko: 'bitcoin', okx: 'BTC-USDT' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    // FIX (pendiente, sesión 03/09): bybit primero — feed spot con menor delay que
+    // FIX (pendiente, sesión 03/09): okx primero — feed spot con menor delay que
     // CoinGecko (agregador multi-exchange) frente al precio real de ejecución en
     // Exness. No es el feed idéntico de Exness (eso requeriría MetaApi/MT5 directo,
     // descartado por costo/infra), pero reduce el desfase confirmado (~94 puntos,
-    // señal BTCUSD bollinger_squeeze id 1788388806043, 03/09). coingecko queda como
-    // fallback si bybit falla o bloquea la región.
-    providerPriority: ['bybit', 'coingecko', 'twelveData', 'alphaVantage']
+    // señal BTCUSD bollinger_squeeze id 1788388806043, 03/09). Se probó bybit
+    // primero (mismo día): devolvía HTTP 403 consistente para BTCUSD desde Render
+    // (bloqueo por IP de datacenter), se reemplazó por okx sin ese problema en la
+    // prueba inicial — igual monitorear logs por si aparecen fallos. coingecko
+    // queda como fallback si okx falla o bloquea la región.
+    providerPriority: ['okx', 'coingecko', 'twelveData', 'alphaVantage']
   },
   ETHUSD: {
     name: 'ETH/USD', market: 'crypto', type: 'crypto',
-    symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', coingecko: 'ethereum', bybit: 'ETHUSDT' },
+    symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', coingecko: 'ethereum', okx: 'ETH-USDT' },
     decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
     openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
     // Ver nota en BTCUSD — mismo fix, mismo motivo.
-    providerPriority: ['bybit', 'coingecko', 'twelveData', 'alphaVantage']
+    providerPriority: ['okx', 'coingecko', 'twelveData', 'alphaVantage']
   },
   EURUSD: {
     name: 'EUR/USD', market: 'forex', type: 'forex',
@@ -667,30 +670,32 @@ const NewsCalendar = {
 };
 
 const ProviderAdapters = {
-  // FIX (pendiente, sesión 03/09): adapter Bybit spot público (sin auth), agregado
+  // FIX (pendiente, sesión 03/09): adapter OKX spot público (sin auth), agregado
   // para BTCUSD/ETHUSD como primario por delante de coingecko — ver justificación
-  // y providerPriority en ASSETS.BTCUSD/ETHUSD. Solo fetchQuote: el OHLCV histórico
-  // sigue viniendo de coingecko/twelveData sin cambios (MarketDataProvider.getOHLCV
-  // ya filtra por !adapter.fetchOHLCV, así que no hace falta implementarlo acá).
-  bybit: {
-    name: 'Bybit Spot', requiresKey: false, supports: ['BTCUSD','ETHUSD'],
+  // y providerPriority en ASSETS.BTCUSD/ETHUSD. Se probó Bybit primero el mismo
+  // día: HTTP 403 consistente para BTCUSD desde Render (bloqueo por IP de
+  // datacenter), reemplazado por OKX. Solo fetchQuote: el OHLCV histórico sigue
+  // viniendo de coingecko/twelveData sin cambios (MarketDataProvider.getOHLCV ya
+  // filtra por !adapter.fetchOHLCV, así que no hace falta implementarlo acá).
+  okx: {
+    name: 'OKX Spot', requiresKey: false, supports: ['BTCUSD','ETHUSD'],
     async fetchQuote(symbol) {
       const asset = ASSETS[symbol];
-      const cacheKey = `by_quote_${symbol}`;
+      const cacheKey = `okx_quote_${symbol}`;
       const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const res = await fetchWithTimeout(`${CONFIG.ENDPOINTS.BYBIT}/market/tickers?category=spot&symbol=${asset.symbols.bybit}`);
+      const res = await fetchWithTimeout(`${CONFIG.ENDPOINTS.OKX}/market/ticker?instId=${asset.symbols.okx}`);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const d = await res.json();
-      const ticker = d?.result?.list?.[0];
-      if (!ticker) throw new Error('Bybit: sin datos de ticker');
-      const bid = parseFloat(ticker.bid1Price), ask = parseFloat(ticker.ask1Price), last = parseFloat(ticker.lastPrice);
+      const ticker = d?.data?.[0];
+      if (!ticker) throw new Error('OKX: sin datos de ticker');
+      const bid = parseFloat(ticker.bidPx), ask = parseFloat(ticker.askPx), last = parseFloat(ticker.last);
       const data = new MarketData({
         bid, ask, last,
-        open: parseFloat(ticker.prevPrice24h), high: parseFloat(ticker.highPrice24h), low: parseFloat(ticker.lowPrice24h),
-        close: parseFloat(ticker.prevPrice24h), volume: parseFloat(ticker.volume24h), timestamp: Date.now(),
+        open: parseFloat(ticker.open24h), high: parseFloat(ticker.high24h), low: parseFloat(ticker.low24h),
+        close: parseFloat(ticker.open24h), volume: parseFloat(ticker.vol24h), timestamp: Date.now(),
         timeframe: '1d', marketStatus: 'open',
         spread: calculateSpread(bid, ask, asset.pipSize),
-        source: 'Bybit Spot', symbol, estimatedSpread: false
+        source: 'OKX Spot', symbol, estimatedSpread: false
       });
       ResponseCache.set(cacheKey, data); return data;
     }
@@ -1720,7 +1725,7 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
   const inCooldown = isNewDirection && cooldownRemainingMs > 0;
 
   // FIX (31/8): CONFIG.AUTO_TUNE calcula state.autoConfidenceThreshold[symbol] hace
-  // rato (sube hasta 90 si a la estrategia le viene yendo mal, baja hasta 65 si le
+// rato (sube hasta 90 si a la estrategia le viene yendo mal, baja hasta 65 si le
   // viene yendo bien) pero nunca se leía en ningún lado — se calculaba y quedaba
   // guardado sin frenar nada. Confirmado con las estadísticas reales (semana 24-30/8:
   // Kill Zone Apertura NY cayó de 66.7% a 11.8% winrate operando igual de seguido, sin
