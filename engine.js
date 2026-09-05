@@ -1530,7 +1530,36 @@ function seedStrategyStatsFromBacktest(resultsBySymbol) {
   localStorage.setItem('pt_strategy_stats_by_symbol', JSON.stringify(state.strategyStatsBySymbol));
 }
 
+function reconcileStaleActiveCustomSignals(symbol) {
+  // FIX (sesión hoy, complemento al de arriba): las 3 tarjetas encontradas
+  // realmente rotas en producción (EURUSD bollinger_squeeze, XAUUSD
+  // ema_cross_scalping, BTCUSD bollinger_squeeze) ya tienen result:"loss" en
+  // signalHistory desde antes de este fix — checkHistoryOutcomes() nunca las
+  // vuelve a mirar porque solo procesa entradas con result:"pending". Sin esta
+  // pasada aparte quedarían rotas para siempre aunque el fix de arriba ya
+  // funcione para los próximos cierres. Barre activeCustomSignals del symbol y
+  // lo cruza contra CUALQUIER entrada ya resuelta de history (no solo pending),
+  // usando el mismo criterio de match (symbol+strategyKey+timestamp exacto).
+  Object.keys(state.activeCustomSignals).forEach(liveKey => {
+    if (!liveKey.startsWith(symbol + '_')) return;
+    const active = state.activeCustomSignals[liveKey];
+    if (!active) return;
+    const resolved = state.signalHistory.find(h =>
+      h.symbol === symbol && h.timestamp === active.timestamp &&
+      h.strategyKeys && h.strategyKeys[0] === active.strategyKeys[0] &&
+      h.result !== 'pending'
+    );
+    if (resolved) {
+      delete state.activeCustomSignals[liveKey];
+      try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
+      state.pendingCustomDisplayReset = state.pendingCustomDisplayReset || {};
+      state.pendingCustomDisplayReset[liveKey] = true;
+    }
+  });
+}
+
 function checkHistoryOutcomes(symbol, currentPrice, candles) {
+  reconcileStaleActiveCustomSignals(symbol);
   let changed = false;
   const resolvedEntries = [];
   // NUEVO (30/8): ver TP_CONFIRMATION_BUFFER_PIPS_BY_SYMBOL en CONFIG — exige que
@@ -1624,6 +1653,19 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
         if (activeEntry && activeEntry.timestamp === h.timestamp) {
           delete state.activeCustomSignals[liveKey];
           try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
+          // FIX (sesión hoy): faltaba esta línea. Sin ella, activeCustomSignals
+          // quedaba limpio pero state.lastCustomDisplay (lo que expone /api/state
+          // como customSignals, la tarjeta en pantalla) nunca se enteraba del
+          // cierre — evaluateCustomSignalOutcome() sí marca pendingCustomDisplayReset
+          // cuando cierra por tick en vivo, pero este otro camino (cierre detectado
+          // acá, por mecha de vela, vía checkHistoryOutcomes) no lo hacía. Resultado
+          // confirmado con /api/state real: 3 tarjetas (EURUSD bollinger_squeeze,
+          // XAUUSD ema_cross_scalping, BTCUSD bollinger_squeeze) con result:"loss"
+          // en history pero seguían "abiertas" en pantalla indefinidamente, porque
+          // al salir de activeCustomSignals el loop de refreshActiveCustomSignalsDisplay
+          // dejaba de iterarlas y nadie más pisaba lastCustomDisplay para esa key.
+state.pendingCustomDisplayReset = state.pendingCustomDisplayReset || {};
+          state.pendingCustomDisplayReset[liveKey] = true;
         }
       }
     }
@@ -1634,7 +1676,6 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
     runAutoTune(symbol);
   }
 }
-
 function runAutoTuneForKey(key, closedEntries) {
   const cfg = CONFIG.AUTO_TUNE;
   if (!state.autoTuneStats[key]) state.autoTuneStats[key] = { sampleSize: 0, lastWinRate: null, lastExpectancy: null };
@@ -1655,7 +1696,6 @@ function runAutoTuneForKey(key, closedEntries) {
   else if (expectancy > cfg.targetExpectancyHigh) newThreshold = Math.max(cfg.minThreshold, currentThreshold - cfg.step);
   if (newThreshold !== currentThreshold) state.autoConfidenceThreshold[key] = newThreshold;
 }
-
 function runAutoTune(symbol) {
   const closedSymbol = state.signalHistory.filter(h => h.symbol === symbol && (h.result === 'win' || h.result === 'loss'));
   runAutoTuneForKey(symbol, closedSymbol);
@@ -1667,12 +1707,10 @@ function runAutoTune(symbol) {
   renderAutoTuneStatus(symbol);
 }
 function renderAutoTuneStatus() {}
-
 function localDayKey(timestamp) {
   const d = new Date(timestamp);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
-
 function appendClosedSignal(entry) {
   if (entry.result !== 'win' && entry.result !== 'loss') return;
   const dayKey = localDayKey(entry.timestamp);
@@ -1692,7 +1730,6 @@ function appendClosedSignal(entry) {
     localStorage.setItem('closed_signals_days', JSON.stringify(daysIndex));
   }
 }
-
 function historyCardHtml() { return ''; }
 function renderHistory() {}
 function clearHistory() { state.history = []; try { localStorage.setItem('pt_v4_signals', '[]'); } catch (e) {} }
@@ -1705,7 +1742,6 @@ function toggleView() {}
 function requestNotification() {}
 function playAlertBeep() {}
 function showSignalAlertBanner() {}
-
 function notifyNewSignal(signal) {
   const asset = ASSETS[signal.symbol];
   const title = `${signal.type === 'long' ? '🟢 LONG' : '🔴 SHORT'} ${asset ? asset.name : signal.symbol}${signal.source && signal.source !== 'smc' ? ' · ' + signal.strategyLabels[0] : ''}`;
@@ -1713,10 +1749,8 @@ function notifyNewSignal(signal) {
   const body = `Entrada ${fmt(signal.entry, signal.decimals)} · SL ${fmt(signal.sl, signal.decimals)} · TP1 ${fmt(signal.tp1, signal.decimals)}${confPart}`;
   sendPushToAll({ title, body, symbol: signal.symbol, signal }).catch(err => console.error('Error enviando push:', err.message));
 }
-
 function toggleSound() {}
 function toggleStrictMode() { state.strictMode = !state.strictMode; }
-
 function resolveCustomSignal(symbol, quote, customSig, asset) {
   const key = `${symbol}_${customSig.strategy}`;
   const existing = state.activeCustomSignals[key];
@@ -1724,7 +1758,6 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
   const lastAt = state.lastCustomSignalAt[key] || 0;
   const cooldownRemainingMs = CONFIG.SIGNAL_COOLDOWN_MS - (Date.now() - lastAt);
   const inCooldown = isNewDirection && cooldownRemainingMs > 0;
-
   // FIX (31/8): CONFIG.AUTO_TUNE calcula state.autoConfidenceThreshold[symbol] hace
   // rato (sube hasta 90 si a la estrategia le viene yendo mal, baja hasta 65 si le
   // viene yendo bien) pero nunca se leía en ningún lado — se calculaba y quedaba
@@ -1738,7 +1771,6 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
   // para diferenciarla de una operación tomada de verdad.
   const confidenceThreshold = state.autoConfidenceThreshold[symbol] || CONFIG.CONFIDENCE_THRESHOLD;
   const meetsConfidenceThreshold = customSig.confidence == null || customSig.confidence >= confidenceThreshold;
-
   let belowThresholdDisplay = null;
   if (isNewDirection && !inCooldown && !meetsConfidenceThreshold) {
     belowThresholdDisplay = {
@@ -1749,13 +1781,11 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     };
     addLog(quote.source, `[${customSig.label}] señal ${customSig.direction === 'long' ? 'LONG' : 'SHORT'} detectada pero confianza ${customSig.confidence}% < umbral ${confidenceThreshold}% — no se opera`, symbol);
   }
-
   if (isNewDirection && !inCooldown && meetsConfidenceThreshold) {
     let entry = customSig.entry || quote.last;
     let sl = customSig.sl;
     let tp1 = customSig.tp1;
     let tp2 = (customSig.tp2 !== undefined && customSig.tp2 !== null) ? customSig.tp2 : null;
-
     // --- NUEVO v4.6.2: Ajuste de holgura para XAUUSD (Oro) ---
     // El oro sufre muchas mechas que barren stops fijos. Ampliamos el SL un 50% 
     // y recalculamos los TPs para mantener el mismo ratio Riesgo:Beneficio (RR) original.
@@ -1784,7 +1814,6 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
         }
       }
     }
-
     const slPips = toPips(sl, entry, asset);
     const tp1Pips = toPips(tp1, entry, asset);
     const tp2Pips = toPips(tp2, entry, asset);
@@ -1819,7 +1848,6 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
   if (!frozen) return belowThresholdDisplay;
   return evaluateCustomSignalOutcome(symbol, key, quote, frozen);
 }
-
 function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
   const isLong = frozen.type === 'long';
   const hitSL = isLong ? quote.last <= frozen.sl : quote.last >= frozen.sl;
@@ -1847,7 +1875,6 @@ function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
   }
   return { type: frozen.type, frozen, currentPrice: quote.last, hitTP: hitTP1, hitTP1, hitTP2, hitSL };
 }
-
 function refreshActiveCustomSignalsDisplay(symbol, quote, skipStrategies = new Set()) {
   if (state.pendingCustomDisplayReset) {
     Object.keys(state.pendingCustomDisplayReset).forEach(pendingKey => {
@@ -1866,7 +1893,6 @@ function refreshActiveCustomSignalsDisplay(symbol, quote, skipStrategies = new S
     renderCustomSignal(symbol, frozen.strategyKeys[0], display);
   });
 }
-
 async function refreshAsset(symbol, forceRefresh = false) {
   const asset = ASSETS[symbol];
   renderMarketBanner(symbol); renderAssetHoursPill(symbol); renderApiError(symbol, null);
@@ -1915,7 +1941,6 @@ async function refreshAsset(symbol, forceRefresh = false) {
         }
         return true;
       });
-
       const firedThisCycle = new Set();
       filteredSignals.forEach(sig => {
         const customDisplay = resolveCustomSignal(symbol, quote, sig, asset);
@@ -1937,7 +1962,6 @@ async function refreshAsset(symbol, forceRefresh = false) {
     }
   }
 }
-
 async function refreshAllData(forceRefresh = false) {
   renderTradingHoursBar();
   if (forceRefresh) setLoading(true, 'Consultando proveedores de datos...');
@@ -1950,9 +1974,7 @@ async function refreshAllData(forceRefresh = false) {
     if (forceRefresh) setLoading(false);
   }
 }
-
 async function requestWakeLock() {}
-
 // FIX (7.1, medida intermedia): chequeo liviano de precio para BTC/ETH, en paralelo al
 // ciclo principal (ver CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS). No evalúa estrategias ni
 // genera señales nuevas — solo pide el precio actual y lo pasa a checkHistoryOutcomes
@@ -1971,7 +1993,6 @@ async function quickPriceCheck(symbol) {
     console.warn(`quickPriceCheck: fallo en ${symbol}:`, e.message);
   }
 }
-
 let cryptoQuickCheckTimer = null;
 async function cryptoQuickCheckTick() {
   try {
@@ -1982,12 +2003,10 @@ async function cryptoQuickCheckTick() {
     cryptoQuickCheckTimer = setTimeout(cryptoQuickCheckTick, CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS);
   }
 }
-
 function startCryptoQuickCheckLoop() {
   if (cryptoQuickCheckTimer) return;
   cryptoQuickCheckTimer = setTimeout(cryptoQuickCheckTick, CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS);
 }
-
 function stopCryptoQuickCheckLoop() {
   if (cryptoQuickCheckTimer) { clearTimeout(cryptoQuickCheckTimer); cryptoQuickCheckTimer = null; }
 }
