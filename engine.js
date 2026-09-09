@@ -158,6 +158,10 @@ const CONFIG = {
     XAUUSD: 15  // pipSize 0.1 -> 1.5 en precio
   },
   HTF_MAP: { '5m': '1h', '15m': '1h' },
+  // FIX (09/9): edad máxima para usar el fallback de state.lastQuote en refreshAsset.
+  // Pasado este límite, un quote cacheado se considera demasiado viejo para operar
+  // sobre él y el ciclo cae a 'no-data' en vez de mostrar un precio "vivo" desactualizado.
+  QUOTE_CACHE_MAX_AGE_MS: 20 * 60 * 1000, // 20 min
   AUTO_TUNE: {
     minSampleSize: 10,
     windowSize: 20,
@@ -1061,6 +1065,12 @@ const MarketDataProvider = {
         state.providerStats[providerName] = { lastSuccess: Date.now(), successCount: (state.providerStats[providerName]?.successCount || 0) + 1 };
         addLog(adapter.name, 'ÉXITO', symbol);
         state.currentProvider = providerName;
+        // FIX (09/9): se cachea el último quote exitoso por símbolo para que un
+        // fallo puntual de getQuote (ej. cooldown/rate-limit transitorio) no tire
+        // todo el ciclo de refreshAsset a 'no-data' — mismo patrón que ya usa
+        // getOHLCV con su fallback a state.klineHistory. Ver uso en refreshAsset.
+        state.lastQuote = state.lastQuote || {};
+        state.lastQuote[symbol] = data;
         return data;
       } catch (error) {
         state.providers[providerName] = 'fail';
@@ -1692,8 +1702,19 @@ function runAutoTuneForKey(key, closedEntries) {
   stats.lastWinRate = winRate; stats.lastExpectancy = expectancy; stats.rawExpectancy = +rawExpectancy.toFixed(2); stats.confidenceWeight = +confidenceWeight.toFixed(2);
   const currentThreshold = state.autoConfidenceThreshold[key] || CONFIG.CONFIDENCE_THRESHOLD;
   let newThreshold = currentThreshold;
-  if (expectancy < cfg.targetExpectancyLow) newThreshold = Math.min(cfg.maxThreshold, currentThreshold + cfg.step);
-  else if (expectancy > cfg.targetExpectancyHigh) newThreshold = Math.max(cfg.minThreshold, currentThreshold - cfg.step);
+  // FIX (09/9): antes se comparaba `expectancy` (rawExpectancy encogido por
+  // confidenceWeight) contra targetExpectancyLow/High. Con confidenceWeight
+  // ~0.46 en la muestra típica, alcanzar targetExpectancyLow=0.35 exigía un
+  // rawExpectancy real de ~0.76R -> el umbral casi nunca podía bajar y subía
+  // en casi todos los ciclos (ratchet unidireccional hacia maxThreshold).
+  // Ahora se decide con rawExpectancy directo; confidenceWeight solo gatea
+  // si hay muestra suficiente para confiar en la decisión (>=0.3, ~7+ trades
+  // con shrinkageK=15). `expectancy` se sigue guardando en stats solo a fines
+  // de diagnóstico/UI, ya no participa de la decisión.
+    if (confidenceWeight >= 0.3) {
+    if (rawExpectancy < cfg.targetExpectancyLow) newThreshold = Math.min(cfg.maxThreshold, currentThreshold + cfg.step);
+    else if (rawExpectancy > cfg.targetExpectancyHigh) newThreshold = Math.max(cfg.minThreshold, currentThreshold - cfg.step);
+  }
   if (newThreshold !== currentThreshold) state.autoConfidenceThreshold[key] = newThreshold;
 }
 function runAutoTune(symbol) {
@@ -1898,8 +1919,19 @@ async function refreshAsset(symbol, forceRefresh = false) {
   renderMarketBanner(symbol); renderAssetHoursPill(symbol); renderApiError(symbol, null);
   if (!isMarketOpenForAsset(symbol)) { renderSignal(symbol, { type: 'market-closed' }); return; }
   try {
+    // FIX (09/9): getQuote ahora también cae a un fallback (último quote exitoso
+    // cacheado en state.lastQuote) en vez de rechazar el Promise.all entero y
+    // pisar el signal con 'no-data' cuando el fallo es puntual/transitorio. Si no
+    // hay quote cacheado todavía para el símbolo, se re-lanza el error original
+    // y el ciclo cae al catch de abajo como antes (comportamiento sin cambios
+    // para el primer fallo en frío).
     const [quote, ohlcv] = await Promise.all([
-      MarketDataProvider.getQuote(symbol, forceRefresh),
+      MarketDataProvider.getQuote(symbol, forceRefresh).catch(error => {
+        const cached = state.lastQuote && state.lastQuote[symbol];
+        const age = cached ? Date.now() - cached.timestamp : Infinity;
+        if (cached && age <= CONFIG.QUOTE_CACHE_MAX_AGE_MS) { addLog('cache', `quote en vivo falló (${error.message}), usando último quote cacheado (${Math.round(age / 1000)}s)`, symbol); return cached; }
+        throw error;
+      }),
       MarketDataProvider.getOHLCV(symbol, state.currentTF, 100, forceRefresh).catch(() => (state.klineHistory[symbol] && state.klineHistory[symbol][state.currentTF]) || new OHLCVData([]))
     ]);
     updatePriceUI(symbol, quote, asset);
@@ -2032,7 +2064,6 @@ function startAutoRefreshLoop() {
 function stopAutoRefreshLoop() {
   if (autoRefreshTimer) { clearTimeout(autoRefreshTimer); autoRefreshTimer = null; }
 }
-
 module.exports = {
   state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
   startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isKillZoneWindow,
