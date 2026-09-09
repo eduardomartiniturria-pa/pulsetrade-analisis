@@ -392,7 +392,22 @@ let state = {
 // válidos, no se pierden), solo el umbral. Se marca con una key de una sola vez para
 // no resetear en cada redeploy futuro y dejar que vuelva a evolucionar desde acá con
 // el gate ya realmente conectado.
-if (!localStorage.getItem('pt_threshold_reset_v1')) {
+// FIX (09/9): segundo reset manual. Tras el fix de rawExpectancy en runAutoTuneForKey,
+// los umbrales (76/70/74/76) quedaron sin cambios durante ~19h porque ninguna señal
+// cruzaba el umbral para convertirse en trade real -> cero cierres nuevos -> el
+// auto-tune no tenía datos frescos para bajarlos (loop cerrado: umbral alto bloquea
+// las señales que generarían la evidencia para bajar el umbral). Se fuerza el reset
+// a CONFIG.CONFIDENCE_THRESHOLD (70) una vez más para romper el estancamiento; no
+// toca autoTuneStats (winRate/expectancy previos se conservan), solo el umbral.
+// Nueva key de guardia (v2) para que corra una sola vez más sin repetirse en
+// redeploys futuros.
+if (!localStorage.getItem('pt_threshold_reset_v2')) {
+  const resetThreshold = {};
+  Object.keys(ASSETS).forEach(sym => { resetThreshold[sym] = CONFIG.CONFIDENCE_THRESHOLD; });
+  state.autoConfidenceThreshold = resetThreshold;
+  localStorage.setItem('pt_auto_threshold_v2', JSON.stringify(resetThreshold));
+  localStorage.setItem('pt_threshold_reset_v2', 'true');
+} else if (!localStorage.getItem('pt_threshold_reset_v1')) {
   const resetThreshold = {};
   Object.keys(ASSETS).forEach(sym => { resetThreshold[sym] = CONFIG.CONFIDENCE_THRESHOLD; });
   state.autoConfidenceThreshold = resetThreshold;
@@ -1711,7 +1726,7 @@ function runAutoTuneForKey(key, closedEntries) {
   // si hay muestra suficiente para confiar en la decisión (>=0.3, ~7+ trades
   // con shrinkageK=15). `expectancy` se sigue guardando en stats solo a fines
   // de diagnóstico/UI, ya no participa de la decisión.
-    if (confidenceWeight >= 0.3) {
+  if (confidenceWeight >= 0.3) {
     if (rawExpectancy < cfg.targetExpectancyLow) newThreshold = Math.min(cfg.maxThreshold, currentThreshold + cfg.step);
     else if (rawExpectancy > cfg.targetExpectancyHigh) newThreshold = Math.max(cfg.minThreshold, currentThreshold - cfg.step);
   }
@@ -2064,6 +2079,7 @@ function startAutoRefreshLoop() {
 function stopAutoRefreshLoop() {
   if (autoRefreshTimer) { clearTimeout(autoRefreshTimer); autoRefreshTimer = null; }
 }
+
 module.exports = {
   state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
   startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isKillZoneWindow,
