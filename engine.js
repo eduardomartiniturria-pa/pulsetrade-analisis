@@ -211,7 +211,8 @@ const CONFIG = {
     'supply_demand',
     'ema_cross_scalping',
     'eth_momentum_breakout', // v4.10 (29/8), solo ETHUSD — ver custom-strategies.js
-    'session_breakout_vwap' // sesión 03/09, solo EURUSD/XAUUSD — ver custom-strategies.js
+    'session_breakout_vwap', // sesión 03/09, solo EURUSD/XAUUSD — ver custom-strategies.js
+    'session_false_breakout' // sesión 10/09, los 4 símbolos — ver custom-strategies.js
   ],
   // v4.6: LISTA NEGRA POR ACTIVO - Desactiva estrategias específicas que fallan en un activo
   // v4.7: CIRCUIT BREAKER - auto-desactiva una estrategia en un activo tras N pérdidas
@@ -2084,4 +2085,3 @@ module.exports = {
   state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
   startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isKillZoneWindow,
   startCryptoQuickCheckLoop, stopCryptoQuickCheckLoop
-};
