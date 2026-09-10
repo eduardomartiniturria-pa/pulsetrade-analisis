@@ -468,8 +468,106 @@ function detectKillZoneNY(candles) {
 }
 
 // ---------------------------------------------------------
-// ESTRATEGIA 2: PIVOTS BREAKOUT & REVERSAL
+// ESTRATEGIA: SESSION FALSE BREAKOUT / MEAN REVERSION (estilo Andrea Unger)
 // ---------------------------------------------------------
+// Agregada 10/9 a pedido de Soy, a partir de un video que atribuye una
+// versión simplificada de este concepto al estilo cuantitativo de Andrea
+// Unger. Reglas tal cual las especificó:
+//   1. Rango de referencia = High/Low de la sesión anterior (ej. Londres).
+//   2. Gatillo: una vela CIERRA por debajo del Low de esa sesión -> COMPRA
+//      (se apuesta a que la ruptura es falsa). Cierra por encima del High
+//      -> VENTA. Es lo opuesto de un breakout: acá se opera el fade.
+//   3. Gestión: sin SL/TP fijo por %. Se mantiene hasta que el precio
+//      cierra más allá del extremo OPUESTO del rango -> ahí se cierra y
+//      se abre en sentido contrario (Stop & Reverse).
+//
+// Definición de "sesión anterior": se reutiliza la ventana de Córdoba
+// 05:00-13:00 ya usada en isCordobaSessionWindow() para Session Breakout +
+// VWAP (~equivalente a la sesión de Londres en UTC-3), en vez de inventar
+// un segundo criterio de sesión en el mismo archivo.
+//
+// DECISIÓN EXPLÍCITA (Soy, vía Claude, 10/9): la regla original NO define
+// stop loss — el propio pedido de Soy incluye la advertencia de que sin SL
+// fijo un movimiento de tendencia fuerte puede generar drawdowns grandes
+// antes de tocar el extremo opuesto. Se agrega un SL de protección (2x
+// ATR14 desde la entrada) que NO es parte del método original de Unger —
+// es un circuit-breaker de riesgo para que la posición tenga una cota de
+// pérdida máxima y para que el resto del motor (rMultiple, autoTune,
+// checkHistoryOutcomes) tenga un valor con el que trabajar, ya que todo el
+// sistema de tracking asume sl/tp1 fijos. tp1 = extremo opuesto del rango
+// (el verdadero punto de salida de la estrategia). No se implementa acá el
+// Stop & Reverse automático (abrir la posición contraria en el mismo
+// instante del cierre) — la señal contraria surge sola en el próximo ciclo
+// cuando el precio cierre más allá del rango siguiente, con la misma
+// lógica. Encadenar el reverse automático requeriría tocar
+// checkHistoryOutcomes() en engine.js, fuera del alcance de esta entrega.
+
+function detectSessionFalseBreakout(candles) {
+  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, mode: null };
+  if (!candles || candles.length < 30) return result;
+
+  const last = candles[candles.length - 1];
+  const lastCB = getCordobaTimeParts(last.time);
+  if (lastCB.weekday === 'Sat' || lastCB.weekday === 'Sun') return result;
+
+  const sessionStartMin = 5 * 60;  // 05:00 Córdoba (~sesión de Londres en UTC-3)
+  const sessionEndMin = 13 * 60;   // 13:00 Córdoba
+
+  // Ubicar la ventana de sesión más reciente que ya cerró por completo
+  // (mismo patrón de barrido hacia atrás que detectKillZoneNY).
+  let windowStartIdx = -1, windowEndIdx = -1, windowDateKey = null;
+  for (let i = candles.length - 1; i >= 0 && i >= candles.length - 400; i--) {
+    const p = getCordobaTimeParts(candles[i].time);
+    const m = p.hour * 60 + p.minute;
+    if (m >= sessionStartMin && m < sessionEndMin) {
+      if (windowEndIdx === -1) { windowEndIdx = i; windowDateKey = p.dateKey; }
+      if (p.dateKey === windowDateKey) windowStartIdx = i;
+    } else if (windowEndIdx !== -1 && p.dateKey !== windowDateKey) {
+      break; // ya nos salimos del día de la sesión encontrada
+    }
+  }
+  if (windowStartIdx === -1 || windowEndIdx === -1) return result;
+
+  const windowCandles = candles.slice(windowStartIdx, windowEndIdx + 1);
+  const rangeHigh = Math.max(...windowCandles.map(c => c.high));
+  const rangeLow = Math.min(...windowCandles.map(c => c.low));
+
+  // Velas posteriores al cierre de la sesión de referencia
+  const confirmCandles = candles.slice(windowEndIdx + 1);
+  if (!confirmCandles.length) return result;
+
+  let breakoutCandle = null, direction = null;
+  for (const c of confirmCandles) {
+    if (c.close < rangeLow) { breakoutCandle = c; direction = 'fade_low'; break; }
+    if (c.close > rangeHigh) { breakoutCandle = c; direction = 'fade_high'; break; }
+  }
+  if (!breakoutCandle) return result;       // sin ruptura confirmada todavía
+  if (breakoutCandle !== last) return result; // ruptura ya pasó antes, no repetir señal
+
+  const entry = last.close;
+  const atr = calculateATR(candles) || 0;
+  const protectiveRisk = atr > 0 ? atr * 2 : Math.abs(rangeHigh - rangeLow) * 0.5; // fallback si ATR no calculable
+
+  if (direction === 'fade_low') {
+    // Cerró por debajo del Low de la sesión -> se apuesta a ruptura falsa -> COMPRA
+    result.bullish = true;
+    result.sl = entry - protectiveRisk;
+    result.tp1 = rangeHigh; // extremo opuesto = salida real de la estrategia
+    result.details.push(`Ruptura bajista fallida del mínimo de sesión (${rangeLow.toFixed(5)}) — fade hacia el máximo (${rangeHigh.toFixed(5)})`);
+  } else {
+    // Cerró por encima del High de la sesión -> VENTA
+    result.bearish = true;
+    result.sl = entry + protectiveRisk;
+    result.tp1 = rangeLow;
+    result.details.push(`Ruptura alcista fallida del máximo de sesión (${rangeHigh.toFixed(5)}) — fade hacia el mínimo (${rangeLow.toFixed(5)})`);
+  }
+  result.entry = entry;
+  result.tp2 = null; // objetivo único = extremo opuesto, no un múltiplo de R inventado
+  result.mode = 'session_false_breakout';
+  result.details.push('SL de protección = 2x ATR14 (no forma parte del método original, agregado por gestión de riesgo)');
+
+  return result;
+}
 // Parámetros:
 //   - PH (pivot high): máximo de la vela > máximo de las 4 anteriores y > máximo de las 2 siguientes
 //   - PL (pivot low): mínimo de la vela < mínimo de las 4 anteriores y < mínimo de las 2 siguientes
@@ -1589,6 +1687,20 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
     }
   }
 
+  // Session False Breakout / Mean Reversion (10/9) — corre en los 4 activos,
+  // a diferencia de session_breakout_vwap (solo EURUSD/XAUUSD) o
+  // eth_momentum_breakout (solo ETHUSD): el concepto de rango de sesión
+  // anterior no depende de tener volumen real, así que no hay motivo para
+  // restringirla por símbolo.
+  const sfb = safeRun('session_false_breakout', detectSessionFalseBreakout, candles);
+  if (sfb.bullish || sfb.bearish) {
+    signals.push({
+      strategy: 'session_false_breakout', label: 'Session False Breakout (Andrea Unger)',
+      direction: sfb.bullish ? 'long' : 'short', entry: sfb.entry, sl: sfb.sl, tp1: sfb.tp1, tp2: sfb.tp2,
+      details: sfb.details, mode: sfb.mode, independent: true
+    });
+  }
+
   // Score contextual (sección 13, 27/8: pasó de informativo a filtro real — a pedido
   // explícito del usuario. Antes solo se mostraba, no descartaba nada). Se calcula acá,
   // en un solo lugar, para las señales que efectivamente dispararon este ciclo, en vez
@@ -1633,6 +1745,7 @@ module.exports = {
   detectEthVwapScalp,
   detectEthMomentumBreakout,
   detectSessionBreakoutVwap,
+  detectSessionFalseBreakout,
   calculateRSISeries,
   calculateMACDSeries,
   calculateSMASeries,
