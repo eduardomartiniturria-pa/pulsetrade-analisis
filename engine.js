@@ -1910,7 +1910,7 @@ function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
     state.pendingCustomDisplayReset = state.pendingCustomDisplayReset || {};
     state.pendingCustomDisplayReset[key] = true;
   }
-  return { type: frozen.type, frozen, currentPrice: quote.last, hitTP: hitTP1, hitTP1, hitTP2, hitSL };
+  return { ...frozen, currentPrice: quote.last, hitTP: hitTP1, hitTP1, hitTP2, hitSL };
 }
 function refreshActiveCustomSignalsDisplay(symbol, quote, skipStrategies = new Set()) {
   if (state.pendingCustomDisplayReset) {
