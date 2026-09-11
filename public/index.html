@@ -326,6 +326,28 @@ function renderStrategySlot(title, d) {
     </div>`;
   }
 
+  // FIX (11/9): señal detectada pero con confianza por debajo del umbral adaptativo
+  // (belowConfidenceThreshold, engine.js resolveCustomSignal) — no es una operación
+  // real (no se guarda en el historial, no dispara push), es solo informativa. Antes
+  // caía sin querer en el mismo bug de "d.frozen" indefinido que las señales activas,
+  // así que nunca se veía nada; ahora se distingue con su propia tarjeta, sin badges
+  // ni niveles de entrada/SL/TP (esta señal no tiene esos datos: no llegó a calcularse
+  // el ajuste de niveles porque no se consideró operable).
+  if (d.belowConfidenceThreshold) {
+    const isLong = d.type === 'long';
+    return `<div class="signal-card no-signal">
+      <div class="signal-title">👀 ${title}</div>
+      <div class="signal-badges-row">
+        <span class="badge-trend ${isLong ? 'bullish' : 'bearish'}">${isLong ? '📈 LONG detectado' : '📉 SHORT detectado'}</span>
+        <span class="badge-closed">Confianza ${fmtPct(d.confidence)}% · mínimo ${fmtPct(d.confidenceThreshold)}%</span>
+      </div>
+      <div class="signal-reason">Patrón detectado pero por debajo del umbral de confianza actual — no se toma como operación.</div>
+      <div class="signal-footer">
+        <span class="signal-time">Detectada ${fmtTime(d.detectedAt)}</span>
+      </div>
+    </div>`;
+  }
+
   // Señal activa — misma estructura para las 8 estrategias independientes.
   const s = d.frozen;
   const isLong = s.type === 'long';
@@ -400,14 +422,18 @@ function renderAllStrategyCards(symbol) {
   const specialSlot = slots.find(s => s.d && (s.d.type === 'market-closed' || s.d.type === 'no-data'));
   if (specialSlot) return renderStrategySlot(specialSlot.title, specialSlot.d);
 
-  const activeSlots = slots.filter(s => s.d && s.d.frozen);
-  if (!activeSlots.length) {
+  // FIX (11/9): antes solo se contemplaban las señales activas (d.frozen truthy) para
+  // decidir si mostrar algo. Las informativas (d.belowConfidenceThreshold) quedaban
+  // afuera de este filtro y nunca llegaban a verse — ahora ambos tipos cuentan como
+  // "hay algo para mostrar" en este activo.
+  const displaySlots = slots.filter(s => s.d && (s.d.frozen || s.d.belowConfidenceThreshold));
+  if (!displaySlots.length) {
     return `<div class="signal-card no-signal">
       <div class="signal-title">⏸️ Sin señales activas</div>
       <div class="signal-reason">Ninguna de las 8 estrategias cargadas encontró un patrón que cumpla todos sus parámetros todavía. El motor sigue analizando en cada ciclo.</div>
     </div>`;
   }
-  return `<div class="strategies-list">${activeSlots.map(s => renderStrategySlot(s.title, s.d)).join('')}</div>`;
+  return `<div class="strategies-list">${displaySlots.map(s => renderStrategySlot(s.title, s.d)).join('')}</div>`;
 }
 
 // v4.9 (27/8): función renderAutoTune() retirada a pedido de Soy (punto 11 del
