@@ -286,22 +286,35 @@ function renderPriceCard(symbol) {
 // Ahora hay una sola función que arma la tarjeta, igual para las 8: el título cambia,
 // los datos reales que difieren entre estrategias se muestran si existen y se omiten
 // si no, pero la estructura (entrada/SL/TP1/TP2/RR/estado) es idéntica.
+// FIX (11/9): lista alineada 1:1 con CONFIG.ENABLED_STRATEGIES real de engine.js (8
+// estrategias activas). Antes tenía 3 keys apagadas (price_action_rsi_ema, rsi_divergence,
+// eth_vwap_scalp) y la key vieja 'ny_open_kill_zone' (renombrada a 'kill_zone_ny' el 30/8),
+// y le faltaban las 3 estrategias activas agregadas entre el 29/8 y el 10/9
+// (eth_momentum_breakout, session_breakout_vwap, session_false_breakout) — esas señales
+// llegaban por push pero no tenían tarjeta porque su key no estaba en esta lista.
 const CUSTOM_STRATEGY_LIST = [
-  { key: 'ny_open_kill_zone', label: 'Kill Zone Apertura NY' },
+  { key: 'kill_zone_ny', label: 'Kill Zone Apertura NY' },
   { key: 'pivots_breakout_reversal', label: 'Pivots Breakout & Reversal' },
-  { key: 'price_action_rsi_ema', label: 'Price Action + RSI + EMA' },
+  { key: 'bollinger_squeeze', label: 'Bollinger Squeeze Breakout' },
   { key: 'supply_demand', label: 'Supply and Demand' },
   { key: 'ema_cross_scalping', label: 'EMA Cross Scalping' },
-  { key: 'rsi_divergence', label: 'Divergencia RSI' },
-  { key: 'bollinger_squeeze', label: 'Bollinger Squeeze Breakout' },
-  { key: 'eth_vwap_scalp', label: 'ETH VWAP Trend Scalp' }
+  { key: 'eth_momentum_breakout', label: 'ETH Momentum Breakout' },
+  { key: 'session_breakout_vwap', label: 'Session Breakout VWAP' },
+  { key: 'session_false_breakout', label: 'Session False Breakout' }
 ];
 
-// Las 8 independientes + 'smc' como key histórica: se mantiene acá (aunque el motor ya
-// no genera señales nuevas de SMC) porque strategyLabel() la usa para mostrar el label
-// correcto de señales SMC ya cerradas que quedaron en el historial de antes del 19/8 —
-// sacarla rompería ese label para datos viejos, no solo dejaría de sumar señales nuevas.
-const ALL_STRATEGY_LIST = [{ key: 'smc', label: 'Smart Money Concepts (SMC)' }].concat(CUSTOM_STRATEGY_LIST);
+// Keys que ya no generan señales nuevas (apagadas manualmente o renombradas) pero que
+// pueden seguir apareciendo en historial/breakdown de períodos pasados — se mantienen
+// separadas de CUSTOM_STRATEGY_LIST para que strategyLabel() siga resolviendo su label
+// en datos viejos, sin que vuelvan a dibujar una tarjeta en vivo que nunca va a llenarse.
+const LEGACY_STRATEGY_LABELS = [
+  { key: 'smc', label: 'Smart Money Concepts (SMC)' },
+  { key: 'ny_open_kill_zone', label: 'Kill Zone Apertura NY' }, // key vieja, renombrada 30/8
+  { key: 'price_action_rsi_ema', label: 'Price Action + RSI + EMA' },
+  { key: 'rsi_divergence', label: 'Divergencia RSI' },
+  { key: 'eth_vwap_scalp', label: 'ETH VWAP Trend Scalp' }
+];
+const ALL_STRATEGY_LIST = LEGACY_STRATEGY_LABELS.concat(CUSTOM_STRATEGY_LIST);
 
 function renderStrategySlot(title, d) {
   if (!d) return `<div class="signal-card no-data"><div class="signal-title">⏳ ${title}</div><div class="signal-reason">Esperando que se cumplan sus condiciones.</div></div>`;
