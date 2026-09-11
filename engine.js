@@ -1689,8 +1689,7 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
           // XAUUSD ema_cross_scalping, BTCUSD bollinger_squeeze) con result:"loss"
           // en history pero seguían "abiertas" en pantalla indefinidamente, porque
           // al salir de activeCustomSignals el loop de refreshActiveCustomSignalsDisplay
-          // dejaba de iterarlas y nadie más pisaba lastCustomDisplay para esa key.
-state.pendingCustomDisplayReset = state.pendingCustomDisplayReset || {};
+  state.pendingCustomDisplayReset = state.pendingCustomDisplayReset || {};
           state.pendingCustomDisplayReset[liveKey] = true;
         }
       }
@@ -1910,7 +1909,15 @@ function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
     state.pendingCustomDisplayReset = state.pendingCustomDisplayReset || {};
     state.pendingCustomDisplayReset[key] = true;
   }
-  return { ...frozen, currentPrice: quote.last, hitTP: hitTP1, hitTP1, hitTP2, hitSL };
+  // FIX (11/9): antes era "{ ...frozen, ... }", que desparramaba los campos de la
+  // señal (type, entry, sl, tp1...) sueltos en el objeto de nivel superior. index.html
+  // (renderStrategySlot, renderAllStrategyCards) espera esos datos anidados en una
+  // propiedad "frozen" (const s = d.frozen; filter(s.d.frozen)) — como esa propiedad
+  // nunca existía, la tarjeta nunca mostraba ninguna señal activa (activeSlots siempre
+  // vacío), aunque la señal sí se guardara en activeCustomSignals/signalHistory (por
+  // eso aparecía en el historial "en curso") y sí disparara el push (notifyNewSignal
+  // usa el frozen original, no este valor de retorno).
+  return { frozen, currentPrice: quote.last, hitTP: hitTP1, hitTP1, hitTP2, hitSL };
 }
 function refreshActiveCustomSignalsDisplay(symbol, quote, skipStrategies = new Set()) {
   if (state.pendingCustomDisplayReset) {
@@ -2086,3 +2093,4 @@ module.exports = {
   startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isKillZoneWindow,
   startCryptoQuickCheckLoop, stopCryptoQuickCheckLoop
 };
+        
