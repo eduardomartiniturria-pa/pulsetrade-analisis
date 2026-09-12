@@ -1,6 +1,29 @@
 // ============================================================
-// PULSE TRADE v4.7.5 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.7.6 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.7.6 (11/9, auto-tune por symbol+estrategia):
+// - Causa raíz confirmada leyendo el código real: runAutoTune(symbol) calculaba
+//   un único umbral de confianza por símbolo, mezclando en una sola expectancy
+//   el historial cerrado de TODAS las estrategias de ese símbolo. Caso real
+//   detectado con /api/state en producción: ny_open_kill_zone en BTCUSD
+//   (+11.17R, la mejor combinación de toda la app) compartía el mismo umbral
+//   adaptativo que pivots_breakout_reversal en BTCUSD (-4.29R, ya desactivada
+//   por Circuit Breaker) — una estrategia mala podía frenar arriba el umbral y
+//   bloquear señales válidas de la buena, o viceversa.
+// - runAutoTune() ahora agrupa por symbol+estrategia (misma key que ya usan
+//   activeCustomSignals/lastCustomSignalAt) antes de llamar a
+//   runAutoTuneForKey(); resolveCustomSignal() lee el umbral con esa misma key
+//   nueva en vez de state.autoConfidenceThreshold[symbol]. resetAutoTune()
+//   ajustado para vaciar el objeto completo (antes solo repoblaba por symbol,
+//   dejando huérfanas las keys nuevas symbol_estrategia).
+// - Efecto colateral esperado, no es un bug: cada key nueva junta su propia
+//   muestra más despacio que antes (ya no comparte volumen con otras
+//   estrategias del mismo símbolo), así que puede tardar más en alcanzar
+//   AUTO_TUNE.minSampleSize (10) la primera vez que corre para una combinación.
+// - Pendiente fuera de este archivo: si server.js expone autoTune.threshold en
+//   /api/state asumiendo claves por symbol (como en el respaldo del 11/9 antes
+//   de este fix), va a mostrar ahora claves symbol_estrategia — revisar ese
+//   archivo si el front/estado público rompe algo con el formato nuevo.
 // Cambios v4.7.5 (27/8, Etapa 3 — cierre del hallazgo HTF "insuficiente 60/90"):
 // - Causa raíz confirmada leyendo el código (no solo el log): getOHLCV() cacheaba
 //   en state.klineHistory[symbol], una sola clave por símbolo sin distinguir
@@ -450,8 +473,13 @@ function saveAutoTuneState() {
 }
 
 function resetAutoTune() {
+  // FIX (11/9): las keys de autoConfidenceThreshold pasaron de ser por symbol
+  // a ser por symbol+estrategia (ver runAutoTune/resolveCustomSignal). Repoblar
+  // solo por symbol acá dejaba huérfanas las keys symbol_estrategia viejas con
+  // su valor anterior, sin resetear. Ahora se vacía todo el objeto: cualquier
+  // lookup que no encuentre su key cae a CONFIG.CONFIDENCE_THRESHOLD por el
+  // fallback ya existente en resolveCustomSignal/runAutoTuneForKey.
   const obj = {};
-  Object.keys(ASSETS).forEach(sym => { obj[sym] = CONFIG.CONFIDENCE_THRESHOLD; });
   state.autoConfidenceThreshold = obj; state.autoTuneStats = {}; state.patternStats = {};
   localStorage.setItem('pt_auto_threshold_v2', JSON.stringify(obj));
   localStorage.setItem('pt_auto_stats_v2', JSON.stringify({}));
@@ -1679,7 +1707,7 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
         if (activeEntry && activeEntry.timestamp === h.timestamp) {
           delete state.activeCustomSignals[liveKey];
           try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
-          // FIX (sesión hoy): faltaba esta línea. Sin ella, activeCustomSignals
+       // FIX (sesión hoy): faltaba esta línea. Sin ella, activeCustomSignals
           // quedaba limpio pero state.lastCustomDisplay (lo que expone /api/state
           // como customSignals, la tarjeta en pantalla) nunca se enteraba del
           // cierre — evaluateCustomSignalOutcome() sí marca pendingCustomDisplayReset
@@ -1732,12 +1760,30 @@ function runAutoTuneForKey(key, closedEntries) {
   }
   if (newThreshold !== currentThreshold) state.autoConfidenceThreshold[key] = newThreshold;
 }
+// FIX (11/9): antes runAutoTune calculaba un único umbral por símbolo, mezclando
+// el historial cerrado de TODAS las estrategias de ese símbolo en una sola
+// expectancy. Efecto real detectado con datos de producción: ny_open_kill_zone
+// en BTCUSD (+11.17R, la mejor combinación de toda la app) compartía el mismo
+// umbral adaptativo que pivots_breakout_reversal en BTCUSD (-4.29R, ya
+// desactivada por Circuit Breaker) — una estrategia mala podía frenar el umbral
+// arriba y bloquear señales válidas de la buena, o viceversa. Ahora se agrupa
+// por symbol+estrategia (misma key que ya usan activeCustomSignals/
+// lastCustomSignalAt en resolveCustomSignal), así cada combinación se ajusta
+// según su propio historial real. Efecto esperado: cada key individual junta
+// su muestra más despacio que antes (ya no comparte volumen con otras
+// estrategias del mismo símbolo), así que puede tardar más en alcanzar
+// AUTO_TUNE.minSampleSize (10) por combinación nueva.
 function runAutoTune(symbol) {
-  const closedSymbol = state.signalHistory.filter(h => h.symbol === symbol && (h.result === 'win' || h.result === 'loss'));
-  runAutoTuneForKey(symbol, closedSymbol);
-  ['trending', 'ranging'].forEach(regime => {
-    const closedRegime = closedSymbol.filter(h => h.regime === regime);
-    if (closedRegime.length) runAutoTuneForKey(symbol + '_' + regime, closedRegime);
+  const closedSymbolAll = state.signalHistory.filter(h => h.symbol === symbol && (h.result === 'win' || h.result === 'loss'));
+  const strategiesInSymbol = new Set(closedSymbolAll.map(h => h.strategyKeys && h.strategyKeys[0]).filter(Boolean));
+  strategiesInSymbol.forEach(strategy => {
+    const closedForStrategy = closedSymbolAll.filter(h => h.strategyKeys && h.strategyKeys[0] === strategy);
+    const key = `${symbol}_${strategy}`;
+    runAutoTuneForKey(key, closedForStrategy);
+    ['trending', 'ranging'].forEach(regime => {
+      const closedRegime = closedForStrategy.filter(h => h.regime === regime);
+      if (closedRegime.length) runAutoTuneForKey(key + '_' + regime, closedRegime);
+    });
   });
   saveAutoTuneState();
   renderAutoTuneStatus(symbol);
@@ -1805,7 +1851,13 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
   // notificación push. Sigue siendo visible (se manda a renderCustomSignal) para que no
   // desaparezca de la pantalla, pero marcada como informativa (belowConfidenceThreshold)
   // para diferenciarla de una operación tomada de verdad.
-  const confidenceThreshold = state.autoConfidenceThreshold[symbol] || CONFIG.CONFIDENCE_THRESHOLD;
+  // FIX (11/9): antes leía state.autoConfidenceThreshold[symbol] (un umbral
+  // compartido por todas las estrategias del símbolo). Ahora lee por
+  // symbol+estrategia, en línea con el cambio en runAutoTune. Si la combinación
+  // todavía no tiene umbral propio calculado (pocas operaciones cerradas), cae
+  // a CONFIG.CONFIDENCE_THRESHOLD igual que antes.
+  const thresholdKey = `${symbol}_${customSig.strategy}`;
+  const confidenceThreshold = state.autoConfidenceThreshold[thresholdKey] || CONFIG.CONFIDENCE_THRESHOLD;
   const meetsConfidenceThreshold = customSig.confidence == null || customSig.confidence >= confidenceThreshold;
   let belowThresholdDisplay = null;
   if (isNewDirection && !inCooldown && !meetsConfidenceThreshold) {
