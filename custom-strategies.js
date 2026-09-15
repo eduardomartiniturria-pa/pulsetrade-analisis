@@ -502,7 +502,7 @@ function detectKillZoneNY(candles) {
 // lógica. Encadenar el reverse automático requeriría tocar
 // checkHistoryOutcomes() en engine.js, fuera del alcance de esta entrega.
 
-function detectSessionFalseBreakout(candles) {
+function detectSessionFalseBreakout(candles, asset) {
   const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, mode: null };
   if (!candles || candles.length < 30) return result;
 
@@ -533,7 +533,27 @@ function detectSessionFalseBreakout(candles) {
   const rangeLow = Math.min(...windowCandles.map(c => c.low));
 
   // Velas posteriores al cierre de la sesión de referencia
-  const confirmCandles = candles.slice(windowEndIdx + 1);
+  let confirmCandles = candles.slice(windowEndIdx + 1);
+  // FIX (14/9): en FX/oro real (asset.is24h === false) una ruptura confirmada durante
+  // la sesión asiática o la pre-Londres (baja liquidez, spreads más anchos) es mucho
+  // menos confiable que la misma ruptura durante Londres/NY. Hallazgo respaldado por
+  // literatura de mercado sobre false breakouts: las rupturas medidas en sesión
+  // asiática o pre-Londres muestran una tasa de fallo meaningfully mayor porque el
+  // spread se ensancha y hay menos participantes reales moviendo el precio. Coincide
+  // con los datos reales: EURUSD (-6R, 0G/6P) y XAUUSD (-0.3R, 3G/7P) — ambos
+  // is24h:false — son las dos combinaciones negativas de esta estrategia; BTCUSD/ETHUSD
+  // (is24h:true, +3.85R y +7.97R) no tienen "horas flacas" reales en cripto, así que se
+  // dejan sin acotar. Se restringe la confirmación al mismo día de la sesión de
+  // referencia y antes de las 21:00 Córdoba (cierre aprox. de la sesión de NY, previo a
+  // la ventana asiática de baja liquidez); si no hay ruptura confirmada en ese horario,
+  // se espera a la sesión de Londres del día siguiente en vez de tomar una ruptura tardía.
+  if (asset && asset.is24h === false) {
+    const confirmEndMin = 21 * 60;
+    confirmCandles = confirmCandles.filter(c => {
+      const p = getCordobaTimeParts(c.time);
+      return p.dateKey === windowDateKey && (p.hour * 60 + p.minute) < confirmEndMin;
+    });
+  }
   if (!confirmCandles.length) return result;
 
   let breakoutCandle = null, direction = null;
@@ -1692,7 +1712,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
   // eth_momentum_breakout (solo ETHUSD): el concepto de rango de sesión
   // anterior no depende de tener volumen real, así que no hay motivo para
   // restringirla por símbolo.
-  const sfb = safeRun('session_false_breakout', detectSessionFalseBreakout, candles);
+  const sfb = safeRun('session_false_breakout', detectSessionFalseBreakout, candles, asset);
   if (sfb.bullish || sfb.bearish) {
     signals.push({
       strategy: 'session_false_breakout', label: 'Session False Breakout (Andrea Unger)',
