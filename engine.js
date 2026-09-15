@@ -246,10 +246,13 @@ const CONFIG = {
   // temporales que Soy revisa y decide si mantener.
   CIRCUIT_BREAKER: {
     enabled: true,
-    consecutiveLossThreshold: 5,
-    // v4.9 (sección 14, 27/8): umbral del breaker agregado por estrategia (suma los 4
-    // símbolos) — 8, el doble del umbral por símbolo. Ver razonamiento completo junto a
-    // checkCircuitBreakerAggregate().
+    // FIX (14/9, a pedido de Soy — "quiero que sea rentable, no excusas"): bajado de 5
+    // a 3. Con 5, una combinación podía perder 5 operaciones seguidas antes de
+    // desactivarse sola — mucho drawdown innecesario para algo que ya viene mal. Con 3
+    // corta antes. Contra: más falsos positivos en combinaciones nuevas que todavía no
+    // tienen muestra (una mala racha de 3 al arrancar puede apagar algo que en realidad
+    // era viable) — a vigilar en autoDisabledStrategies durante las próximas semanas.
+    consecutiveLossThreshold: 3,
     consecutiveLossThresholdAggregate: 8
   },
   // v4.9 (sección 13, 27/8): piso mínimo de computeContextualScore() para que una señal
@@ -1701,7 +1704,7 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
       // contradictorios para el mismo id. Se sincroniza acá: si hay una entrada
       // activa para este symbol+estrategia con el mismo timestamp (mismo id de
       // señal), se da de baja también del tracker en vivo.
-      if (h.strategyKeys && h.strategyKeys[0]) {
+   if (h.strategyKeys && h.strategyKeys[0]) {
         const liveKey = `${h.symbol}_${h.strategyKeys[0]}`;
         const activeEntry = state.activeCustomSignals[liveKey];
         if (activeEntry && activeEntry.timestamp === h.timestamp) {
@@ -2145,4 +2148,3 @@ module.exports = {
   startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isKillZoneWindow,
   startCryptoQuickCheckLoop, stopCryptoQuickCheckLoop
 };
-        
