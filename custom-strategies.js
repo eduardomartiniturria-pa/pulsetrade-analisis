@@ -1,12 +1,22 @@
 // ============================================================
-// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.8 (CORREGIDO)
+// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.12 (16/9, plan de rentabilidad)
 // ============================================================
-// Estas 8 estrategias (Kill Zone Apertura NY, Pivots Breakout & Reversal,
-// Price Action + RSI + EMA, Supply and Demand, EMA Cross Scalping,
-// Divergencia RSI, Bollinger Squeeze, ETH VWAP Trend Scalp) son el único
-// motor de señales del engine — no pasan por ningún filtro global de
-// confluencia (premium/discount, HTF trend, etc). Cada una se evalúa por
-// sí sola, con su propia gestión de riesgo, tal como fueron definidas.
+// Cambios v4.12 (16/9, plan de rentabilidad — ver respaldo consolidado del mismo día):
+// - ELIMINADAS DEL CÓDIGO (no solo desactivadas): Pivots Breakout & Reversal,
+//   EMA Cross Scalping, Bollinger Squeeze Breakout. Las 3 sin tesis de mercado real
+//   y sin indicio de que fueran a mejorar con más muestra (evidencia: -9.75R, -3.27R
+//   y -1.85R respectivamente en el período 27/8-14/9, ver respaldo). Las funciones
+//   auxiliares que otras estrategias siguen usando (findStrictPivotHighs/Lows,
+//   calculateBollingerSeries, getHtfTrendDirection) se conservaron.
+// - Session False Breakout restringida a BTCUSD/ETHUSD (antes los 4 activos) — sin
+//   edge en EURUSD/XAUUSD ni siquiera acotando a Londres/NY (-3.89R y -0.3R).
+// Las estrategias activas ahora son: Kill Zone Apertura NY, Price Action + RSI + EMA
+// (fuera de whitelist en engine.js, sin cambios acá), Supply and Demand, Divergencia
+// RSI (ídem, fuera de whitelist), ETH VWAP Trend Scalp (ídem), ETH Momentum
+// Breakout, Session Breakout + VWAP Reversion, Session False Breakout — motor único
+// de señales, sin filtro global de confluencia (premium/discount, HTF trend, etc).
+// Cada una se evalúa por sí sola, con su propia gestión de riesgo, tal como fueron
+// definidas.
 // (Sesión 19/8: se sacaron EUR London Pullback VWAP y XAU VWAP Reversion
 // Scalp por usar datos de volumen simulados/estimados en OTC — decisión
 // del usuario de operar solo con datos reales. El motor SMC se eliminó
@@ -601,14 +611,11 @@ function detectSessionFalseBreakout(candles, asset) {
 
   return result;
 }
-// Parámetros:
-//   - PH (pivot high): máximo de la vela > máximo de las 4 anteriores y > máximo de las 2 siguientes
-//   - PL (pivot low): mínimo de la vela < mínimo de las 4 anteriores y < mínimo de las 2 siguientes
-//   - Sin restricción horaria. Timeframe recomendado: 15m
-//   - Modalidad A (Ruptura): cruce de SMA5/SMA10 (o alineación ya vigente) + MACD a favor
-//   - Modalidad B (Reversión): barrida del pivote + divergencia de MACD contra el precio
-//   - SL = 1.5% del nivel de pivote roto
-//   - TP1 = riesgo x2 (RR 1:2 fijo)
+// NOTA (16/9, plan de rentabilidad): Pivots Breakout & Reversal (antes acá) fue
+// ELIMINADA DEL CÓDIGO por decisión explícita de Soy — no solo desactivada. Evidencia:
+// 8.3% winrate (1G/11P) y -9.75R en el período 27/8-14/9, la peor combinación de toda
+// la app, sin indicio de edge real en ningún activo. findStrictPivotHighs/Lows se
+// conservan porque Divergencia RSI (detectRsiDivergence, más abajo) también las usa.
 
 function findStrictPivotHighs(candles) {
   const pivots = [];
@@ -632,108 +639,6 @@ function findStrictPivotLows(candles) {
     if (ok) pivots.push({ index: i, price: c.low });
   }
   return pivots;
-}
-
-function detectPivotsBreakoutReversal(candles) {
-  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, mode: null };
-  // v4.7: se sube el mínimo de 10 a 20 velas porque ahora el SL se ancla en ATR14
-  // (ver más abajo) — calculateATR necesita al menos period+1=15 velas para no
-  // devolver null; 20 deja margen para que además los pivotes estrictos (que ya
-  // consumen las primeras 4 y últimas 2 velas del set) tengan datos reales atrás.
-  if (!candles || candles.length < 20) return result;
-
-  const PH = findStrictPivotHighs(candles);
-  const PL = findStrictPivotLows(candles);
-  if (!PH.length || !PL.length) return result;
-  const lastPH = PH[PH.length - 1];
-  const lastPL = PL[PL.length - 1];
-
-  const last = candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
-
-  const sma5 = calculateSMASeries(candles, 5);
-  const sma10 = calculateSMASeries(candles, 10);
-  const { macdLine } = calculateMACDSeries(candles);
-
-  const i = candles.length - 1;
-  const sma5Now = sma5[i], sma5Prev = sma5[i - 1], sma10Now = sma10[i], sma10Prev = sma10[i - 1];
-  const macdNow = macdLine[i], macdPrev = macdLine[i - 1];
-
-  const smaCrossUp = sma5Prev !== null && sma10Prev !== null && sma5Now !== null && sma10Now !== null &&
-    sma5Prev <= sma10Prev && sma5Now > sma10Now;
-  const smaCrossDown = sma5Prev !== null && sma10Prev !== null && sma5Now !== null && sma10Now !== null &&
-    sma5Prev >= sma10Prev && sma5Now < sma10Now;
-  const smaAboveNow = sma5Now !== null && sma10Now !== null && sma5Now > sma10Now;
-  const smaBelowNow = sma5Now !== null && sma10Now !== null && sma5Now < sma10Now;
-
-  const macdPositive = macdNow !== null && macdNow > 0;
-  const macdNegative = macdNow !== null && macdNow < 0;
-  const macdCrossUp = macdPrev !== null && macdNow !== null && macdPrev <= 0 && macdNow > 0;
-  const macdCrossDown = macdPrev !== null && macdNow !== null && macdPrev >= 0 && macdNow < 0;
-
-  // --- Modalidad A: Ruptura (a favor) ---
-  if (prev.close <= lastPH.price && last.close > lastPH.price &&
-      (smaCrossUp || smaAboveNow) && (macdPositive || macdCrossUp)) {
-    result.bullish = true; result.mode = 'breakout'; result.entry = last.close;
-    result.details.push(`Ruptura alcista de PH (${lastPH.price.toFixed(2)})`);
-  } else if (prev.close >= lastPL.price && last.close < lastPL.price &&
-      (smaCrossDown || smaBelowNow) && (macdNegative || macdCrossDown)) {
-    result.bearish = true; result.mode = 'breakout'; result.entry = last.close;
-    result.details.push(`Ruptura bajista de PL (${lastPL.price.toFixed(2)})`);
-  }
-
-  // --- Modalidad B: Reversión (falsa ruptura + divergencia MACD) ---
-  if (!result.bullish && !result.bearish) {
-    // Barrida bajista de PL con cierre por encima + divergencia alcista MACD
-    if (last.low < lastPL.price && last.close > lastPL.price) {
-      const priorLow = PL.length >= 2 ? PL[PL.length - 2] : null;
-      if (priorLow) {
-        const priceLL = last.low < priorLow.price; // mínimo más bajo en precio
-        const macdAtPrior = macdLine[priorLow.index];
-        const macdHL = macdAtPrior !== null && macdNow !== null && macdNow > macdAtPrior; // MACD mínimo más alto
-        if (priceLL && macdHL) {
-          result.bullish = true; result.mode = 'reversal'; result.entry = last.close;
-          result.details.push('Reversión alcista: barrida de PL + divergencia alcista MACD');
-        }
-      }
-    }
-    // Barrida alcista de PH con cierre por debajo + divergencia bajista MACD
-    if (!result.bullish && last.high > lastPH.price && last.close < lastPH.price) {
-      const priorHigh = PH.length >= 2 ? PH[PH.length - 2] : null;
-      if (priorHigh) {
-        const priceHH = last.high > priorHigh.price; // máximo más alto en precio
-        const macdAtPrior = macdLine[priorHigh.index];
-        const macdLH = macdAtPrior !== null && macdNow !== null && macdNow < macdAtPrior; // MACD máximo más bajo
-        if (priceHH && macdLH) {
-          result.bearish = true; result.mode = 'reversal'; result.entry = last.close;
-          result.details.push('Reversión bajista: barrida de PH + divergencia bajista MACD');
-        }
-      }
-    }
-  }
-
-  if (result.bullish || result.bearish) {
-    const entry = result.entry;
-    const refLevel = result.bullish ? lastPL.price : lastPH.price;
-    // v4.7 (auditoría Etapa 2): antes el colchón del SL era 1.5% FIJO del precio,
-    // sin importar el activo. Un 1.5% en EURUSD (baja volatilidad intradía) es un
-    // colchón enorme relativo a su rango real; el mismo 1.5% en BTCUSD/XAUUSD puede
-    // ser angosto un día de alta volatilidad y disparar el stop por ruido normal.
-    // Se reemplaza por un colchón de 0.5x ATR14 sobre el nivel estructural roto
-    // (el pivote), que sí se adapta a la volatilidad real y reciente de cada activo.
-    // Se conserva el 0.985/1.015 como fallback SOLO si por algún motivo no hay ATR
-    // calculable (candles insuficientes), para no romper la señal en ese caso raro.
-    const atr = calculateATR(candles);
-    const sl = atr
-      ? (result.bullish ? refLevel - atr * 0.5 : refLevel + atr * 0.5)
-      : (result.bullish ? refLevel * 0.985 : refLevel * 1.015);
-    const risk = Math.abs(entry - sl);
-    result.sl = sl;
-    result.tp1 = result.bullish ? entry + risk * 2 : entry - risk * 2; // RR 1:2 fijo
-    if (atr) result.details.push(`SL ajustado por volatilidad (0.5x ATR14 = ${(atr * 0.5).toFixed(5)}) desde el nivel de pivote`);
-  }
-
-  return result;
 }
 
 // ---------------------------------------------------------
@@ -1057,67 +962,12 @@ function getHtfTrendDirection(htfCandles) {
   return null;
 }
 
-function detectEmaCrossScalping(candles, htfCandles = null) {
-  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null };
-  if (!candles || candles.length < 30) return result;
-
-  const emaFast = calculateEMASeries(candles, 9);
-  const emaSlow = calculateEMASeries(candles, 21);
-  const rsi = calculateRSISeries(candles, 14);
-  const { macdLine, signalLine } = calculateMACDSeries(candles, 12, 26, 9);
-
-  const i = candles.length - 1;
-  const fastNow = emaFast[i], fastPrev = emaFast[i - 1];
-  const slowNow = emaSlow[i], slowPrev = emaSlow[i - 1];
-  const rsiNow = rsi[i];
-  const macdNow = macdLine[i], signalNow = signalLine[i];
-
-  if (fastNow === null || slowNow === null || fastPrev === null || slowPrev === null || rsiNow === null || macdNow === null || signalNow === null) return result;
-
-  const htfTrend = getHtfTrendDirection(htfCandles);
-  if (htfTrend === null) {
-    result.details.push('Sin datos de tendencia HTF disponibles — señal omitida (requiere confluencia)');
-    return result;
-  }
-
-  const crossUp = fastPrev <= slowPrev && fastNow > slowNow;
-  const crossDown = fastPrev >= slowPrev && fastNow < slowNow;
-
-  const last = candles[i];
-
-  // v4.7 (auditoría Etapa 2): el 1%/2% fijo venía literal del Pine Script original
-  // (nota arriba: "90% win rate" de marketing, no verificable). Un % fijo del precio
-  // no distingue XAUUSD en día de noticias de EURUSD en rango asiático. Se reemplaza
-  // por ATR14 del propio timeframe de entrada (M15), manteniendo la misma RR 1:2 que
-  // ya tenía. Fallback al 1%/2% original únicamente si el ATR no es calculable.
-  const atrScalp = calculateATR(candles);
-
-  if (crossUp && rsiNow > 50 && macdNow > signalNow && htfTrend === 'up') {
-    result.bullish = true;
-    result.entry = last.close;
-    if (atrScalp) {
-      result.sl = result.entry - atrScalp;
-      result.tp1 = result.entry + atrScalp * 2;
-    } else {
-      result.sl = result.entry * (1 - 0.01);  // fallback: 1% SL si no hay ATR
-      result.tp1 = result.entry * (1 + 0.02); // fallback: 2% TP, RR 1:2
-    }
-    result.details.push(`Cruce EMA9>EMA21 + RSI ${rsiNow.toFixed(1)} (>50) + MACD alcista + tendencia HTF alcista${atrScalp ? ' (SL/TP por ATR14)' : ''}`);
-  } else if (crossDown && rsiNow < 50 && macdNow < signalNow && htfTrend === 'down') {
-    result.bearish = true;
-    result.entry = last.close;
-    if (atrScalp) {
-      result.sl = result.entry + atrScalp;
-      result.tp1 = result.entry - atrScalp * 2;
-    } else {
-      result.sl = result.entry * (1 + 0.01);
-      result.tp1 = result.entry * (1 - 0.02);
-    }
-    result.details.push(`Cruce EMA9<EMA21 + RSI ${rsiNow.toFixed(1)} (<50) + MACD bajista + tendencia HTF bajista${atrScalp ? ' (SL/TP por ATR14)' : ''}`);
-  }
-
-  return result;
-}
+// NOTA (16/9, plan de rentabilidad): EMA Cross Scalping (antes acá) fue ELIMINADA DEL
+// CÓDIGO por decisión explícita de Soy. Evidencia: 27.3% winrate (3G/8P) y -3.27R en
+// el período 27/8-14/9, sin indicio de edge sostenido — coincide con la literatura
+// consultada sobre cruces de EMA en forex/oro/cripto líquidos (arbitrados por bots).
+// getHtfTrendDirection() se conserva porque computeContextualScore() la sigue usando
+// para el factor de alineación H1.
 
 // ---------------------------------------------------------
 // ESTRATEGIA 6: DIVERGENCIA RSI
@@ -1250,51 +1100,12 @@ function calculateBollingerSeries(candles, period = 20, mult = 2) {
   return { sma, upper, lower, bandwidth };
 }
 
-function detectBollingerSqueeze(candles) {
-  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null };
-  if (!candles || candles.length < 90) return result;
-
-  const { sma, upper, lower, bandwidth } = calculateBollingerSeries(candles, 20, 2);
-  const i = candles.length - 1;
-  const last = candles[i];
-  const prev = candles[i - 1];
-  if (upper[i] === null || lower[i] === null || upper[i - 1] === null || lower[i - 1] === null) return result;
-
-  // Umbral de squeeze: percentil 20 de los últimos 60 anchos de banda válidos.
-  const bwWindow = bandwidth.slice(Math.max(0, i - 59), i + 1).filter(v => v !== null);
-  if (bwWindow.length < 30) return result;
-  const sorted = [...bwWindow].sort((a, b) => a - b);
-  const p20 = sorted[Math.floor(sorted.length * 0.2)];
-
-  // ¿Hubo squeeze en alguna de las últimas 5 velas (sin contar la actual)?
-  let squeezeSeen = false;
-  for (let j = i - 5; j < i; j++) {
-    if (bandwidth[j] !== null && bandwidth[j] <= p20) { squeezeSeen = true; break; }
-  }
-  if (!squeezeSeen) return result;
-
-  const prevInside = prev.close <= upper[i - 1] && prev.close >= lower[i - 1];
-
-  if (prevInside && last.close > upper[i]) {
-    result.bullish = true;
-    result.entry = last.close;
-    result.sl = sma[i];
-    result.details.push(`Squeeze + ruptura alcista de banda superior (ancho previo en percentil <=20%)`);
-  } else if (prevInside && last.close < lower[i]) {
-    result.bearish = true;
-    result.entry = last.close;
-    result.sl = sma[i];
-    result.details.push(`Squeeze + ruptura bajista de banda inferior (ancho previo en percentil <=20%)`);
-  }
-
-  if (result.bullish || result.bearish) {
-    const risk = Math.abs(result.entry - result.sl);
-    result.tp1 = result.bullish ? result.entry + risk * 2 : result.entry - risk * 2; // RR 1:2
-    result.tp2 = result.bullish ? result.entry + risk * 3 : result.entry - risk * 3; // RR 1:3
-  }
-
-  return result;
-}
+// NOTA (16/9, plan de rentabilidad): Bollinger Squeeze Breakout (antes acá) fue
+// ELIMINADA DEL CÓDIGO por decisión explícita de Soy. Evidencia: 26.7% winrate
+// (4G/11P) y -1.85R en el período 27/8-14/9, mala en casi todo salvo BTC en el
+// pasado — sin edge sostenido. calculateBollingerSeries() se conserva porque
+// Divergencia RSI (detectRsiDivergence, más arriba) también la usa (banda superior/
+// inferior como filtro de "nivel extendido").
 
 // ---------------------------------------------------------
 // ESTRATEGIA 8: ETH VWAP TREND SCALP (id: eth_vwap_scalp) — solo ETHUSD
@@ -1614,14 +1425,8 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
     });
   }
 
-  const piv = safeRun('pivots_breakout_reversal', detectPivotsBreakoutReversal, candles);
-  if (piv.bullish || piv.bearish) {
-    signals.push({
-      strategy: 'pivots_breakout_reversal', label: 'Pivots Breakout & Reversal',
-      direction: piv.bullish ? 'long' : 'short', entry: piv.entry, sl: piv.sl, tp1: piv.tp1,
-      details: piv.details, mode: piv.mode, independent: true
-    });
-  }
+  // Pivots Breakout & Reversal eliminada del código (16/9, plan de rentabilidad) —
+  // ver nota junto a findStrictPivotHighs/Lows en la sección de indicadores.
 
   const pa = safeRun('price_action_rsi_ema', detectPriceActionRsiEma, candles);
   if (pa.bullish || pa.bearish) {
@@ -1641,17 +1446,9 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
     });
   }
 
-  // FIX (auditoría de estrategias, sesión 14/8): ahora recibe htfCandles y exige
-  // confluencia con la tendencia del timeframe mayor (ver detectEmaCrossScalping) —
-  // sin eso, no dispara. Ya no es un disparador puramente independiente.
-  const emaScalp = safeRun('ema_cross_scalping', detectEmaCrossScalping, candles, htfCandles);
-  if (emaScalp.bullish || emaScalp.bearish) {
-    signals.push({
-      strategy: 'ema_cross_scalping', label: 'EMA Cross Scalping (RSI+MACD+HTF)',
-      direction: emaScalp.bullish ? 'long' : 'short', entry: emaScalp.entry, sl: emaScalp.sl, tp1: emaScalp.tp1,
-      details: emaScalp.details, independent: true
-    });
-  }
+  // EMA Cross Scalping y Bollinger Squeeze Breakout eliminadas del código (16/9,
+  // plan de rentabilidad) — ver notas junto a getHtfTrendDirection() y
+  // calculateBollingerSeries() más arriba.
 
   const rsiDiv = safeRun('rsi_divergence', detectRsiDivergence, candles);
   if (rsiDiv.bullish || rsiDiv.bearish) {
@@ -1659,15 +1456,6 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
       strategy: 'rsi_divergence', label: 'Divergencia RSI',
       direction: rsiDiv.bullish ? 'long' : 'short', entry: rsiDiv.entry, sl: rsiDiv.sl, tp1: rsiDiv.tp1, tp2: rsiDiv.tp2,
       details: rsiDiv.details, independent: true
-    });
-  }
-
-  const bbSqueeze = safeRun('bollinger_squeeze', detectBollingerSqueeze, candles);
-  if (bbSqueeze.bullish || bbSqueeze.bearish) {
-    signals.push({
-      strategy: 'bollinger_squeeze', label: 'Bollinger Squeeze Breakout',
-      direction: bbSqueeze.bullish ? 'long' : 'short', entry: bbSqueeze.entry, sl: bbSqueeze.sl, tp1: bbSqueeze.tp1, tp2: bbSqueeze.tp2,
-      details: bbSqueeze.details, independent: true
     });
   }
 
@@ -1720,11 +1508,15 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
     }
   }
 
-  // Session False Breakout / Mean Reversion (10/9) — corre en los 4 activos,
-  // a diferencia de session_breakout_vwap (solo EURUSD/XAUUSD) o
-  // eth_momentum_breakout (solo ETHUSD): el concepto de rango de sesión
-  // anterior no depende de tener volumen real, así que no hay motivo para
-  // restringirla por símbolo.
+  // Session False Breakout / Mean Reversion (10/9). NUEVO (16/9, plan de
+  // rentabilidad): restringida a BTCUSD/ETHUSD. Antes corría en los 4 activos;
+  // evidencia del período 27/8-14/9: -3.89R (1G/6P) en EURUSD y -0.3R (3G/7P) en
+  // XAUUSD (ambos is24h:false), contra +3.85R (BTCUSD) y +7.97R (ETHUSD, ambos
+  // is24h:true) — coincide con el propio filtro de horas flacas que ya tiene esta
+  // función para activos is24h:false (ver más arriba): en FX/oro real, incluso
+  // acotando la confirmación a la sesión de Londres/NY, la estrategia sigue sin
+  // edge; se saca del todo en vez de seguir parcheando el filtro horario.
+  if (symbol === 'BTCUSD' || symbol === 'ETHUSD') {
   const sfb = safeRun('session_false_breakout', detectSessionFalseBreakout, candles, asset);
   if (sfb.bullish || sfb.bearish) {
     signals.push({
@@ -1732,6 +1524,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
       direction: sfb.bullish ? 'long' : 'short', entry: sfb.entry, sl: sfb.sl, tp1: sfb.tp1, tp2: sfb.tp2,
       details: sfb.details, mode: sfb.mode, independent: true
     });
+  }
   }
 
   // Score contextual (sección 13, 27/8: pasó de informativo a filtro real — a pedido
@@ -1769,12 +1562,9 @@ module.exports = {
   evaluateAll,
   computeContextualScore,
   detectKillZoneNY,
-  detectPivotsBreakoutReversal,
   detectPriceActionRsiEma,
   detectSupplyDemand,
-  detectEmaCrossScalping,
   detectRsiDivergence,
-  detectBollingerSqueeze,
   detectEthVwapScalp,
   detectEthMomentumBreakout,
   detectSessionBreakoutVwap,
