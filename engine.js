@@ -255,6 +255,23 @@ const CONFIG = {
     consecutiveLossThreshold: 3,
     consecutiveLossThresholdAggregate: 8
   },
+  // NUEVO (15/9, auditoría — "diworsification"): con 7-10 estrategias corriendo con
+  // peso parejo, la ganancia real de las 2-3 que sí tienen edge (sobre todo
+  // ny_open_kill_zone) se diluye con el resto, que empata o resta. Esto NO cambia el
+  // tamaño de posición solo — no hay money management automático en este motor, es
+  // un multiplicador SUGERIDO que viaja con cada señal (frozen.riskWeight en
+  // resolveCustomSignal) para que Soy decida el tamaño real al operar. 1 = tamaño
+  // normal. Valores según edge observado en strategyStatsBySymbol al 15/9: subido en
+  // lo que más aporta, bajado en lo que empata o resta. Estrategia sin entrada acá =
+  // 1 por default.
+  STRATEGY_RISK_WEIGHT: {
+    ny_open_kill_zone: 1.5,
+    session_false_breakout: 1.3,
+    bollinger_squeeze: 0.5,
+    ema_cross_scalping: 0.5,
+    pivots_breakout_reversal: 0.5,
+    session_breakout_vwap: 0.5
+  },
   // v4.9 (sección 13, 27/8): piso mínimo de computeContextualScore() para que una señal
   // se muestre — decidido por el usuario en 55%, no propuesto por el motor. Antes el
   // score era puramente informativo (se mostraba pero no filtraba nada). Se pasa como
@@ -1452,7 +1469,10 @@ function pushSignalHistory(signal) {
     slPips: signal.slPips, tp1Pips: signal.tp1Pips, tp2Pips: signal.tp2Pips,
     decimals: signal.decimals, confidence: signal.confidence, result: 'pending', timestamp: signal.timestamp,
     strategyKeys: signal.strategyKeys || [], rMultiple: null, regime: signal.regime || 'unknown',
-    source: signal.source || 'smc'
+    // FIX (15/9, auditoría): antes el fallback era 'smc', mezclando en las estadísticas
+    // señales viejas sin campo source (de antes de trackear por estrategia) con la
+    // estrategia real 'smc'. Ahora usan su propio bucket, separable en cualquier reporte.
+    source: signal.source || 'legacy_untagged'
   };
   state.signalHistory.unshift(entry);
   if (state.signalHistory.length > CONFIG.HISTORY_LIMIT) state.signalHistory.pop();
@@ -1471,7 +1491,7 @@ function updatePatternStats(entry) {
 
 function updateStrategyStatsBySymbol(entry) {
   if (entry.result !== 'win' && entry.result !== 'loss') return;
-  const symbol = entry.symbol, key = entry.source || 'smc';
+  const symbol = entry.symbol, key = entry.source || 'legacy_untagged'; // FIX (15/9, auditoría): ver nota en pushSignalHistory
   if (!symbol || !key) return;
   state.strategyStatsBySymbol[symbol] = state.strategyStatsBySymbol[symbol] || {};
   if (!state.strategyStatsBySymbol[symbol][key]) {
@@ -1704,7 +1724,7 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
       // contradictorios para el mismo id. Se sincroniza acá: si hay una entrada
       // activa para este symbol+estrategia con el mismo timestamp (mismo id de
       // señal), se da de baja también del tracker en vivo.
-   if (h.strategyKeys && h.strategyKeys[0]) {
+      if (h.strategyKeys && h.strategyKeys[0]) {
         const liveKey = `${h.symbol}_${h.strategyKeys[0]}`;
         const activeEntry = state.activeCustomSignals[liveKey];
         if (activeEntry && activeEntry.timestamp === h.timestamp) {
@@ -1803,7 +1823,7 @@ function appendClosedSignal(entry) {
   let dayList;
   try { dayList = JSON.parse(localStorage.getItem(storageKey) || '[]'); } catch (e) { dayList = []; }
   dayList.push({
-    symbol: entry.symbol, type: entry.type, source: entry.source || 'smc',
+    symbol: entry.symbol, type: entry.type, source: entry.source || 'legacy_untagged', // FIX (15/9, auditoría)
     result: entry.result, rMultiple: entry.rMultiple, timestamp: entry.timestamp
   });
   localStorage.setItem(storageKey, JSON.stringify(dayList));
@@ -1829,9 +1849,12 @@ function playAlertBeep() {}
 function showSignalAlertBanner() {}
 function notifyNewSignal(signal) {
   const asset = ASSETS[signal.symbol];
-  const title = `${signal.type === 'long' ? '🟢 LONG' : '🔴 SHORT'} ${asset ? asset.name : signal.symbol}${signal.source && signal.source !== 'smc' ? ' · ' + signal.strategyLabels[0] : ''}`;
+  const title = `${signal.type === 'long' ? '🟢 LONG' : '🔴 SHORT'} ${asset ? asset.name : signal.symbol}${signal.source && signal.source !== 'legacy_untagged' ? ' · ' + signal.strategyLabels[0] : ''}`;
   const confPart = (signal.confidence !== null && signal.confidence !== undefined) ? `· Confianza ${signal.confidence}%` : '';
-  const body = `Entrada ${fmt(signal.entry, signal.decimals)} · SL ${fmt(signal.sl, signal.decimals)} · TP1 ${fmt(signal.tp1, signal.decimals)}${confPart}`;
+  // NUEVO (15/9): tamaño sugerido visible en el push cuando no es el default (1) — ver
+  // CONFIG.STRATEGY_RISK_WEIGHT. Puramente informativo, no ajusta nada solo.
+  const weightPart = (signal.riskWeight && signal.riskWeight !== 1) ? ` · Tamaño sugerido ${signal.riskWeight}x` : '';
+  const body = `Entrada ${fmt(signal.entry, signal.decimals)} · SL ${fmt(signal.sl, signal.decimals)} · TP1 ${fmt(signal.tp1, signal.decimals)}${confPart}${weightPart}`;
   sendPushToAll({ title, body, symbol: signal.symbol, signal }).catch(err => console.error('Error enviando push:', err.message));
 }
 function toggleSound() {}
@@ -1924,6 +1947,7 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
       // de evaluateAll() (custom-strategies.js). Puramente informativo, ver nota ahí.
       rr1: formatRR(tp1), rr2: formatRR(tp2), confidence: (customSig.confidence != null ? customSig.confidence : null),
       strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
+      riskWeight: (CONFIG.STRATEGY_RISK_WEIGHT && CONFIG.STRATEGY_RISK_WEIGHT[customSig.strategy]) || 1,
       details: customSig.details, source: customSig.strategy, regime: 'n/a',
       timestamp: Date.now(), decimals: asset.decimals, detectedAt: Date.now(),
       tp1HitAt: null
@@ -2143,8 +2167,39 @@ function stopAutoRefreshLoop() {
   if (autoRefreshTimer) { clearTimeout(autoRefreshTimer); autoRefreshTimer = null; }
 }
 
+// FIX (15/9, auditoría): checkCircuitBreaker() solo corre cuando llega un resultado
+// nuevo (push de una operación cerrada) — si se baja CONFIG.CIRCUIT_BREAKER.
+// consecutiveLossThreshold (como pasó el 14/9, de 5 a 3), una racha que ya estaba en
+// curso ANTES del cambio y ya iguala o supera el nuevo umbral queda "viva" hasta la
+// próxima pérdida de esa misma combinación, en vez de cortarse apenas arranca el
+// proceso con el umbral nuevo. Este chequeo corre una sola vez al cargar el módulo
+// (require de engine.js) y aplica la regla vigente contra el estado ya guardado.
+function applyRetroactiveCircuitBreaker() {
+  if (!CONFIG.CIRCUIT_BREAKER || !CONFIG.CIRCUIT_BREAKER.enabled) return;
+  const threshold = CONFIG.CIRCUIT_BREAKER.consecutiveLossThreshold;
+  Object.keys(state.consecutiveLosses || {}).forEach(ckey => {
+    const streak = state.consecutiveLosses[ckey];
+    if (streak < threshold) return;
+    if (state.autoDisabledStrategies[ckey]) return; // ya estaba apagada, no repetir
+    const sepIdx = ckey.indexOf('_');
+    if (sepIdx < 0) return;
+    const symbol = ckey.slice(0, sepIdx), key = ckey.slice(sepIdx + 1);
+    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol]) CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] = [];
+    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
+      CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].push(key);
+    }
+    state.autoDisabledStrategies[ckey] = { symbol, key, disabledAt: Date.now(), lossStreak: streak, retroactive: true };
+    console.log(`[CIRCUIT BREAKER RETROACTIVO] ${ckey} auto-desactivada al arrancar: racha de ${streak} ya superaba el umbral vigente (${threshold})`);
+  });
+  if (Object.keys(state.autoDisabledStrategies).length) {
+    localStorage.setItem('pt_auto_disabled_strategies', JSON.stringify(state.autoDisabledStrategies));
+  }
+}
+applyRetroactiveCircuitBreaker();
+
 module.exports = {
   state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
   startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isKillZoneWindow,
   startCryptoQuickCheckLoop, stopCryptoQuickCheckLoop
 };
+        
