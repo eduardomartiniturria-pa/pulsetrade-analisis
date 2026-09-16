@@ -327,11 +327,24 @@ function detectSessionBreakoutVwap(candles) {
     const rangeHigh = Math.max(...rangeCandles.map(c => c.high));
     const rangeLow = Math.min(...rangeCandles.map(c => c.low));
     const entry = last.close;
+    // FIX (15/9, auditoría): antes el SL de este modo iba al extremo opuesto del rango
+    // completo de 10 velas (rangeLow/rangeHigh) mientras el TP era solo 1.5x-2x ese
+    // riesgo — con 5 operaciones reales en producción, 0% winrate. El riesgo real
+    // terminaba siendo "todo el ancho del rango + lo que ya rompió el precio", mucho
+    // más grande que en las demás estrategias del archivo, que anclan el SL a
+    // estructura reciente (ver detectSessionFalseBreakout: SL = 2x ATR14). Ahora usa el
+    // mismo patrón: extremo de las últimas 3 velas ± un cuarto de ATR de buffer, no el
+    // rango completo de 10. Reduce el riesgo por operación sin tocar la condición de
+    // entrada (rangeHigh/rangeLow siguen siendo el gatillo de ruptura, no el ancla del SL).
+    const atr = calculateATR(candles) || 0;
+    const structLookback = candles.slice(-4, -1);
+    const structLow = structLookback.length ? Math.min(...structLookback.map(c => c.low)) : rangeLow;
+    const structHigh = structLookback.length ? Math.max(...structLookback.map(c => c.high)) : rangeHigh;
     if (last.close > rangeHigh && last.close > lastVwap) {
-      result.bullish = true; result.entry = entry; result.sl = rangeLow; result.mode = 'breakout';
+      result.bullish = true; result.entry = entry; result.sl = structLow - atr * 0.25; result.mode = 'breakout';
       result.details.push(`Ruptura alcista del rango de sesión (${rangeLow.toFixed(5)}-${rangeHigh.toFixed(5)}), precio sobre VWAP (${lastVwap.toFixed(5)})`);
     } else if (last.close < rangeLow && last.close < lastVwap) {
-      result.bearish = true; result.entry = entry; result.sl = rangeHigh; result.mode = 'breakout';
+      result.bearish = true; result.entry = entry; result.sl = structHigh + atr * 0.25; result.mode = 'breakout';
       result.details.push(`Ruptura bajista del rango de sesión (${rangeLow.toFixed(5)}-${rangeHigh.toFixed(5)}), precio bajo VWAP (${lastVwap.toFixed(5)})`);
     }
   }
