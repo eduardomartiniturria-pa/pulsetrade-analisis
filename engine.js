@@ -1,6 +1,33 @@
 // ============================================================
-// PULSE TRADE v4.7.6 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.7.7 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.7.7 (16/9, plan de rentabilidad — ver respaldo consolidado del mismo día):
+// - ENABLED_STRATEGIES: sacadas pivots_breakout_reversal, bollinger_squeeze,
+//   ema_cross_scalping — eliminadas del código en custom-strategies.js (no solo
+//   desactivadas). Evidencia: -9.75R, -1.85R y -3.27R respectivamente en el período
+//   27/8-14/9, sin tesis de mercado real. DISABLED_STRATEGIES_BY_SYMBOL y
+//   SIGNAL_EXPIRATION_MS_BY_STRATEGY limpiados de referencias a las 3.
+// - CIRCUIT_BREAKER: umbral fijo (3, 14/9) reemplazado por dos niveles según calidad
+//   histórica real de cada combinación (getCircuitBreakerThreshold): >=15 operaciones
+//   + expectancy positiva -> tolera 5 pérdidas seguidas; cualquier otra combinación
+//   -> se apaga a la 2ª. Corrige el efecto colateral confirmado del 14/9 (apagó
+//   kill_zone_ny en XAUUSD, la mejor estrategia del sistema, con solo 3 pérdidas).
+//   applyRetroactiveCircuitBreaker() y seedStrategyStatsFromBacktest() ahora
+//   comparten la lógica de apagado vía disableCombinationByCircuitBreaker().
+// - seedStrategyStatsFromBacktest(): fix del bug real encontrado en la auditoría —
+//   una combinación seeded con 0 ganadas nunca tocaba consecutiveLosses (caso real:
+//   session_false_breakout en EURUSD, 0G/6P, nunca vista por el Circuit Breaker).
+//   Ahora, cuando wins===0 y losses>0, la racha es exactamente losses (no hay
+//   ganada que la corte) y se evalúa contra el circuit breaker al momento del seed.
+// - STRATEGY_RISK_WEIGHT: fix de bug real — tenía la key vieja 'ny_open_kill_zone'
+//   en vez de 'kill_zone_ny' (renombrada 30/8), así que el multiplicador 1.5x de la
+//   mejor estrategia del sistema nunca se aplicaba desde que se implementó (15/9).
+// - NUEVO: modo probation/sombra (CONFIG.PROBATION, CONFIG.PROBATION_STRATEGIES,
+//   checkProbationGraduation()) — cualquier estrategia que se agregue de ahora en
+//   más y se ponga en PROBATION_STRATEGIES corre sin notificar por push hasta
+//   juntar 20 señales resueltas (entre los 4 símbolos) con R neto positivo.
+// - session_false_breakout restringida a BTCUSD/ETHUSD en custom-strategies.js (sin
+//   cambios acá, ya viene filtrada por symbol desde evaluateAll()).
 // Cambios v4.7.6 (11/9, auto-tune por symbol+estrategia):
 // - Causa raíz confirmada leyendo el código real: runAutoTune(symbol) calculaba
 //   un único umbral de confianza por símbolo, mezclando en una sola expectancy
@@ -123,7 +150,6 @@ const CONFIG = {
   SIGNAL_COOLDOWN_MS: 15 * 60 * 1000,
   SIGNAL_EXPIRATION_MS: 72 * 60 * 60 * 1000,
   SIGNAL_EXPIRATION_MS_BY_STRATEGY: {
-    ema_cross_scalping: 4 * 60 * 60 * 1000,
     kill_zone_ny: 4 * 60 * 60 * 1000
   },
   // FIX (7.3, sesión 25/8, cierre): killZoneIntervalMs pasó de 60s a 4min. Con datos
@@ -227,15 +253,15 @@ const CONFIG = {
     FMP: 'https://financialmodelingprep.com/stable'
   },
   // v4.6: LISTA BLANCA - Solo estas estrategias están permitidas para operar
+  // FIX (16/9, plan de rentabilidad): sacadas pivots_breakout_reversal,
+  // bollinger_squeeze, ema_cross_scalping — eliminadas del código en
+  // custom-strategies.js (no solo desactivadas), ver respaldo del 16/9.
   ENABLED_STRATEGIES: [
     'kill_zone_ny',
-    'pivots_breakout_reversal',
-    'bollinger_squeeze',
     'supply_demand',
-    'ema_cross_scalping',
     'eth_momentum_breakout', // v4.10 (29/8), solo ETHUSD — ver custom-strategies.js
     'session_breakout_vwap', // sesión 03/09, solo EURUSD/XAUUSD — ver custom-strategies.js
-    'session_false_breakout' // sesión 10/09, los 4 símbolos — ver custom-strategies.js
+    'session_false_breakout' // 10/09; restringida a BTCUSD/ETHUSD el 16/9 — ver custom-strategies.js
   ],
   // v4.6: LISTA NEGRA POR ACTIVO - Desactiva estrategias específicas que fallan en un activo
   // v4.7: CIRCUIT BREAKER - auto-desactiva una estrategia en un activo tras N pérdidas
@@ -246,13 +272,21 @@ const CONFIG = {
   // temporales que Soy revisa y decide si mantener.
   CIRCUIT_BREAKER: {
     enabled: true,
-    // FIX (14/9, a pedido de Soy — "quiero que sea rentable, no excusas"): bajado de 5
-    // a 3. Con 5, una combinación podía perder 5 operaciones seguidas antes de
-    // desactivarse sola — mucho drawdown innecesario para algo que ya viene mal. Con 3
-    // corta antes. Contra: más falsos positivos en combinaciones nuevas que todavía no
-    // tienen muestra (una mala racha de 3 al arrancar puede apagar algo que en realidad
-    // era viable) — a vigilar en autoDisabledStrategies durante las próximas semanas.
-    consecutiveLossThreshold: 3,
+    // FIX (16/9, plan de rentabilidad): el umbral fijo de 3 (14/9) se reemplaza por dos
+    // niveles según la calidad histórica real de cada combinación symbol+estrategia
+    // (ver getCircuitBreakerThreshold()). Motivo confirmado con datos reales de
+    // /api_state del 16/9: ese umbral fijo apagó a kill_zone_ny en XAUUSD (la mejor
+    // estrategia del sistema, +4.47R históricos) con solo 3 pérdidas seguidas — el
+    // mismo trato que a una estrategia sin ningún historial. Ahora una combinación con
+    // historial real (>=qualifiedMinSample operaciones cerradas) y expectancy positiva
+    // (avgR > 0) tolera qualifiedThreshold pérdidas seguidas antes de apagarse;
+    // cualquier otra (nueva, sin validar, o con expectancy negativa) se apaga con
+    // defaultThreshold. El breaker agregado (across símbolos) se deja con umbral fijo:
+    // ya es una segunda capa de seguridad más amplia, pensada para rachas repartidas
+    // entre los 4 activos, no para una sola combinación con historial propio.
+    qualifiedMinSample: 15,
+    qualifiedThreshold: 5,
+    defaultThreshold: 2,
     consecutiveLossThresholdAggregate: 8
   },
   // NUEVO (15/9, auditoría — "diworsification"): con 7-10 estrategias corriendo con
@@ -264,12 +298,17 @@ const CONFIG = {
   // normal. Valores según edge observado en strategyStatsBySymbol al 15/9: subido en
   // lo que más aporta, bajado en lo que empata o resta. Estrategia sin entrada acá =
   // 1 por default.
+  // FIX (16/9, hallazgo de auditoría): esta tabla tenía la key vieja 'ny_open_kill_zone'
+  // (renombrada a 'kill_zone_ny' el 30/8, ver custom-strategies.js). Como
+  // resolveCustomSignal() busca CONFIG.STRATEGY_RISK_WEIGHT[customSig.strategy] y
+  // customSig.strategy siempre llega como 'kill_zone_ny', la key vieja nunca hizo
+  // match — el multiplicador 1.5x para la mejor estrategia del sistema nunca se
+  // aplicó en ningún push ni en frozen.riskWeight desde que se implementó (15/9).
+  // Corregido acá. Se sacan además las entradas de las 3 estrategias eliminadas del
+  // código el 16/9 (bollinger_squeeze, ema_cross_scalping, pivots_breakout_reversal).
   STRATEGY_RISK_WEIGHT: {
-    ny_open_kill_zone: 1.5,
+    kill_zone_ny: 1.5,
     session_false_breakout: 1.3,
-    bollinger_squeeze: 0.5,
-    ema_cross_scalping: 0.5,
-    pivots_breakout_reversal: 0.5,
     session_breakout_vwap: 0.5
   },
   // v4.9 (sección 13, 27/8): piso mínimo de computeContextualScore() para que una señal
@@ -278,19 +317,30 @@ const CONFIG = {
   // 7º parámetro a CustomStrategies.evaluateAll(); ese mismo valor se usa como default
   // interno si algún día se llama sin pasarlo.
   MIN_CONFIDENCE_SCORE: 55,
+  // FIX (16/9, plan de rentabilidad): sacadas las entradas de ema_cross_scalping,
+  // bollinger_squeeze y pivots_breakout_reversal — quedaron redundantes porque esas 3
+  // ya no están en ENABLED_STRATEGIES ni existen como funciones en
+  // custom-strategies.js (eliminadas del código, no solo desactivadas). 'smc' se deja
+  // como estaba: ya era redundante desde que el motor SMC se sacó de engine.js en
+  // agosto, no se tocó por no ser parte de esta sesión.
   DISABLED_STRATEGIES_BY_SYMBOL: {
-    ETHUSD: ['ema_cross_scalping', 'smc', 'bollinger_squeeze'],
-    // ema_cross_scalping: 25% winrate (4 op, 1G/3P) del 12/8 al 23/8. Desactivada.
-    // bollinger_squeeze: -12.32R (10G/33P) al 28/8, la peor combinación de toda la
-    // app. Desactivada en ETHUSD (se mantiene activa en BTCUSD/EURUSD, positiva ahí).
-    BTCUSD: ['smc', 'ema_cross_scalping'],
-    // bollinger_squeeze: 33.3% winrate (12 op, 4G/8P) del 12/8 al 23/8. Desactivada.
-    // pivots_breakout_reversal: -8.09R (3G/14P) en XAUUSD y -4.29R (0G/4P) en EURUSD
-    // al 27/8. Desactivada en ambos símbolos. Se mantiene activa en BTCUSD (+0.94R)
-    // y en observación en ETHUSD (-3.28R).
-    XAUUSD: ['smc', 'bollinger_squeeze', 'pivots_breakout_reversal'],
-    EURUSD: ['smc', 'pivots_breakout_reversal']
-  }
+    ETHUSD: ['smc'],
+    BTCUSD: ['smc'],
+    XAUUSD: ['smc'],
+    EURUSD: ['smc']
+  },
+  // NUEVO (16/9, plan de rentabilidad, punto 5): modo probation/sombra para
+  // estrategias nuevas — corren y guardan historial normalmente, pero sin
+  // notificación push (ver resolveCustomSignal) hasta acumular minSampleToGraduate
+  // señales resueltas (sumadas entre los 4 símbolos) con expectancy neta positiva
+  // (ver checkProbationGraduation). Al graduarse, se avisa por push una sola vez y
+  // de ahí en más notifica como cualquier otra estrategia. Para poner una estrategia
+  // nueva en probation, agregar su key acá — no hay nada en probation hoy porque las
+  // 5 activas ya tienen historial validado.
+  PROBATION: {
+    minSampleToGraduate: 20
+  },
+  PROBATION_STRATEGIES: []
 };
 
 class MarketData {
@@ -388,6 +438,9 @@ let state = {
   // símbolo, resetea con cualquier ganada de esa estrategia en cualquier símbolo.
   consecutiveLossesAggregate: (() => { try { return JSON.parse(localStorage.getItem('pt_consecutive_losses_aggregate') || '{}'); } catch (e) { return {}; } })(),
   autoDisabledStrategiesAggregate: (() => { try { return JSON.parse(localStorage.getItem('pt_auto_disabled_strategies_aggregate') || '{}'); } catch (e) { return {}; } })(),
+  // NUEVO (16/9): estrategias que ya salieron de modo probation (ver
+  // CONFIG.PROBATION_STRATEGIES) y volvieron a notificar por push normalmente.
+  probationGraduated: (() => { try { return JSON.parse(localStorage.getItem('pt_probation_graduated') || '{}'); } catch (e) { return {}; } })(),
   backtestCustomStats: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_custom_stats') || '{}'); } catch (e) { return {}; } })(),
   backtestRunning: false,
   soundEnabled: localStorage.getItem('pt_sound_enabled') !== 'false',
@@ -1510,6 +1563,7 @@ function updateStrategyStatsBySymbol(entry) {
 
   checkCircuitBreaker(symbol, key, entry.result);
   checkCircuitBreakerAggregate(key, entry.result);
+  checkProbationGraduation(key);
 }
 
 // v4.9 (sección 14, 27/8): breaker agregado — pérdidas seguidas de una estrategia sin
@@ -1552,9 +1606,59 @@ function checkCircuitBreakerAggregate(key, result) {
   sendPushToAll({ title, body, signal: { strategy: key, autoDisabled: true, aggregate: true } }).catch(err => console.error('Error enviando push de circuit breaker agregado:', err.message));
 }
 
-// v4.7: si una combinación symbol+strategy encadena CIRCUIT_BREAKER.consecutiveLossThreshold
-// pérdidas seguidas, se apaga sola (sin esperar a que Soy sume tablas a mano) y avisa por push.
-// Una ganada en el medio resetea el contador a 0 — es "pérdidas SEGUIDAS", no acumuladas.
+// NUEVO (16/9, plan de rentabilidad, punto 4): umbral escalonado por calidad
+// histórica real de la combinación symbol+estrategia, en vez de un número fijo para
+// todas. Lee state.strategyStatsBySymbol[symbol][key] (incluye seeded + operaciones
+// reales en vivo, ya mezclados ahí desde antes). Sin historial o con expectancy no
+// positiva -> defaultThreshold (estricto). Con historial real y expectancy positiva
+// -> qualifiedThreshold (más tolerante, para no apagar una estrategia buena por una
+// racha normal de varianza).
+function getCircuitBreakerThreshold(symbol, key) {
+  const cb = CONFIG.CIRCUIT_BREAKER;
+  const stats = state.strategyStatsBySymbol[symbol] && state.strategyStatsBySymbol[symbol][key];
+  if (stats) {
+    const total = (stats.wins || 0) + (stats.losses || 0);
+    const avgR = stats.avgR != null ? stats.avgR : (total > 0 ? (stats.totalR || 0) / total : 0);
+    if (total >= cb.qualifiedMinSample && avgR > 0) return cb.qualifiedThreshold;
+  }
+  return cb.defaultThreshold;
+}
+
+// NUEVO (16/9): centraliza el efecto de "apagar la combinación" (agregarla a
+// DISABLED_STRATEGIES_BY_SYMBOL, registrarla en autoDisabledStrategies, avisar por
+// push) para que lo disparen por igual una pérdida real en vivo (checkCircuitBreaker),
+// el seed inicial de datos históricos (seedStrategyStatsFromBacktest, ver fix del
+// punto 3 del plan) y el chequeo retroactivo al arrancar (applyRetroactiveCircuitBreaker),
+// sin triplicar la misma lógica. extra.seeded / extra.retroactive ajustan el mensaje y
+// si corresponde mandar push (retroactive no manda, igual que el comportamiento
+// original: es solo aplicar al arrancar una regla vigente sobre estado ya conocido).
+function disableCombinationByCircuitBreaker(symbol, key, streak, extra = {}) {
+  const ckey = `${symbol}_${key}`;
+  if (state.autoDisabledStrategies[ckey]) return; // ya estaba apagada, no repetir aviso
+
+  if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol]) CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] = [];
+  if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
+    CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].push(key);
+  }
+  state.autoDisabledStrategies[ckey] = { symbol, key, disabledAt: Date.now(), lossStreak: streak, ...extra };
+  localStorage.setItem('pt_auto_disabled_strategies', JSON.stringify(state.autoDisabledStrategies));
+
+  const tag = extra.seeded ? ' - SEED' : (extra.retroactive ? ' - RETROACTIVO' : '');
+  console.log(`[CIRCUIT BREAKER${tag}] ${ckey} auto-desactivada tras racha de ${streak}`);
+
+  if (extra.retroactive) return; // aplicar regla vigente sobre estado ya conocido, sin spamear push
+
+  const title = '🛑 Circuit breaker: estrategia pausada';
+  const body = extra.seeded
+    ? `${key} en ${symbol} arrancó pausada: su historial importado tiene ${streak} pérdidas seguidas sin ninguna ganada. Revisala cuando puedas.`
+    : `${key} en ${symbol} se auto-desactivó tras ${streak} pérdidas seguidas. Revisala cuando puedas.`;
+  sendPushToAll({ title, body, symbol, signal: { strategy: key, autoDisabled: true } }).catch(err => console.error('Error enviando push de circuit breaker:', err.message));
+}
+
+// v4.7: si una combinación symbol+strategy encadena su umbral vigente
+// (getCircuitBreakerThreshold) de pérdidas seguidas, se apaga sola (sin esperar a que
+// Soy sume tablas a mano) y avisa por push. Una ganada en el medio resetea el
+// contador a 0 — es "pérdidas SEGUIDAS", no acumuladas.
 function checkCircuitBreaker(symbol, key, result) {
   if (!CONFIG.CIRCUIT_BREAKER || !CONFIG.CIRCUIT_BREAKER.enabled) return;
   const ckey = `${symbol}_${key}`;
@@ -1567,24 +1671,9 @@ function checkCircuitBreaker(symbol, key, result) {
   state.consecutiveLosses[ckey] = (state.consecutiveLosses[ckey] || 0) + 1;
   localStorage.setItem('pt_consecutive_losses', JSON.stringify(state.consecutiveLosses));
 
-  const threshold = CONFIG.CIRCUIT_BREAKER.consecutiveLossThreshold;
+  const threshold = getCircuitBreakerThreshold(symbol, key);
   if (state.consecutiveLosses[ckey] < threshold) return;
-  if (state.autoDisabledStrategies[ckey]) return; // ya estaba apagada, no repetir aviso
-
-  // Apaga la combinación agregándola a DISABLED_STRATEGIES_BY_SYMBOL en memoria (efecto
-  // inmediato en el próximo ciclo, mismo chequeo que ya usa la lista manual) y la registra
-  // en autoDisabledStrategies para diferenciarla de las apagadas a mano y poder listarlas.
-  if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol]) CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] = [];
-  if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
-    CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].push(key);
-  }
-  state.autoDisabledStrategies[ckey] = { symbol, key, disabledAt: Date.now(), lossStreak: state.consecutiveLosses[ckey] };
-  localStorage.setItem('pt_auto_disabled_strategies', JSON.stringify(state.autoDisabledStrategies));
-
-  const title = '🛑 Circuit breaker: estrategia pausada';
-  const body = `${key} en ${symbol} se auto-desactivó tras ${state.consecutiveLosses[ckey]} pérdidas seguidas. Revisala cuando puedas.`;
-  console.log(`[CIRCUIT BREAKER] ${ckey} auto-desactivada tras ${state.consecutiveLosses[ckey]} pérdidas consecutivas`);
-  sendPushToAll({ title, body, symbol, signal: { strategy: key, autoDisabled: true } }).catch(err => console.error('Error enviando push de circuit breaker:', err.message));
+  disableCombinationByCircuitBreaker(symbol, key, state.consecutiveLosses[ckey]);
 }
 
 function seedStrategyStatsFromBacktest(resultsBySymbol) {
@@ -1601,10 +1690,54 @@ function seedStrategyStatsFromBacktest(resultsBySymbol) {
           avgR: totalOps > 0 ? +(totalR / totalOps).toFixed(2) : 0, // v4.6.1
           seeded: true 
         };
+        // FIX (16/9, plan de rentabilidad, punto 3): un combo seeded con 0 ganadas y
+        // N perdidas tiene una racha de pérdidas consecutivas conocida con certeza
+        // (=N, no hay ninguna ganada en el medio que la corte), aunque no tengamos el
+        // orden cronológico real de cada operación importada. Antes esto nunca tocaba
+        // consecutiveLosses ni pasaba por el Circuit Breaker — quedaba corriendo en
+        // vivo con 0% winrate real hasta que Soy lo notara a mano (caso real
+        // detectado en el respaldo del 16/9: session_false_breakout en EURUSD,
+        // 0G/6P). Con wins>0 no se puede saber el orden real de lo importado, así que
+        // esos combos se dejan sin tocar acá — igual quedan protegidos por el
+        // circuit breaker normal desde la primera pérdida real en vivo.
+        if (CONFIG.CIRCUIT_BREAKER && CONFIG.CIRCUIT_BREAKER.enabled && s.wins === 0 && s.losses > 0) {
+          const ckey = `${symbol}_${key}`;
+          state.consecutiveLosses[ckey] = s.losses;
+          const threshold = getCircuitBreakerThreshold(symbol, key);
+          if (s.losses >= threshold) disableCombinationByCircuitBreaker(symbol, key, s.losses, { seeded: true });
+        }
       }
     });
   });
   localStorage.setItem('pt_strategy_stats_by_symbol', JSON.stringify(state.strategyStatsBySymbol));
+  localStorage.setItem('pt_consecutive_losses', JSON.stringify(state.consecutiveLosses));
+}
+
+// NUEVO (16/9, plan de rentabilidad, punto 5): si key está en
+// CONFIG.PROBATION_STRATEGIES y todavía no se graduó, revisa si ya juntó
+// CONFIG.PROBATION.minSampleToGraduate señales resueltas (sumadas entre los 4
+// símbolos) con R neto positivo. Si es así, se marca como graduada (deja de estar
+// silenciada en resolveCustomSignal) y se avisa una sola vez por push.
+function checkProbationGraduation(key) {
+  if (!CONFIG.PROBATION_STRATEGIES.includes(key)) return;
+  if (state.probationGraduated[key]) return;
+  let totalWins = 0, totalLosses = 0, totalR = 0;
+  Object.values(state.strategyStatsBySymbol).forEach(bySymbol => {
+    const s = bySymbol[key];
+    if (s) { totalWins += s.wins || 0; totalLosses += s.losses || 0; totalR += s.totalR || 0; }
+  });
+  const total = totalWins + totalLosses;
+  if (total < CONFIG.PROBATION.minSampleToGraduate) return;
+  if (totalR <= 0) return; // ya tiene muestra pero expectancy todavía no es positiva, sigue en probation
+
+  state.probationGraduated[key] = true;
+  localStorage.setItem('pt_probation_graduated', JSON.stringify(state.probationGraduated));
+  console.log(`[PROBATION] ${key} graduada tras ${total} señales resueltas (${totalR.toFixed(2)}R) — vuelve a notificar por push`);
+  sendPushToAll({
+    title: '✅ Estrategia graduada de probation',
+    body: `${key} acumuló ${total} señales resueltas entre los 4 activos con expectancy positiva (${totalR.toFixed(2)}R) — ya manda notificaciones push normales.`,
+    signal: { strategy: key, probationGraduated: true }
+  }).catch(err => console.error('Error enviando push de graduación de probation:', err.message));
 }
 
 function reconcileStaleActiveCustomSignals(symbol) {
@@ -1957,7 +2090,15 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
     try { localStorage.setItem('pt_last_custom_signal_at', JSON.stringify(state.lastCustomSignalAt)); } catch (e) {}
     pushSignalHistory(frozen);
-    notifyNewSignal(frozen);
+    // NUEVO (16/9, plan de rentabilidad, punto 5): estrategias en CONFIG.PROBATION_STRATEGIES
+    // sin graduar corren igual (se guardan en history/activeCustomSignals, cuentan para
+    // stats y circuit breaker) pero no mandan push — ver checkProbationGraduation().
+    const inProbation = CONFIG.PROBATION_STRATEGIES.includes(customSig.strategy) && !state.probationGraduated[customSig.strategy];
+    if (inProbation) {
+      addLog(quote.source, `[${customSig.label}] señal ${customSig.direction === 'long' ? 'LONG' : 'SHORT'} registrada en modo probation (sin push) — estrategia nueva, esperando muestra mínima`, symbol);
+    } else {
+      notifyNewSignal(frozen);
+    }
   }
   const frozen = state.activeCustomSignals[key];
   if (!frozen) return belowThresholdDisplay;
@@ -2174,26 +2315,21 @@ function stopAutoRefreshLoop() {
 // próxima pérdida de esa misma combinación, en vez de cortarse apenas arranca el
 // proceso con el umbral nuevo. Este chequeo corre una sola vez al cargar el módulo
 // (require de engine.js) y aplica la regla vigente contra el estado ya guardado.
+// FIX (16/9): threshold pasó a ser por combinación (getCircuitBreakerThreshold), ya
+// no un único valor fijo para todas — se evalúa por ckey en vez de calcularlo una
+// sola vez afuera del loop.
 function applyRetroactiveCircuitBreaker() {
   if (!CONFIG.CIRCUIT_BREAKER || !CONFIG.CIRCUIT_BREAKER.enabled) return;
-  const threshold = CONFIG.CIRCUIT_BREAKER.consecutiveLossThreshold;
   Object.keys(state.consecutiveLosses || {}).forEach(ckey => {
     const streak = state.consecutiveLosses[ckey];
-    if (streak < threshold) return;
     if (state.autoDisabledStrategies[ckey]) return; // ya estaba apagada, no repetir
     const sepIdx = ckey.indexOf('_');
     if (sepIdx < 0) return;
     const symbol = ckey.slice(0, sepIdx), key = ckey.slice(sepIdx + 1);
-    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol]) CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] = [];
-    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
-      CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].push(key);
-    }
-    state.autoDisabledStrategies[ckey] = { symbol, key, disabledAt: Date.now(), lossStreak: streak, retroactive: true };
-    console.log(`[CIRCUIT BREAKER RETROACTIVO] ${ckey} auto-desactivada al arrancar: racha de ${streak} ya superaba el umbral vigente (${threshold})`);
+    const threshold = getCircuitBreakerThreshold(symbol, key);
+    if (streak < threshold) return;
+    disableCombinationByCircuitBreaker(symbol, key, streak, { retroactive: true });
   });
-  if (Object.keys(state.autoDisabledStrategies).length) {
-    localStorage.setItem('pt_auto_disabled_strategies', JSON.stringify(state.autoDisabledStrategies));
-  }
 }
 applyRetroactiveCircuitBreaker();
 
