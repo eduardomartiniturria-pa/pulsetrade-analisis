@@ -1,4 +1,17 @@
 // ============================================================
+// PULSE TRADE v4.7.8 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.7.8 (16/9, hallazgo real: "app sin emitir señales desde el 14/9"):
+// - CONFIG.CONFIDENCE_THRESHOLD bajado de 70 a 65. Causa raíz confirmada con datos
+//   reales de /api/state: el umbral por symbol+estrategia (vigente desde el 11/9)
+//   cae a este fallback fijo hasta juntar 10 operaciones reales cerradas bajo su
+//   key actual — y ninguna combinación de kill_zone_ny (renombrada el 30/8) llegó
+//   nunca a esas 10, porque casi todas sus señales rondan 55-65% de confianza,
+//   por debajo del fallback viejo de 70. Sin operaciones reales, nunca se junta
+//   la muestra que permitiría a auto-tune bajar el umbral — círculo cerrado. El
+//   fallback (70) además era más estricto que AUTO_TUNE.minThreshold (65, el piso
+//   más bajo que el propio sistema se permite), una inconsistencia en sí misma.
+// ============================================================
 // PULSE TRADE v4.7.7 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
 // Cambios v4.7.7 (16/9, plan de rentabilidad — ver respaldo consolidado del mismo día):
@@ -146,7 +159,20 @@ const CONFIG = {
   // que se pide a los proveedores: 100 es un techo de pedido, no un piso
   // funcional. Re-verificar si custom-strategies.js cambió desde esa fecha.
   OHLCV_STRATEGY_MIN_CANDLES: 90,
-  CONFIDENCE_THRESHOLD: 70,
+  // FIX (16/9, hallazgo real: "no emite señales desde el 14/9"): este fallback se
+  // usa cuando una combinación symbol+estrategia todavía no junta las
+  // AUTO_TUNE.minSampleSize (10) operaciones reales cerradas bajo su key actual —
+  // pasa con cualquier estrategia recién renombrada (kill_zone_ny desde el 30/8) o
+  // recién reactivada. Antes era 70, MÁS ESTRICTO que AUTO_TUNE.minThreshold (65,
+  // el piso más bajo al que el propio sistema se autoriza a bajar el umbral).
+  // Efecto confirmado con datos reales de /api/state del 16/9: señales de
+  // kill_zone_ny detectadas con 55-65% de confianza quedaban SIEMPRE por debajo
+  // de 70 → nunca se tomaba una operación real bajo la key nueva → nunca se
+  // juntaban las 10 muestras necesarias para que autoTune pudiera bajar el
+  // umbral → círculo cerrado, silencio total (coincide con el corte real de
+  // señales calculado desde los timestamps del historial, ~14/9). Bajado a 65
+  // para que el fallback nunca sea más estricto que el propio mínimo del sistema.
+  CONFIDENCE_THRESHOLD: 65,
   SIGNAL_COOLDOWN_MS: 15 * 60 * 1000,
   SIGNAL_EXPIRATION_MS: 72 * 60 * 60 * 1000,
   SIGNAL_EXPIRATION_MS_BY_STRATEGY: {
@@ -2338,4 +2364,3 @@ module.exports = {
   startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isKillZoneWindow,
   startCryptoQuickCheckLoop, stopCryptoQuickCheckLoop
 };
-        
