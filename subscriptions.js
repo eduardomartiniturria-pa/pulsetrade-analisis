@@ -93,22 +93,45 @@ async function removeSubscription(endpoint) {
   }
 }
 async function sendPushToAll(payload) {
-  if (!process.env.VAPID_PUBLIC_KEY) return;
+  // FIX (17/9, hallazgo real: "la app no muestra la señal con pantalla bloqueada"):
+  // este return silencioso no dejaba ningún rastro si VAPID_PUBLIC_KEY faltaba en el
+  // momento del envío — ni un log, nada visible en ningún lado. Ahora al menos queda
+  // en los logs de Render si es este el motivo.
+  if (!process.env.VAPID_PUBLIC_KEY) {
+    console.warn('[push] sendPushToAll: VAPID_PUBLIC_KEY no configurada, no se envía nada');
+    return;
+  }
   const body = JSON.stringify(payload);
   // Se fija la lista de destinatarios en "targets" ANTES de mandar, por la misma razón
   // que antes: removeSubscription() reasigna "subscriptions" y desalinearía los índices
   // si se leyera directo del array mutable dentro del propio loop.
   const targets = subscriptions;
+  if (!targets.length) {
+    console.warn('[push] sendPushToAll: 0 suscriptores registrados, no hay a quién mandarle');
+    return;
+  }
   const results = await Promise.allSettled(
     targets.map(sub => webpush.sendNotification(sub, body))
   );
+  let okCount = 0, goneCount = 0, failedCount = 0;
   await Promise.all(results.map((r, i) => {
-    if (r.status === 'rejected' && (r.reason.statusCode === 404 || r.reason.statusCode === 410)) {
+    if (r.status === 'fulfilled') { okCount++; return Promise.resolve(); }
+    if (r.reason.statusCode === 404 || r.reason.statusCode === 410) {
       // La suscripción ya no es válida (el usuario desinstaló la app o revocó el permiso).
+      goneCount++;
       return removeSubscription(targets[i].endpoint);
     }
+    // FIX (17/9): ESTE era el hueco real — cualquier rechazo que no fuera 404/410
+    // (por ejemplo 401/403 por VAPID keys que ya no coinciden con la suscripción del
+    // navegador, 400/413 por payload, 5xx del push service de Google/Mozilla) se
+    // tragaba acá sin loguear absolutamente nada. Una notificación podía fallar
+    // SIEMPRE, de forma permanente, sin que quedara ni un rastro en ningún lado para
+    // diagnosticarlo. Ahora queda en los logs con el statusCode y el mensaje real.
+    failedCount++;
+    console.error(`[push] envío falló a ${targets[i].endpoint.slice(0, 60)}...: statusCode=${r.reason.statusCode} ${r.reason.body || r.reason.message || ''}`);
     return Promise.resolve();
   }));
+  console.log(`[push] enviado a ${targets.length} suscriptor(es): ${okCount} ok, ${goneCount} expiradas (borradas), ${failedCount} fallaron`);
 }
 module.exports = {
   init,
