@@ -2346,6 +2346,26 @@ function stopAutoRefreshLoop() {
 // sola vez afuera del loop.
 function applyRetroactiveCircuitBreaker() {
   if (!CONFIG.CIRCUIT_BREAKER || !CONFIG.CIRCUIT_BREAKER.enabled) return;
+
+  // FIX (auditoría 18/9, bug confirmado con datos reales de /api/state: session_breakout_vwap
+  // en XAUUSD, 0 wins/5 losses en strategyStatsBySymbol pero consecutiveLosses quedó en 1).
+  // seedStrategyStatsFromBacktest() solo corrige consecutiveLosses para combos que NO existían
+  // todavía en state.strategyStatsBySymbol al momento del seed (ver guard de la línea ~1709).
+  // Una combinación que ya existía de antes del fix del 16/9 queda con el contador viejo para
+  // siempre, y este chequeo retroactivo confiaba ciegamente en ese contador. Antes de leer
+  // state.consecutiveLosses, lo recalculamos acá para cualquier combo con wins===0 && losses>0
+  // que no esté ya desactivada — misma certeza que en el seed: sin ninguna ganada en el medio,
+  // la racha es exactamente losses.
+  Object.entries(state.strategyStatsBySymbol || {}).forEach(([symbol, stratsForSymbol]) => {
+    Object.entries(stratsForSymbol || {}).forEach(([key, s]) => {
+      const ckey = `${symbol}_${key}`;
+      if (state.autoDisabledStrategies[ckey]) return; // ya estaba apagada, no repetir
+      if (!s || s.wins !== 0 || !(s.losses > 0)) return;
+      if (state.consecutiveLosses[ckey] === s.losses) return; // ya estaba correcto, no tocar
+      state.consecutiveLosses[ckey] = s.losses;
+    });
+  });
+
   Object.keys(state.consecutiveLosses || {}).forEach(ckey => {
     const streak = state.consecutiveLosses[ckey];
     if (state.autoDisabledStrategies[ckey]) return; // ya estaba apagada, no repetir
@@ -2356,7 +2376,33 @@ function applyRetroactiveCircuitBreaker() {
     if (streak < threshold) return;
     disableCombinationByCircuitBreaker(symbol, key, streak, { retroactive: true });
   });
+
+  localStorage.setItem('pt_consecutive_losses', JSON.stringify(state.consecutiveLosses));
 }
+
+// FIX (auditoría 18/9, riesgo estructural): ETH_VWAP_SCALP_ENABLED y
+// ETH_MOMENTUM_BREAKOUT_ENABLED en custom-strategies.js se sincronizaban a mano contra
+// CONFIG.ENABLED_STRATEGIES, sin lectura cruzada entre archivos (lo decía el propio
+// comentario del código). Es la misma clase de error humano que ya causó el bug de
+// STRATEGY_RISK_WEIGHT con la key vieja 'ny_open_kill_zone'. Esto lo corta al arrancar
+// el proceso en vez de depender de que alguien se acuerde de tocar los dos lados.
+function assertStrategyFlagsSync() {
+  const checks = [
+    { flag: 'ETH_VWAP_SCALP_ENABLED', key: 'eth_vwap_scalp', value: CustomStrategies.ETH_VWAP_SCALP_ENABLED },
+    { flag: 'ETH_MOMENTUM_BREAKOUT_ENABLED', key: 'eth_momentum_breakout', value: CustomStrategies.ETH_MOMENTUM_BREAKOUT_ENABLED }
+  ];
+  checks.forEach(({ flag, key, value }) => {
+    const inWhitelist = CONFIG.ENABLED_STRATEGIES.includes(key);
+    if (value !== inWhitelist) {
+      throw new Error(
+        `[SYNC CHECK] custom-strategies.js:${flag}=${value} no coincide con ` +
+        `engine.js:CONFIG.ENABLED_STRATEGIES.includes('${key}')=${inWhitelist}. ` +
+        `Corregí los dos lados antes de arrancar.`
+      );
+    }
+  });
+}
+assertStrategyFlagsSync();
 applyRetroactiveCircuitBreaker();
 
 module.exports = {
