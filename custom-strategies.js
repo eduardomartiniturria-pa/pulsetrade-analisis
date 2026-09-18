@@ -1575,7 +1575,13 @@ module.exports = {
   calculateEMASeries,
   calculateBollingerSeries,
   calculateVWAPSeries,
-  getH1Bias
+  getH1Bias,
+  // FIX (auditoría 18/9): se exportan para que engine.js pueda validarlos contra
+  // CONFIG.ENABLED_STRATEGIES al arrancar (ver assertStrategyFlagsSync() en engine.js).
+  // Antes la sincronización era manual sin lectura cruzada entre archivos — la misma
+  // clase de error que ya causó el bug de STRATEGY_RISK_WEIGHT con la key vieja.
+  ETH_VWAP_SCALP_ENABLED,
+  ETH_MOMENTUM_BREAKOUT_ENABLED
 };
 
 // ============================================================
