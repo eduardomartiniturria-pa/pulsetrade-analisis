@@ -1,4 +1,23 @@
 // ============================================================
+// PULSE TRADE v4.7.9 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.7.9 (18/9, auditoría completa a pedido de Soy — "revisa todo completo"):
+// - Circuit breaker AGREGADO (state.autoDisabledStrategiesAggregate): bug confirmado
+//   y ya anotado el 28/8, seguía sin corregir. Al arrancar el proceso solo se
+//   reaplicaban las desactivaciones automáticas INDIVIDUALES sobre
+//   CONFIG.DISABLED_STRATEGIES_BY_SYMBOL, nunca las agregadas — así que tras
+//   cualquier redeploy de Render (CONFIG vuelve a sus valores fijos), una estrategia
+//   apagada por el breaker agregado volvía a operar en los 4 símbolos sin aviso,
+//   mientras /api/state seguía mostrando la desactivación como vigente. Corregido en
+//   dos puntos: el bloque de reaplicación al arrancar (ahora también recorre
+//   autoDisabledStrategiesAggregate) y applyRetroactiveCircuitBreaker() (ahora también
+//   evalúa consecutiveLossesAggregate contra el umbral vigente). Se extrajo
+//   disableAggregateByCircuitBreaker() para que la lógica de apagado no esté
+//   duplicada entre el disparo en vivo (checkCircuitBreakerAggregate) y el
+//   retroactivo — mismo patrón que ya existía para el breaker individual.
+// - Ver también custom-strategies.js v4.13 (mismo día): fix de SL sin colchón y sin
+//   piso de RR en el Modo B de session_breakout_vwap.
+// ============================================================
 // PULSE TRADE v4.7.8 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
 // Cambios v4.7.8 (16/9, hallazgo real: "app sin emitir señales desde el 14/9"):
@@ -501,6 +520,24 @@ let state = {
     if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
       CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].push(key);
     }
+  });
+  // FIX (18/9, auditoría completa — bug confirmado, el mismo anotado el 28/8 y todavía
+  // sin corregir): este bloque reaplicaba las desactivaciones automáticas INDIVIDUALES
+  // (state.autoDisabledStrategies) sobre CONFIG.DISABLED_STRATEGIES_BY_SYMBOL al
+  // arrancar, pero no existía el equivalente para las AGREGADAS
+  // (state.autoDisabledStrategiesAggregate) — la misma razón de ser (CONFIG vive en
+  // memoria y se resetea en cada redeploy de Render). Si el circuit breaker agregado
+  // se disparaba y después había un redeploy, la estrategia volvía a operar en los 4
+  // símbolos sin aviso, mientras /api/state seguía mostrando la desactivación agregada
+  // como vigente — falsa sensación de seguridad. Corregido acá con el mismo patrón.
+  Object.values(state.autoDisabledStrategiesAggregate || {}).forEach(({ key }) => {
+    if (!key) return;
+    Object.keys(ASSETS || {}).forEach(symbol => {
+      if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol]) CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] = [];
+      if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
+        CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].push(key);
+      }
+    });
   });
 })();
 
@@ -1602,6 +1639,35 @@ function updateStrategyStatsBySymbol(entry) {
 // DISABLED_STRATEGIES_BY_SYMBOL de cada uno de SYMBOLS), separado del registro del breaker
 // por símbolo para poder diferenciar en el push y en autoDisabledStrategiesAggregate cuál
 // disparó.
+// NUEVO (18/9, auditoría completa): centraliza el efecto de "apagar la combinación
+// agregada" (agregarla a DISABLED_STRATEGIES_BY_SYMBOL en los 4 símbolos, registrarla
+// en autoDisabledStrategiesAggregate, avisar por push) para que lo disparen por igual
+// una pérdida real en vivo (checkCircuitBreakerAggregate) y el chequeo retroactivo al
+// arrancar (applyRetroactiveCircuitBreaker) — mismo patrón ya usado para el breaker
+// individual (ver disableCombinationByCircuitBreaker). extra.retroactive evita el push
+// cuando es solo aplicar al arrancar una regla vigente sobre estado ya conocido.
+function disableAggregateByCircuitBreaker(key, streak, extra = {}) {
+  if (state.autoDisabledStrategiesAggregate[key]) return; // ya estaba apagada, no repetir aviso
+
+  Object.keys(ASSETS || {}).forEach(symbol => {
+    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol]) CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] = [];
+    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
+      CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].push(key);
+    }
+  });
+  state.autoDisabledStrategiesAggregate[key] = { key, disabledAt: Date.now(), lossStreak: streak, ...extra };
+  localStorage.setItem('pt_auto_disabled_strategies_aggregate', JSON.stringify(state.autoDisabledStrategiesAggregate));
+
+  const tag = extra.retroactive ? ' - RETROACTIVO' : '';
+  console.log(`[CIRCUIT BREAKER AGREGADO${tag}] ${key} auto-desactivada en todos los símbolos tras racha de ${streak}`);
+
+  if (extra.retroactive) return; // aplicar regla vigente sobre estado ya conocido, sin spamear push
+
+  const title = '🛑 Circuit breaker AGREGADO: estrategia pausada en todos los activos';
+  const body = `${key} se auto-desactivó en los 4 activos tras ${streak} pérdidas seguidas repartidas entre símbolos. Revisala cuando puedas.`;
+  sendPushToAll({ title, body, signal: { strategy: key, autoDisabled: true, aggregate: true } }).catch(err => console.error('Error enviando push de circuit breaker agregado:', err.message));
+}
+
 function checkCircuitBreakerAggregate(key, result) {
   if (!CONFIG.CIRCUIT_BREAKER || !CONFIG.CIRCUIT_BREAKER.enabled) return;
   if (result === 'win') {
@@ -1615,21 +1681,7 @@ function checkCircuitBreakerAggregate(key, result) {
 
   const threshold = CONFIG.CIRCUIT_BREAKER.consecutiveLossThresholdAggregate || (CONFIG.CIRCUIT_BREAKER.consecutiveLossThreshold * 2);
   if (state.consecutiveLossesAggregate[key] < threshold) return;
-  if (state.autoDisabledStrategiesAggregate[key]) return; // ya estaba apagada, no repetir aviso
-
-  Object.keys(ASSETS || {}).forEach(symbol => {
-    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol]) CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] = [];
-    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
-      CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].push(key);
-    }
-  });
-  state.autoDisabledStrategiesAggregate[key] = { key, disabledAt: Date.now(), lossStreak: state.consecutiveLossesAggregate[key] };
-  localStorage.setItem('pt_auto_disabled_strategies_aggregate', JSON.stringify(state.autoDisabledStrategiesAggregate));
-
-  const title = '🛑 Circuit breaker AGREGADO: estrategia pausada en todos los activos';
-  const body = `${key} se auto-desactivó en los 4 activos tras ${state.consecutiveLossesAggregate[key]} pérdidas seguidas repartidas entre símbolos. Revisala cuando puedas.`;
-  console.log(`[CIRCUIT BREAKER AGREGADO] ${key} auto-desactivada en todos los símbolos tras ${state.consecutiveLossesAggregate[key]} pérdidas consecutivas`);
-  sendPushToAll({ title, body, signal: { strategy: key, autoDisabled: true, aggregate: true } }).catch(err => console.error('Error enviando push de circuit breaker agregado:', err.message));
+  disableAggregateByCircuitBreaker(key, state.consecutiveLossesAggregate[key]);
 }
 
 // NUEVO (16/9, plan de rentabilidad, punto 4): umbral escalonado por calidad
@@ -2378,6 +2430,21 @@ function applyRetroactiveCircuitBreaker() {
   });
 
   localStorage.setItem('pt_consecutive_losses', JSON.stringify(state.consecutiveLosses));
+
+  // FIX (18/9, auditoría completa): mismo chequeo retroactivo que arriba, pero para el
+  // breaker AGREGADO — cubre el caso de una racha que ya cruzaba
+  // consecutiveLossThresholdAggregate antes de que corriera este código (ej. estado
+  // cargado de Supabase) y todavía no estaba registrada en
+  // autoDisabledStrategiesAggregate. disableAggregateByCircuitBreaker ya filtra
+  // internamente las combinaciones que ya estaban apagadas, así que no repite aviso.
+  if (CONFIG.CIRCUIT_BREAKER && CONFIG.CIRCUIT_BREAKER.enabled) {
+    const aggThreshold = CONFIG.CIRCUIT_BREAKER.consecutiveLossThresholdAggregate || (CONFIG.CIRCUIT_BREAKER.consecutiveLossThreshold * 2);
+    Object.keys(state.consecutiveLossesAggregate || {}).forEach(key => {
+      const streak = state.consecutiveLossesAggregate[key];
+      if (streak < aggThreshold) return;
+      disableAggregateByCircuitBreaker(key, streak, { retroactive: true });
+    });
+  }
 }
 
 // FIX (auditoría 18/9, riesgo estructural): ETH_VWAP_SCALP_ENABLED y
