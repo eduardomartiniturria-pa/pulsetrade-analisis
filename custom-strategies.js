@@ -1,6 +1,18 @@
 // ============================================================
-// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.12 (16/9, plan de rentabilidad)
+// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.13 (18/9, auditoría completa)
 // ============================================================
+// Cambios v4.13 (18/9, auditoría completa a pedido de Soy — "revisa todo completo"):
+// - detectSessionBreakoutVwap, Modo B (vwap_reversion): el SL quedaba pegado exacto
+//   a la mecha de la vela de señal (last.low/last.high), sin ningún colchón de ATR —
+//   a diferencia del Modo A, corregido el 15/9. Candidato fuerte al mal resultado de
+//   este modo en XAUUSD (-3.03R, apagado por circuit breaker): activo con mechas
+//   ruidosas frente al broker real. Ahora usa el mismo colchón que el Modo A (0.25x
+//   ATR14). El cálculo de ATR se subió al inicio de la función (antes solo existía
+//   adentro del bloque del Modo A) para que ambos modos lo usen.
+// - Mismo Modo B: sin piso de RR mínimo — si el VWAP quedaba cerca de la entrada,
+//   disparaba igual con relación riesgo:beneficio mala (a diferencia de supply_demand,
+//   que exige RR>=2). Se agrega el mismo piso que ya usa el Modo A de esta estrategia
+//   (1:1.5): si el VWAP no da para eso, se descarta la señal.
 // Cambios v4.12 (16/9, plan de rentabilidad — ver respaldo consolidado del mismo día):
 // - ELIMINADAS DEL CÓDIGO (no solo desactivadas): Pivots Breakout & Reversal,
 //   EMA Cross Scalping, Bollinger Squeeze Breakout. Las 3 sin tesis de mercado real
@@ -330,6 +342,13 @@ function detectSessionBreakoutVwap(candles) {
   const lastVwap = vwap[vwap.length - 1];
   if (lastVwap == null) return result;
 
+  // FIX (18/9, auditoría completa): antes el ATR se calculaba adentro del bloque del
+  // Modo A y no estaba disponible para el Modo B (vwap_reversion), que hasta ahora
+  // ponía el SL pegado exacto a la mecha de la vela de señal (last.low/last.high),
+  // sin ningún colchón — a diferencia del Modo A, que sí usa buffer de ATR desde el
+  // fix del 15/9. Se saca acá arriba para que ambos modos lo usen.
+  const atr = calculateATR(candles) || 0;
+
   // --- Modo A: breakout del rango de sesión (~2.5h previas, 10 velas M15) ---
   const rangeLookback = 10;
   const rangeCandles = candles.slice(-1 - rangeLookback, -1);
@@ -346,7 +365,6 @@ function detectSessionBreakoutVwap(candles) {
     // mismo patrón: extremo de las últimas 3 velas ± un cuarto de ATR de buffer, no el
     // rango completo de 10. Reduce el riesgo por operación sin tocar la condición de
     // entrada (rangeHigh/rangeLow siguen siendo el gatillo de ruptura, no el ancla del SL).
-    const atr = calculateATR(candles) || 0;
     const structLookback = candles.slice(-4, -1);
     const structLow = structLookback.length ? Math.min(...structLookback.map(c => c.low)) : rangeLow;
     const structHigh = structLookback.length ? Math.max(...structLookback.map(c => c.high)) : rangeHigh;
@@ -366,11 +384,16 @@ function detectSessionBreakoutVwap(candles) {
     if (lastRsi != null) {
       const isRejectionBull = last.close > last.open && (last.open - last.low) > (last.high - last.close) * 1.5;
       const isRejectionBear = last.close < last.open && (last.high - last.close) > (last.close - last.low) * 1.5;
+      // FIX (18/9, auditoría completa): SL sin colchón (pegado exacto a la mecha de la
+      // vela de señal) — candidato fuerte al mal resultado de este modo en XAUUSD
+      // (-3.03R, terminó apagado por circuit breaker), un activo con mechas ruidosas
+      // frente al broker real (por eso ya existe TP_CONFIRMATION_BUFFER_PIPS_BY_SYMBOL
+      // en engine.js). Mismo colchón que ya usa el Modo A de esta estrategia: 0.25x ATR14.
       if (lastRsi < 30 && isRejectionBull) {
-        result.bullish = true; result.entry = last.close; result.sl = last.low; result.mode = 'vwap_reversion';
+        result.bullish = true; result.entry = last.close; result.sl = last.low - atr * 0.25; result.mode = 'vwap_reversion';
         result.details.push(`RSI en sobreventa (${lastRsi.toFixed(1)}) con vela de rechazo, buscando reversión hacia VWAP (${lastVwap.toFixed(5)})`);
       } else if (lastRsi > 70 && isRejectionBear) {
-        result.bearish = true; result.entry = last.close; result.sl = last.high; result.mode = 'vwap_reversion';
+        result.bearish = true; result.entry = last.close; result.sl = last.high + atr * 0.25; result.mode = 'vwap_reversion';
         result.details.push(`RSI en sobrecompra (${lastRsi.toFixed(1)}) con vela de rechazo, buscando reversión hacia VWAP (${lastVwap.toFixed(5)})`);
       }
     }
@@ -388,6 +411,14 @@ function detectSessionBreakoutVwap(candles) {
     // a la estrategia original sobre inventar un TP2 que nadie pidió)
     result.tp1 = lastVwap;
     result.tp2 = null;
+    // FIX (18/9, auditoría completa): antes sin piso de RR — si el VWAP quedaba cerca
+    // de la entrada, la señal disparaba igual con una relación riesgo:beneficio mala
+    // (a diferencia de supply_demand, que sí exige RR>=2). Mismo piso mínimo que ya usa
+    // el Modo A de esta estrategia (1:1.5): si el VWAP no da para eso, se descarta la
+    // señal en vez de tomarla con RR desfavorable. Ajustable si con datos reales
+    // conviene otro número.
+    const rr = risk > 0 ? Math.abs(result.tp1 - result.entry) / risk : 0;
+    if (rr < 1.5) { result.bullish = false; result.bearish = false; }
   }
 
   return result;
