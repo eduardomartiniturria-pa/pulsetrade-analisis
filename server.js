@@ -67,6 +67,12 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
       // del panel (renderStrategyStatsTable en index.html). Faltaba exponerlo acá — el campo
       // ya existía en engine.js (state.strategyStatsBySymbol) pero nunca llegaba al frontend.
       strategyStatsBySymbol: state.strategyStatsBySymbol || {},
+      // NUEVO (18/9, Motor de Rentabilidad V1): stats LIVE puras por símbolo+estrategia
+      // (nunca mezcladas con datos seed del backtest, a diferencia de
+      // strategyStatsBySymbol de arriba) — ver engine.js:updateLiveProfitabilityStats.
+      // Incluye recentResults para poder confirmar desde el panel/curl el estado real
+      // de la regla de deterioro reciente sin esperar los logs de Render.
+      liveStrategyStatsBySymbol: state.liveStrategyStatsBySymbol || {},
       // Cuántas velas HTF (H1) llegó a recibir cada símbolo en el último ciclo — para
       // confirmar sin ir a los logs de Render si el filtro de tendencia mayor de
       // supply_demand (necesita >=50) está activo o desactivado en la práctica.
