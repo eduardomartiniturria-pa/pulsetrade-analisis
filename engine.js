@@ -334,6 +334,39 @@ const CONFIG = {
     defaultThreshold: 2,
     consecutiveLossThresholdAggregate: 8
   },
+  // FIX (auditoría 18/9 v2, bug confirmado con /api/state real): 'kill_zone_ny' es un
+  // rename de 'ny_open_kill_zone' (30/8), pero el rename nunca migró
+  // state.strategyStatsBySymbol/consecutiveLosses/autoDisabledStrategies de la key
+  // vieja a la nueva. Resultado verificado en producción: el historial que justifica
+  // qualifiedMinSample/STRATEGY_RISK_WEIGHT arriba ("+4.47R en XAUUSD", "+11.17R en
+  // BTCUSD") vive TODO bajo 'ny_open_kill_zone' — la key nueva que realmente recibe
+  // señales hoy tiene 0-3 operaciones por símbolo. getCircuitBreakerThreshold() nunca
+  // puede calificar para qualifiedThreshold (necesita total>=15 bajo la key nueva), así
+  // que la estrategia insignia del sistema opera hoy con el umbral más estricto
+  // (defaultThreshold=2) pese a tener semanas de historial real bajo el nombre viejo.
+  // migrateRenamedStrategyKeys() (ver más abajo) fusiona ambas keys al arrancar.
+  // Formato: { keyNueva: keyVieja }. Agregar acá cualquier rename futuro de estrategia.
+  RENAMED_STRATEGY_KEYS: {
+    kill_zone_ny: 'ny_open_kill_zone'
+  },
+  // NUEVO (auditoría 18/9 v2, plan de rentabilidad — gestión de riesgo, nunca
+  // implementada pese a estar especificada desde antes: "máx. 3 señales/sesión, pausa
+  // tras 2 stops seguidos, corte tras 3 stops o -2%/día"). Se apoya en
+  // closed_signals:YYYY-MM-DD (ya lo escribe appendClosedSignal en cada cierre real,
+  // no hacía falta ningún storage nuevo). Dos capas:
+  // - perSymbol: protege contra un solo activo/feed roto (ej. velas sintéticas de un
+  //   proveedor de respaldo) sin frenar los otros 3 que van bien.
+  // - global: protege contra una racha correlacionada entre los 4 activos a la vez
+  //   (evento macro), que es exactamente el hueco que señalaba el circuit breaker
+  //   agregado (ese mira rachas por ESTRATEGIA cruzando símbolos, no pérdida total del
+  //   día cruzando TODO). Unidad: R (no equity), coherente con el resto del sistema.
+  DAILY_RISK_GUARD: {
+    enabled: true,
+    maxSignalsPerSessionPerSymbol: 3,
+    pauseAfterConsecutiveStopsPerSymbol: 2,
+    dailyLossCapRPerSymbol: -2,
+    dailyLossCapRGlobal: -3
+  },
   // NUEVO (15/9, auditoría — "diworsification"): con 7-10 estrategias corriendo con
   // peso parejo, la ganancia real de las 2-3 que sí tienen edge (sobre todo
   // ny_open_kill_zone) se diluye con el resto, que empata o resta. Esto NO cambia el
@@ -1588,7 +1621,9 @@ function pushSignalHistory(signal) {
     // FIX (15/9, auditoría): antes el fallback era 'smc', mezclando en las estadísticas
     // señales viejas sin campo source (de antes de trackear por estrategia) con la
     // estrategia real 'smc'. Ahora usan su propio bucket, separable en cualquier reporte.
-    source: signal.source || 'legacy_untagged'
+    source: signal.source || 'legacy_untagged',
+    // NUEVO (auditoría 18/9 v2, punto A1): ver nota en resolveCustomSignal/frozen.
+    provider: signal.provider || 'unknown', estimatedSpread: !!signal.estimatedSpread
   };
   state.signalHistory.unshift(entry);
   if (state.signalHistory.length > CONFIG.HISTORY_LIMIT) state.signalHistory.pop();
@@ -1627,6 +1662,52 @@ function updateStrategyStatsBySymbol(entry) {
   checkCircuitBreaker(symbol, key, entry.result);
   checkCircuitBreakerAggregate(key, entry.result);
   checkProbationGraduation(key);
+}
+
+// NUEVO (auditoría 18/9 v2): fusiona el historial de una key vieja de estrategia
+// (renombrada en CONFIG.RENAMED_STRATEGY_KEYS) dentro de la key nueva, una sola vez,
+// en strategyStatsBySymbol + consecutiveLosses + autoDisabledStrategies. Sin esto,
+// getCircuitBreakerThreshold() nunca ve el historial real de una estrategia renombrada
+// (ver nota en CONFIG.RENAMED_STRATEGY_KEYS). Idempotente: si la key vieja ya no existe
+// en algún symbol (ya migrada, o nunca tuvo datos ahí), no hace nada para ese symbol.
+function migrateRenamedStrategyKeys() {
+  const renames = CONFIG.RENAMED_STRATEGY_KEYS || {};
+  Object.entries(renames).forEach(([newKey, oldKey]) => {
+    Object.keys(state.strategyStatsBySymbol || {}).forEach(symbol => {
+      const bucket = state.strategyStatsBySymbol[symbol];
+      const oldStats = bucket && bucket[oldKey];
+      if (!oldStats) return; // ya migrada o sin datos viejos en este símbolo
+
+      const newStats = bucket[newKey] || { wins: 0, losses: 0, totalR: 0, avgR: 0 };
+      newStats.wins = (newStats.wins || 0) + (oldStats.wins || 0);
+      newStats.losses = (newStats.losses || 0) + (oldStats.losses || 0);
+      newStats.totalR = +(((newStats.totalR || 0) + (oldStats.totalR || 0)).toFixed(2));
+      const totalOps = newStats.wins + newStats.losses;
+      newStats.avgR = totalOps > 0 ? +(newStats.totalR / totalOps).toFixed(2) : 0;
+      bucket[newKey] = newStats;
+      delete bucket[oldKey];
+
+      // consecutiveLosses: conserva la racha activa más relevante (la key nueva es la
+      // que sigue recibiendo señales reales hoy; si la vieja tenía una racha mayor sin
+      // haber sido desactivada, es la más conservadora — nos quedamos con el máximo).
+      const oldCkey = `${symbol}_${oldKey}`, newCkey = `${symbol}_${newKey}`;
+      if (state.consecutiveLosses[oldCkey] != null) {
+        state.consecutiveLosses[newCkey] = Math.max(state.consecutiveLosses[newCkey] || 0, state.consecutiveLosses[oldCkey]);
+        delete state.consecutiveLosses[oldCkey];
+      }
+      // Si la key vieja ya estaba auto-desactivada para este símbolo, la desactivación
+      // aplica igual bajo la key nueva (es la misma estrategia, solo cambió el nombre).
+      if (state.autoDisabledStrategies[oldCkey] && !state.autoDisabledStrategies[newCkey]) {
+        state.autoDisabledStrategies[newCkey] = { ...state.autoDisabledStrategies[oldCkey], key: newKey };
+      }
+      delete state.autoDisabledStrategies[oldCkey];
+
+      console.log(`[MIGRATE] ${symbol}: fusionadas stats de '${oldKey}' -> '${newKey}' (${oldStats.wins}W/${oldStats.losses}L, ${oldStats.totalR}R)`);
+    });
+  });
+  localStorage.setItem('pt_strategy_stats_by_symbol', JSON.stringify(state.strategyStatsBySymbol));
+  localStorage.setItem('pt_consecutive_losses', JSON.stringify(state.consecutiveLosses));
+  localStorage.setItem('pt_auto_disabled_strategies', JSON.stringify(state.autoDisabledStrategies));
 }
 
 // v4.9 (sección 14, 27/8): breaker agregado — pérdidas seguidas de una estrategia sin
@@ -2035,7 +2116,9 @@ function appendClosedSignal(entry) {
   try { dayList = JSON.parse(localStorage.getItem(storageKey) || '[]'); } catch (e) { dayList = []; }
   dayList.push({
     symbol: entry.symbol, type: entry.type, source: entry.source || 'legacy_untagged', // FIX (15/9, auditoría)
-    result: entry.result, rMultiple: entry.rMultiple, timestamp: entry.timestamp
+    result: entry.result, rMultiple: entry.rMultiple, timestamp: entry.timestamp,
+    // NUEVO (auditoría 18/9 v2, punto A1): ver nota en resolveCustomSignal/frozen.
+    provider: entry.provider || 'unknown', estimatedSpread: !!entry.estimatedSpread
   });
   localStorage.setItem(storageKey, JSON.stringify(dayList));
   let daysIndex;
@@ -2045,6 +2128,55 @@ function appendClosedSignal(entry) {
     daysIndex.sort();
     localStorage.setItem('closed_signals_days', JSON.stringify(daysIndex));
   }
+}
+// NUEVO (auditoría 18/9 v2, plan de rentabilidad — gestión de riesgo): lee
+// closed_signals:HOY (ya lo escribe appendClosedSignal en cada cierre real) y decide
+// si una señal nueva para `symbol` debe bloquearse. No mira señales 'pending' — solo
+// resultados ya cerrados (win/loss), igual que el resto del sistema de stats. Se llama
+// desde resolveCustomSignal ANTES de crear una señal nueva, nunca después.
+function getTodayClosedSignals() {
+  const dayKey = localDayKey(Date.now());
+  try { return JSON.parse(localStorage.getItem(`closed_signals:${dayKey}`) || '[]'); }
+  catch (e) { return []; }
+}
+function countTrailingLosses(list) {
+  // list ya viene en orden de cierre (appendClosedSignal hace push); contamos desde
+  // el final (el cierre más reciente) hacia atrás, cortando en la primera 'win'.
+  let streak = 0;
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i].result === 'loss') streak++;
+    else break; // 'win' corta la racha, igual que checkCircuitBreaker
+  }
+  return streak;
+}
+function checkDailyRiskGuard(symbol) {
+  const guard = CONFIG.DAILY_RISK_GUARD;
+  if (!guard || !guard.enabled) return { blocked: false };
+
+  const today = getTodayClosedSignals();
+  const symbolToday = today.filter(s => s.symbol === symbol);
+
+  const symbolSignalCount = symbolToday.length;
+  if (symbolSignalCount >= guard.maxSignalsPerSessionPerSymbol) {
+    return { blocked: true, reason: `máx. ${guard.maxSignalsPerSessionPerSymbol} señales/sesión alcanzado en ${symbol}` };
+  }
+
+  const symbolConsecLosses = countTrailingLosses(symbolToday);
+  if (symbolConsecLosses >= guard.pauseAfterConsecutiveStopsPerSymbol) {
+    return { blocked: true, reason: `${symbolConsecLosses} stops seguidos en ${symbol} hoy — pausado` };
+  }
+
+  const symbolR = symbolToday.reduce((sum, s) => sum + (s.rMultiple || 0), 0);
+  if (symbolR <= guard.dailyLossCapRPerSymbol) {
+    return { blocked: true, reason: `tope diario de ${guard.dailyLossCapRPerSymbol}R alcanzado en ${symbol} (${symbolR.toFixed(2)}R)` };
+  }
+
+  const globalR = today.reduce((sum, s) => sum + (s.rMultiple || 0), 0);
+  if (globalR <= guard.dailyLossCapRGlobal) {
+    return { blocked: true, reason: `tope diario GLOBAL de ${guard.dailyLossCapRGlobal}R alcanzado (${globalR.toFixed(2)}R, los 4 activos)` };
+  }
+
+  return { blocked: false };
 }
 function historyCardHtml() { return ''; }
 function renderHistory() {}
@@ -2106,7 +2238,26 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     };
     addLog(quote.source, `[${customSig.label}] señal ${customSig.direction === 'long' ? 'LONG' : 'SHORT'} detectada pero confianza ${customSig.confidence}% < umbral ${confidenceThreshold}% — no se opera`, symbol);
   }
+  // NUEVO (auditoría 18/9 v2, plan de rentabilidad — gestión de riesgo): mismo patrón
+  // que el gate de confianza de arriba (belowThresholdDisplay) — una señal bloqueada
+  // por la guardia de riesgo diario NO se cuenta como operación real (no se guarda en
+  // signalHistory/activeCustomSignals, no dispara push), pero sí se manda a
+  // renderCustomSignal para que no desaparezca de la pantalla, marcada como
+  // informativa.
+  let riskGuardBlockedDisplay = null;
   if (isNewDirection && !inCooldown && meetsConfidenceThreshold) {
+    const guardCheck = checkDailyRiskGuard(symbol);
+    if (guardCheck.blocked) {
+      riskGuardBlockedDisplay = {
+        type: customSig.direction, symbol, riskGuardBlocked: true, riskGuardReason: guardCheck.reason,
+        confidence: customSig.confidence,
+        strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
+        detectedAt: Date.now()
+      };
+      addLog(quote.source, `[${customSig.label}] señal ${customSig.direction === 'long' ? 'LONG' : 'SHORT'} detectada pero bloqueada por guardia de riesgo diario: ${guardCheck.reason}`, symbol);
+    }
+  }
+  if (isNewDirection && !inCooldown && meetsConfidenceThreshold && !riskGuardBlockedDisplay) {
     let entry = customSig.entry || quote.last;
     let sl = customSig.sl;
     let tp1 = customSig.tp1;
@@ -2161,7 +2312,13 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
       riskWeight: (CONFIG.STRATEGY_RISK_WEIGHT && CONFIG.STRATEGY_RISK_WEIGHT[customSig.strategy]) || 1,
       details: customSig.details, source: customSig.strategy, regime: 'n/a',
       timestamp: Date.now(), decimals: asset.decimals, detectedAt: Date.now(),
-      tp1HitAt: null
+      tp1HitAt: null,
+      // NUEVO (auditoría 18/9 v2, plan de rentabilidad — punto A1): etiqueta la señal
+      // con el proveedor y si su spread era real o sintético en el momento en que se
+      // generó. Viaja a pushSignalHistory/appendClosedSignal para poder segmentar
+      // "estadísticas reales" de "contaminadas" antes de confiar en ellas para circuit
+      // breaker/auto-tune/riskWeight — hoy ninguna decisión distingue esto.
+      provider: quote.source || 'unknown', estimatedSpread: !!quote.estimatedSpread
     };
     state.activeCustomSignals[key] = frozen;
     state.lastCustomSignalAt[key] = frozen.detectedAt;
@@ -2179,7 +2336,7 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     }
   }
   const frozen = state.activeCustomSignals[key];
-  if (!frozen) return belowThresholdDisplay;
+  if (!frozen) return belowThresholdDisplay || riskGuardBlockedDisplay;
   return evaluateCustomSignalOutcome(symbol, key, quote, frozen);
 }
 function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
@@ -2470,6 +2627,7 @@ function assertStrategyFlagsSync() {
   });
 }
 assertStrategyFlagsSync();
+migrateRenamedStrategyKeys();
 applyRetroactiveCircuitBreaker();
 
 module.exports = {
