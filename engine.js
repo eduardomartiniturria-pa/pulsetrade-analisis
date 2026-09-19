@@ -418,7 +418,30 @@ const CONFIG = {
   PROBATION: {
     minSampleToGraduate: 20
   },
-  PROBATION_STRATEGIES: []
+  PROBATION_STRATEGIES: [],
+  // NUEVO (18/9, Motor de Rentabilidad V1 — pedido explícito de Soy): capa de decisión
+  // adicional delante de la creación de señales, distinta de CIRCUIT_BREAKER (que corta
+  // por RACHA de pérdidas consecutivas, sin mirar expectancy) y de DAILY_RISK_GUARD (que
+  // corta por tope de R DIARIO, no por historial de la combinación). Esta capa exige
+  // evidencia estadística LIVE (nunca datos importados del backtest, ver
+  // updateLiveProfitabilityStats/state.liveStrategyStatsBySymbol) antes de dejar operar
+  // una combinación símbolo+estrategia. useSeededForBlock y excludeExpired del prompt
+  // original NO se copiaron como config: la fuente de datos (liveStrategyStatsBySymbol)
+  // ya excluye seeded por construcción (nunca lo alimenta el backtest, solo
+  // checkHistoryOutcomes) y ya excluye expired por construcción (solo cuenta
+  // result 'win'/'loss', igual que updateStrategyStatsBySymbol) — dejar esos dos
+  // parámetros hubiera sido configuración decorativa que nunca se lee.
+  PROFITABILITY_ENGINE_V1: {
+    enabled: true,
+    minLiveSample: 12,
+    robustLiveSample: 20,
+    minExpectancyR: 0.00,
+    robustMinExpectancyR: 0.10,
+    recentWindow: 8,
+    maxRecentLosses: 5,
+    probationMinConfidence: 80,
+    probationRiskMultiplier: 0.50
+  }
 };
 
 class MarketData {
@@ -500,6 +523,19 @@ let state = {
   autoTuneStats: (() => { try { return JSON.parse(localStorage.getItem('pt_auto_stats_v2') || '{}'); } catch (e) { return {}; } })(),
   patternStats: (() => { try { return JSON.parse(localStorage.getItem('pt_pattern_stats') || '{}'); } catch (e) { return {}; } })(),
   strategyStatsBySymbol: (() => { try { return JSON.parse(localStorage.getItem('pt_strategy_stats_by_symbol') || '{}'); } catch (e) { return {}; } })(),
+  // NUEVO (18/9, Motor de Rentabilidad V1): a propósito SEPARADO de strategyStatsBySymbol.
+  // strategyStatsBySymbol mezcla para siempre datos seed (backtest) con datos live en el
+  // mismo wins/losses/totalR — una vez mezclados no se pueden separar (ver
+  // seedStrategyStatsFromBacktest). Este objeto nuevo solo lo alimenta
+  // updateLiveProfitabilityStats(), llamada únicamente desde checkHistoryOutcomes sobre
+  // cierres reales — nunca desde el backtest — así que es 100% LIVE por construcción,
+  // sin necesitar ningún flag "seeded" para filtrar. También guarda recentResults (últimas
+  // operaciones, ver PROFITABILITY_ENGINE_V1.recentWindow) porque signalHistory está
+  // limitado a HISTORY_LIMIT=50 GLOBAL (compartido entre 4 símbolos x ~5-8 estrategias) y
+  // no alcanza para sostener una ventana propia por combinación. Arranca vacío en este
+  // deploy — no hay forma de reconstruir el historial LIVE puro hacia atrás sin volver a
+  // mezclar seed y live.
+  liveStrategyStatsBySymbol: (() => { try { return JSON.parse(localStorage.getItem('pt_live_strategy_stats_by_symbol') || '{}'); } catch (e) { return {}; } })(),
   // v4.7: contador de pérdidas consecutivas por "SYMBOL_strategyKey" (se resetea a 0 en cada
   // ganada) y lista de combinaciones que el circuit breaker apagó solo. Separado a propósito
   // de DISABLED_STRATEGIES_BY_SYMBOL (que es la lista manual fija en CONFIG) para no pisar
@@ -1623,7 +1659,17 @@ function pushSignalHistory(signal) {
     // estrategia real 'smc'. Ahora usan su propio bucket, separable en cualquier reporte.
     source: signal.source || 'legacy_untagged',
     // NUEVO (auditoría 18/9 v2, punto A1): ver nota en resolveCustomSignal/frozen.
-    provider: signal.provider || 'unknown', estimatedSpread: !!signal.estimatedSpread
+    provider: signal.provider || 'unknown', estimatedSpread: !!signal.estimatedSpread,
+      // NUEVO (18/9, Motor de Rentabilidad V1): "no ocultar el motivo al usuario" —
+    // riskWeight faltaba acá desde antes (solo vivía en frozen/push), lo agrego ahora
+    // porque es necesario para ver el efecto real de probationRiskMultiplier en el
+    // historial. profitabilityMode/Reason/Sample/ExpectancyR solo tienen valor real
+    // cuando profitabilityMode==='probation'; en 'ok' documentan que pasó el gate.
+    riskWeight: signal.riskWeight != null ? signal.riskWeight : 1,
+    profitabilityMode: signal.profitabilityMode || 'ok',
+    profitabilityReason: signal.profitabilityReason || null,
+    profitabilitySample: signal.profitabilitySample != null ? signal.profitabilitySample : null,
+    profitabilityExpectancyR: signal.profitabilityExpectancyR != null ? signal.profitabilityExpectancyR : null
   };
   state.signalHistory.unshift(entry);
   if (state.signalHistory.length > CONFIG.HISTORY_LIMIT) state.signalHistory.pop();
@@ -1662,6 +1708,91 @@ function updateStrategyStatsBySymbol(entry) {
   checkCircuitBreaker(symbol, key, entry.result);
   checkCircuitBreakerAggregate(key, entry.result);
   checkProbationGraduation(key);
+}
+
+// NUEVO (18/9, Motor de Rentabilidad V1): mismo criterio de entrada que
+// updateStrategyStatsBySymbol (misma llamada, mismo entry) pero escribe en
+// state.liveStrategyStatsBySymbol, nunca tocado por el backtest — ver nota en el
+// objeto de estado. Solo cuenta 'win'/'loss' (EXPIRED y PENDING quedan afuera por el
+// mismo guard que ya usa updateStrategyStatsBySymbol).
+function updateLiveProfitabilityStats(entry) {
+  if (entry.result !== 'win' && entry.result !== 'loss') return;
+  const symbol = entry.symbol, key = entry.source || 'legacy_untagged';
+  if (!symbol || !key) return;
+  state.liveStrategyStatsBySymbol[symbol] = state.liveStrategyStatsBySymbol[symbol] || {};
+  if (!state.liveStrategyStatsBySymbol[symbol][key]) {
+    state.liveStrategyStatsBySymbol[symbol][key] = { wins: 0, losses: 0, totalR: 0, avgR: 0, recentResults: [] };
+  }
+  const stats = state.liveStrategyStatsBySymbol[symbol][key];
+  if (entry.result === 'win') stats.wins++; else stats.losses++;
+  const r = entry.rMultiple != null ? entry.rMultiple : (entry.result === 'win' ? 2 : -1);
+  stats.totalR = +((stats.totalR || 0) + r).toFixed(2);
+  const totalOps = stats.wins + stats.losses;
+  stats.avgR = totalOps > 0 ? +(stats.totalR / totalOps).toFixed(2) : 0;
+  // Más reciente primero, igual que signalHistory (unshift). Se guarda algo más que
+  // recentWindow (mínimo 8) por si en el futuro se sube el número en config sin tener
+  // que esperar a acumular de nuevo.
+  stats.recentResults.unshift({ result: entry.result, rMultiple: r, timestamp: entry.timestamp });
+  const keepWindow = Math.max((CONFIG.PROFITABILITY_ENGINE_V1 && CONFIG.PROFITABILITY_ENGINE_V1.recentWindow) || 8, 8);
+  if (stats.recentResults.length > keepWindow) stats.recentResults.length = keepWindow;
+  localStorage.setItem('pt_live_strategy_stats_by_symbol', JSON.stringify(state.liveStrategyStatsBySymbol));
+}
+
+function getLiveProfitabilityStats(symbol, strategyKey) {
+  const bucket = state.liveStrategyStatsBySymbol[symbol] && state.liveStrategyStatsBySymbol[symbol][strategyKey];
+  return bucket || { wins: 0, losses: 0, totalR: 0, avgR: 0, recentResults: [] };
+}
+
+// NUEVO (18/9, Motor de Rentabilidad V1): reglas A-E del plan de rentabilidad, en el
+// mismo orden lógico salvo D (deterioro reciente), que se chequea PRIMERO a propósito —
+// pedido explícito del plan: "no permitir que un historial antiguo positivo oculte un
+// deterioro reciente". Eso incluye no dejar pasar a PROBATION (regla A) una combinación
+// que viene con 5+ pérdidas en sus últimas 8 operaciones reales, aunque tenga muestra
+// chica y confianza técnica alta.
+function evaluateProfitability(symbol, strategyKey, confidence) {
+  const cfg = CONFIG.PROFITABILITY_ENGINE_V1;
+  if (!cfg || !cfg.enabled) return { decision: 'TRADE', mode: 'DISABLED', sample: null, expectancyR: null, winRate: null, recentLosses: null, reason: 'Motor de Rentabilidad deshabilitado' };
+
+  const stats = getLiveProfitabilityStats(symbol, strategyKey);
+  const sample = stats.wins + stats.losses;
+  const winRate = sample > 0 ? +((stats.wins / sample) * 100).toFixed(1) : null;
+  const expectancyR = sample > 0 ? stats.avgR : null;
+
+  const recentSlice = stats.recentResults.slice(0, cfg.recentWindow);
+  const recentLosses = recentSlice.filter(r => r.result === 'loss').length;
+  const base = { sample, expectancyR, winRate, recentLosses };
+
+  // D. Deterioro reciente
+  if (recentSlice.length >= cfg.recentWindow && recentLosses >= cfg.maxRecentLosses) {
+    return { decision: 'NO_TRADE', mode: 'RECENT_DETERIORATION', ...base,
+      reason: `${recentLosses} de las últimas ${recentSlice.length} operaciones LIVE fueron pérdidas (umbral ${cfg.maxRecentLosses})` };
+  }
+
+  // A. Muestra LIVE insuficiente
+  if (sample < cfg.minLiveSample) {
+    if (confidence != null && confidence >= cfg.probationMinConfidence) {
+      return { decision: 'PROBATION', mode: 'INSUFFICIENT_SAMPLE', ...base, riskMultiplier: cfg.probationRiskMultiplier,
+        reason: `muestra LIVE insuficiente (${sample}/${cfg.minLiveSample}) — confianza técnica ${confidence}% >= ${cfg.probationMinConfidence}%, opera con riesgo reducido x${cfg.probationRiskMultiplier}` };
+    }
+    return { decision: 'NO_TRADE', mode: 'INSUFFICIENT_SAMPLE', ...base,
+      reason: `muestra LIVE insuficiente (${sample}/${cfg.minLiveSample}) y confianza técnica ${confidence != null ? confidence + '%' : 'n/d'} < ${cfg.probationMinConfidence}% requerido para probation` };
+  }
+
+  // B. Expectativa LIVE no positiva
+  if (expectancyR <= cfg.minExpectancyR) {
+    return { decision: 'NO_TRADE', mode: 'NEGATIVE_EXPECTANCY', ...base,
+      reason: `expectancy LIVE ${expectancyR}R <= ${cfg.minExpectancyR}R (${sample} operaciones)` };
+  }
+
+  // C. Expectativa débil en muestra robusta
+  if (sample >= cfg.robustLiveSample && expectancyR < cfg.robustMinExpectancyR) {
+    return { decision: 'NO_TRADE', mode: 'WEAK_ROBUST_EXPECTANCY', ...base,
+      reason: `expectancy LIVE ${expectancyR}R < ${cfg.robustMinExpectancyR}R exigido con muestra robusta (${sample} operaciones)` };
+  }
+
+  // E. TRADE
+  return { decision: 'TRADE', mode: 'OK', ...base,
+    reason: `expectancy LIVE ${expectancyR}R con ${sample} operaciones, sin deterioro reciente` };
 }
 
 // NUEVO (auditoría 18/9 v2): fusiona el historial de una key vieja de estrategia
@@ -2040,7 +2171,7 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
   });
   if (changed) {
     localStorage.setItem('pt_v4_signals', JSON.stringify(state.signalHistory));
-    resolvedEntries.forEach(entry => { updatePatternStats(entry); updateStrategyStatsBySymbol(entry); appendClosedSignal(entry); });
+    resolvedEntries.forEach(entry => { updatePatternStats(entry); updateStrategyStatsBySymbol(entry); updateLiveProfitabilityStats(entry); appendClosedSignal(entry); });
     runAutoTune(symbol);
   }
 }
@@ -2257,7 +2388,29 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
       addLog(quote.source, `[${customSig.label}] señal ${customSig.direction === 'long' ? 'LONG' : 'SHORT'} detectada pero bloqueada por guardia de riesgo diario: ${guardCheck.reason}`, symbol);
     }
   }
+  // NUEVO (18/9, Motor de Rentabilidad V1): mismo patrón que los dos gates de arriba —
+  // corre después del riesgo diario (más barato, corta primero lo obvio) y antes de
+  // crear la señal. Nunca evalúa una combinación ya desactivada por CIRCUIT_BREAKER
+  // (esas ni siquiera llegan acá, se filtran antes en evaluateAll) — es una capa
+  // adicional, no un reemplazo.
+  let profitabilityBlockedDisplay = null;
+  let profitabilityDecision = null;
   if (isNewDirection && !inCooldown && meetsConfidenceThreshold && !riskGuardBlockedDisplay) {
+    profitabilityDecision = evaluateProfitability(symbol, customSig.strategy, customSig.confidence);
+    addLog(quote.source, `[${customSig.label}] Motor Rentabilidad: ${profitabilityDecision.decision}/${profitabilityDecision.mode} — ${profitabilityDecision.reason}`, symbol);
+    if (profitabilityDecision.decision === 'NO_TRADE') {
+      profitabilityBlockedDisplay = {
+        type: customSig.direction, symbol, profitabilityBlocked: true,
+        profitabilityMode: profitabilityDecision.mode, profitabilityReason: profitabilityDecision.reason,
+        sample: profitabilityDecision.sample, expectancyR: profitabilityDecision.expectancyR,
+        winRate: profitabilityDecision.winRate, recentLosses: profitabilityDecision.recentLosses,
+        confidence: customSig.confidence,
+        strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
+        detectedAt: Date.now()
+      };
+    }
+  }
+  if (isNewDirection && !inCooldown && meetsConfidenceThreshold && !riskGuardBlockedDisplay && !profitabilityBlockedDisplay) {
     let entry = customSig.entry || quote.last;
     let sl = customSig.sl;
     let tp1 = customSig.tp1;
@@ -2309,7 +2462,15 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
       // de evaluateAll() (custom-strategies.js). Puramente informativo, ver nota ahí.
       rr1: formatRR(tp1), rr2: formatRR(tp2), confidence: (customSig.confidence != null ? customSig.confidence : null),
       strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
-      riskWeight: (CONFIG.STRATEGY_RISK_WEIGHT && CONFIG.STRATEGY_RISK_WEIGHT[customSig.strategy]) || 1,
+      // NUEVO (18/9, Motor de Rentabilidad V1): si la decisión fue PROBATION, el
+      // multiplicador de riesgo original (STRATEGY_RISK_WEIGHT) se reduce además por
+      // probationRiskMultiplier — no lo reemplaza, se combinan (ej. 1.5x * 0.5 = 0.75x).
+      riskWeight: ((CONFIG.STRATEGY_RISK_WEIGHT && CONFIG.STRATEGY_RISK_WEIGHT[customSig.strategy]) || 1) *
+        ((profitabilityDecision && profitabilityDecision.decision === 'PROBATION') ? profitabilityDecision.riskMultiplier : 1),
+      profitabilityMode: (profitabilityDecision && profitabilityDecision.decision === 'PROBATION') ? 'probation' : 'ok',
+      profitabilityReason: profitabilityDecision ? profitabilityDecision.reason : null,
+      profitabilitySample: profitabilityDecision ? profitabilityDecision.sample : null,
+      profitabilityExpectancyR: profitabilityDecision ? profitabilityDecision.expectancyR : null,
       details: customSig.details, source: customSig.strategy, regime: 'n/a',
       timestamp: Date.now(), decimals: asset.decimals, detectedAt: Date.now(),
       tp1HitAt: null,
@@ -2336,7 +2497,7 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     }
   }
   const frozen = state.activeCustomSignals[key];
-  if (!frozen) return belowThresholdDisplay || riskGuardBlockedDisplay;
+  if (!frozen) return belowThresholdDisplay || riskGuardBlockedDisplay || profitabilityBlockedDisplay;
   return evaluateCustomSignalOutcome(symbol, key, quote, frozen);
 }
 function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
