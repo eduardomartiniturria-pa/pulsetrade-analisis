@@ -17,10 +17,8 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
   // sin haber tocado su lógica de señales/aprendizaje.
   // startAutoRefreshLoop reemplaza al cron fijo de 5 min: corre solo, y decide internamente
   // cada cuánto refrescar (15 min normal, 1 min dentro de la ventana Kill Zone NY 10:30-13:30 ARG).
-  // startCryptoQuickCheckLoop (7.1, medida intermedia): loop aparte, cada 5min fijo, solo
-  // para BTC/ETH — chequea precio actual contra SL/TP de señales en curso, sin generar
-  // señales nuevas ni pedir OHLCV/HTF completo (ver detalle en CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS).
-  const { state, ASSETS, CONFIG, refreshAllData, BacktestEngine, startAutoRefreshLoop, stopAutoRefreshLoop, startCryptoQuickCheckLoop, stopCryptoQuickCheckLoop } = require('./engine.js');
+  // (20/9) Retirado el loop de chequeo rápido de precio (era solo para BTC/ETH).
+  const { state, ASSETS, CONFIG, refreshAllData, BacktestEngine, startAutoRefreshLoop, stopAutoRefreshLoop, getMarketStatus } = require('./engine.js');
 
   // Se registra ACÁ (no en localStorage.js, que se carga antes y no conoce a engine.js)
   // para que, apenas llegue SIGTERM (redeploy en Render), el motor deje de arrancar
@@ -29,7 +27,6 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
   // generarse y empezar a guardarse DESPUÉS de que ya se había tomado la foto de "qué
   // hay que esperar", y se perdía igual pese a que el flush en sí funcionaba bien.
   onBeforeShutdown(stopAutoRefreshLoop);
-  onBeforeShutdown(stopCryptoQuickCheckLoop);
 
   // El motor original leía las API keys desde localStorage (las cargaba el usuario a mano en el
   // navegador). Aquí vienen del .env del servidor, una sola vez para todos.
@@ -37,13 +34,10 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     twelveData: process.env.TWELVEDATA_API_KEY || null,
     finnhub: process.env.FINNHUB_API_KEY || null,
     alphaVantage: process.env.ALPHAVANTAGE_API_KEY || null,
-    fmp: process.env.FMP_API_KEY || null,
-    // CryptoCompare (ahora CCData) exige API key en todos los pedidos — es gratis igual,
-    // solo hay que registrarse. Sin esto, ese proveedor se salta siempre (requiresKey: true).
-    // CoinGecko Demo (gratis, 10.000 pedidos/mes) — respaldo de cripto (BTC/ETH) para cuando
-    // TwelveData se queda sin cupo. Reemplaza a CryptoCompare, discontinuada en mayo 2026.
-    // Se saca gratis en https://www.coingecko.com/en/developers/dashboard
-    coingecko: process.env.COINGECKO_API_KEY || null
+    fmp: process.env.FMP_API_KEY || null
+    // (20/9) Retirada la key de CoinGecko (COINGECKO_API_KEY): era el respaldo de BTC/ETH.
+    // Tras pasar Twelve Data al plan Grow (sin tope diario), definir en Render la variable
+    // TWELVEDATA_DAILY_LIMIT=none — ver engine.js (PROVIDER_DAILY_LIMITS).
   };
   state.lastDisplay = state.lastDisplay || {};
 
@@ -56,10 +50,9 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
   app.get('/api/state', (req, res) => {
     res.json({
       signals: state.lastDisplay,
-      // Señales de las 7 estrategias independientes (Kill Zone NY, Pivots B&R, Price
-      // Action+RSI+EMA, Supply&Demand, EMA Cross Scalping, Divergencia RSI, Bollinger
-      // Squeeze). Antes se calculaban y se notificaban por push, pero nunca se exponían
-      // acá — el panel no tenía forma de mostrarlas mientras estaban activas.
+      // Señales de las estrategias independientes activas (Kill Zone NY, Supply&Demand,
+      // Session Breakout VWAP). Antes se calculaban y se notificaban por push, pero nunca
+      // se exponían acá — el panel no tenía forma de mostrarlas mientras estaban activas.
       customSignals: state.lastCustomDisplay || {},
       prices: state.livePrices || {},
       history: (state.signalHistory || []).slice(-50).reverse(),
@@ -98,8 +91,41 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
         threshold: state.autoConfidenceThreshold,
         stats: state.autoTuneStats
       },
+      // NUEVO (20/9): estado de mercado por activo según el horario Exness de cada
+      // instrumento (open / signalsAllowed / phase / reason / resumesAtUtc / estimated) más
+      // lo que vio el último ciclo del feed (feedStale, feedAgeMin, signalBlockReason).
+      // Sirve para confirmar sin ir a los logs por qué un activo no emite señales.
+      marketStatus: Object.fromEntries(Object.keys(ASSETS).map(sym => {
+        const cycle = (state.marketStatus && state.marketStatus[sym]) || {};
+        return [sym, { ...getMarketStatus(sym), feedStale: cycle.feedStale, feedAgeMin: cycle.feedAgeMin, signalBlockReason: cycle.signalBlockReason || null }];
+      })),
+      // Combinaciones/activos en modo sombra (señales sin push hasta juntar muestra LIVE).
+      shadowMode: CONFIG.SHADOW_MODE,
       strictMode: state.strictMode,
       subscriberCount: getCount(),
+      updatedAt: Date.now()
+    });
+  });
+
+  // NUEVO (20/9): avance del modo sombra — por activo en sombra y estrategia, cuántas operaciones
+  // LIVE lleva (wins/losses/R) contra la muestra mínima que habilita al Motor de Rentabilidad a
+  // decidir con las reglas normales, más las últimas señales en sombra del historial.
+  app.get('/api/shadow', (req, res) => {
+    const cfg = CONFIG.SHADOW_MODE || {};
+    const min = (CONFIG.PROFITABILITY_ENGINE_V1 && CONFIG.PROFITABILITY_ENGINE_V1.minLiveSample) || 12;
+    const progress = {};
+    (cfg.symbols || []).forEach(sym => {
+      progress[sym] = {};
+      const live = (state.liveStrategyStatsBySymbol && state.liveStrategyStatsBySymbol[sym]) || {};
+      (CONFIG.ENABLED_STRATEGIES || []).forEach(key => {
+        const st = live[key] || { wins: 0, losses: 0, totalR: 0, avgR: 0 };
+        const sample = (st.wins || 0) + (st.losses || 0);
+        progress[sym][key] = { sample, minLiveSample: min, wins: st.wins || 0, losses: st.losses || 0, totalR: st.totalR || 0, avgR: st.avgR || 0, graduated: sample >= min };
+      });
+    });
+    res.json({
+      enabled: !!cfg.enabled, symbols: cfg.symbols || [], minLiveSample: min, progress,
+      recentShadowSignals: (state.signalHistory || []).filter(h => h.shadow).slice(0, 30),
       updatedAt: Date.now()
     });
   });
@@ -169,8 +195,11 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }
 
+  // (20/9) Las operaciones en modo sombra (US500/GBPUSD juntando muestra) se dejan afuera de los
+  // resúmenes del panel: no son operaciones reales y inflarían/ensuciarían el winrate. Su avance
+  // se ve en /api/shadow.
   function getClosedSignalsForDay(dayKey) {
-    try { return JSON.parse(localStorage.getItem(`closed_signals:${dayKey}`) || '[]'); }
+    try { return JSON.parse(localStorage.getItem(`closed_signals:${dayKey}`) || '[]').filter(e => !e.shadow); }
     catch (e) { return []; }
   }
 
@@ -205,7 +234,8 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     return { wins, losses, total, winRate, strategyBreakdown };
   }
 
-  // Mismo resumen que arriba, pero separado por activo (BTCUSD/ETHUSD/EURUSD/XAUUSD) —
+  // Mismo resumen que arriba, pero separado por activo (incluye BTCUSD/ETHUSD ya retirados,
+  // para no perder su historial) —
   // para la navegación Período → Activo → Estrategia del módulo de historial. Reutiliza
   // summarizeClosedSignals sobre el subconjunto de entries de cada símbolo, así la lógica
   // de cálculo de winrate/strategyBreakdown queda en un solo lugar.
@@ -284,9 +314,6 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
   // Reemplaza al viejo cron.schedule('*/5 * * * *', runCycle) — NO agregar un cron aparte acá,
   // se duplicarían los requests contra los proveedores y empeoraría el rate limit.
   startAutoRefreshLoop();
-  // Loop aparte (7.1, medida intermedia), fijo cada 5min, solo BTC/ETH — no compite con el
-  // rate limit de arriba porque solo pide precio (getQuote), no OHLCV/HTF.
-  startCryptoQuickCheckLoop();
 })().catch(e => {
   console.error('Error fatal iniciando el servidor:', e);
   process.exit(1);
