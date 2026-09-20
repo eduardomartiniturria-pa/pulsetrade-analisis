@@ -1,4 +1,31 @@
 // ============================================================
+// PULSE TRADE v4.8.0 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.8.0 (20/9, "ordenar": activos XAUUSD/EURUSD/US500/GBPUSD, sin crypto):
+// - ASSETS: se sacan BTCUSD/ETHUSD; se agregan US500 (Twelve Data 'SPX', requiere plan
+//   Grow) y GBPUSD. Se retiran del código los adapters okx/binance/coingecko y el chequeo
+//   rápido de precio crypto. BACKTEST.SYMBOLS, spreads estimados, buffers de TP y
+//   DISABLED_STRATEGIES_BY_SYMBOL alineados a los 4 activos.
+// - HORARIOS POR INSTRUMENTO (getMarketStatus): cierre semanal, pausa diaria, feriados y
+//   DST de Exness por perfil (forex/oro/índice). Cerrado => sin pedidos de datos. Tramos de
+//   bloqueo (15 min antes de una pausa, 30 después de reabrir, rollover forex) y feed sin
+//   velas nuevas => se sigue trackeando SL/TP pero NO se emiten señales nuevas. Estado
+//   por activo expuesto en /api/state (marketStatus). US500: horario ESTIMADO, verificar.
+// - MODO SOMBRA (CONFIG.SHADOW_MODE) para US500 y GBPUSD: sin muestra LIVE suficiente se
+//   registran sin push, con riskWeight 0 y fuera del Daily Risk Guard. Rompe el círculo
+//   "sin muestra no opera / sin operar no hay muestra" del Motor de Rentabilidad V1.
+// - Estrategias: whitelist = kill_zone_ny, supply_demand, session_breakout_vwap. Las dos
+//   de crypto quedan apagadas (flags sincronizados, ver assertStrategyFlagsSync).
+// - FIX AlphaVantage: todo símbolo que no fuera EURUSD se mapeaba a 'XAU' (GBPUSD habría
+//   traído el precio del oro). Ahora la divisa sale del símbolo.
+// - Un error de "símbolo no incluido en tu plan" bloquea solo proveedor+símbolo (6h), no
+//   el proveedor entero (ver markProviderCooldown).
+// - Twelve Data: límite diario configurable (TWELVEDATA_DAILY_LIMIT=none tras plan Grow).
+// - News: GBPUSD suma noticias de GBP al score contextual (NEWS_CURRENCIES_BY_SYMBOL).
+// - retireRemovedSymbols(): operaciones 'pending' de BTC/ETH pasan a 'expired' (0R, sin
+//   impacto en estadísticas) para no quedar "en curso" para siempre.
+// ============================================================
+// ============================================================
 // PULSE TRADE v4.7.9 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
 // Cambios v4.7.9 (18/9, auditoría completa a pedido de Soy — "revisa todo completo"):
@@ -208,17 +235,8 @@ const CONFIG = {
     normalIntervalMs: 15 * 60 * 1000,
     killZoneIntervalMs: 4 * 60 * 1000
   },
-  // FIX (7.1, sesión 25/8, "medida intermedia" — integrar MetaApi.cloud queda en pausa):
-  // se detectó un caso donde Exness cerró una operación por SL mientras PulseTrade
-  // seguía la señal como activa, con el ciclo normal de 15min entre chequeos. No es un
-  // proveedor de precio nuevo (eso sigue en pausa), es acortar la ventana de detección
-  // de SL/TP para BTC/ETH específicamente: son los dos activos 24/7 sin ventana de
-  // mercado cerrado, y los de mayor volatilidad intrabar de los 4. Corre por separado
-  // del ciclo principal (que sigue generando señales nuevas cada 15min/1min): solo pide
-  // el precio actual (1 llamada liviana a getQuote, no OHLCV/HTF completo) y revisa
-  // checkHistoryOutcomes contra ese precio — no genera señales nuevas, solo achica la
-  // demora en detectar que una señal ya tocó SL o TP.
-  CRYPTO_QUICK_CHECK_INTERVAL_MS: 5 * 60 * 1000,
+  // (20/9) Retirado CRYPTO_QUICK_CHECK_INTERVAL_MS: el chequeo rápido de precio era solo
+  // para BTC/ETH, que salieron de la app.
   // NUEVO (Etapa 3 real — auditoría de filtros de señal, Punto 6): antes ningún costo
   // de spread se restaba de los resultados. checkHistoryOutcomes calculaba rMultiple
   // "en limpio" (solo distancia de precio a SL/TP1/TP2), así que los winrates y R
@@ -230,10 +248,10 @@ const CONFIG = {
   // descuenta UNA vez por operación cerrada (se asume que se paga en la entrada,
   // no se duplica en la salida).
   ESTIMATED_SPREAD_PIPS_BY_SYMBOL: {
-    BTCUSD: 20,   // pipSize 1 -> ~$20 de spread típico
-    ETHUSD: 1.5,  // pipSize 1 -> ~$1.5
     EURUSD: 1.5,  // pipSize 0.0001 -> ~1.5 pips
-    XAUUSD: 3.5   // pipSize 0.1 -> ~0.35 en precio
+    GBPUSD: 2.0,  // pipSize 0.0001 -> ~2 pips (ESTIMADO 20/9 — ajustalo con el spread real de tu cuenta)
+    XAUUSD: 3.5,  // pipSize 0.1 -> ~0.35 en precio
+    US500: 6      // pipSize 0.1 -> ~0.6 puntos de índice (ESTIMADO 20/9 — ajustalo con el spread real)
   },
   // NUEVO (30/8): checkHistoryOutcomes marca "win" apenas la mecha (high/low) de
   // una vela del proveedor de datos (Twelve Data/FMP/AlphaVantage) toca TP1/TP2.
@@ -246,10 +264,10 @@ const CONFIG = {
   // (activo donde se reportó el caso); los demás símbolos quedan en 0 (sin
   // cambio de comportamiento) hasta que haya evidencia de que lo necesitan.
   TP_CONFIRMATION_BUFFER_PIPS_BY_SYMBOL: {
-    BTCUSD: 0,
-    ETHUSD: 0,
     EURUSD: 0,
-    XAUUSD: 15  // pipSize 0.1 -> 1.5 en precio
+    GBPUSD: 0,
+    XAUUSD: 15, // pipSize 0.1 -> 1.5 en precio
+    US500: 0
   },
   HTF_MAP: { '5m': '1h', '15m': '1h' },
   // FIX (09/9): edad máxima para usar el fallback de state.lastQuote en refreshAsset.
@@ -268,7 +286,7 @@ const CONFIG = {
     PATTERN_MAX_BONUS: 8
   },
   BACKTEST: {
-    SYMBOLS: ['BTCUSD', 'ETHUSD', 'EURUSD', 'XAUUSD'],
+    SYMBOLS: ['XAUUSD', 'EURUSD', 'US500', 'GBPUSD'],
     CANDLE_LIMIT: 1000,
     TWELVEDATA_CANDLE_LIMIT: 800,
     TIMEFRAMES: ['15m', '1h'],
@@ -287,10 +305,6 @@ const CONFIG = {
   // (open.er-api.com) al final por actualizar su tasa 1x/día, no como primario.
   PROVIDER_PRIORITY: ['twelveData', 'alphaVantage', 'exchangerate'],
   ENDPOINTS: {
-    BINANCE_SPOT: 'https://api.binance.com/api/v3',
-    BINANCE_FUTURES: 'https://fapi.binance.com/fapi/v1',
-    COINGECKO: 'https://api.coingecko.com/api/v3',
-    OKX: 'https://www.okx.com/api/v5',
     EXCHANGERATE: 'https://open.er-api.com/v6/latest',
     TWELVEDATA: 'https://api.twelvedata.com',
     FINNHUB: 'https://finnhub.io/api/v1',
@@ -301,12 +315,14 @@ const CONFIG = {
   // FIX (16/9, plan de rentabilidad): sacadas pivots_breakout_reversal,
   // bollinger_squeeze, ema_cross_scalping — eliminadas del código en
   // custom-strategies.js (no solo desactivadas), ver respaldo del 16/9.
+  // (20/9) Con crypto fuera de la app quedan 3 activas. eth_momentum_breakout (solo ETHUSD) y
+  // session_false_breakout (solo BTC/ETH) siguen en custom-strategies.js pero APAGADAS: sus
+  // flags en ese archivo pasaron a false, y assertStrategyFlagsSync() exige que coincidan
+  // con esta lista. Para reactivar una, cambiar los DOS lados.
   ENABLED_STRATEGIES: [
-    'kill_zone_ny',
-    'supply_demand',
-    'eth_momentum_breakout', // v4.10 (29/8), solo ETHUSD — ver custom-strategies.js
-    'session_breakout_vwap', // sesión 03/09, solo EURUSD/XAUUSD — ver custom-strategies.js
-    'session_false_breakout' // 10/09; restringida a BTCUSD/ETHUSD el 16/9 — ver custom-strategies.js
+    'kill_zone_ny',          // los 4 activos
+    'supply_demand',         // los 4 activos
+    'session_breakout_vwap'  // EURUSD/XAUUSD/GBPUSD — ver SESSION_BREAKOUT_VWAP_SYMBOLS en custom-strategies.js
   ],
   // v4.6: LISTA NEGRA POR ACTIVO - Desactiva estrategias específicas que fallan en un activo
   // v4.7: CIRCUIT BREAKER - auto-desactiva una estrategia en un activo tras N pérdidas
@@ -402,10 +418,24 @@ const CONFIG = {
   // como estaba: ya era redundante desde que el motor SMC se sacó de engine.js en
   // agosto, no se tocó por no ser parte de esta sesión.
   DISABLED_STRATEGIES_BY_SYMBOL: {
-    ETHUSD: ['smc'],
-    BTCUSD: ['smc'],
     XAUUSD: ['smc'],
-    EURUSD: ['smc']
+    EURUSD: ['smc'],
+    US500: ['smc'],
+    GBPUSD: ['smc']
+  },
+  // NUEVO (20/9): MODO SOMBRA para activos nuevos. Con el Motor de Rentabilidad V1, una
+  // combinación símbolo+estrategia sin operaciones LIVE solo puede operar si su confianza
+  // técnica es >=80% (probation) — casi nunca ocurre, y sin operaciones nunca junta la
+  // muestra que la habilitaría (círculo cerrado). En modo sombra, mientras la combinación
+  // tenga menos de PROFITABILITY_ENGINE_V1.minLiveSample operaciones LIVE, la señal se
+  // registra y se trackea hasta SL/TP igual que una real (cuenta para stats LIVE, circuit
+  // breaker de la combinación y auto-tune) pero SIN notificación push y con riskWeight 0 (= no operar con
+  // dinero). No cuenta para el Daily Risk Guard ni para el circuit breaker AGREGADO (sí para el
+  // de la propia combinación). Al llegar a minLiveSample, el Motor de
+  // Rentabilidad decide con las reglas de siempre (expectancy > 0 => opera normal).
+  SHADOW_MODE: {
+    enabled: true,
+    symbols: ['US500', 'GBPUSD']
   },
   // NUEVO (16/9, plan de rentabilidad, punto 5): modo probation/sombra para
   // estrategias nuevas — corren y guardan historial normalmente, pero sin
@@ -465,44 +495,42 @@ class OHLCVData {
 }
 
 const ASSETS = {
-  BTCUSD: {
-    name: 'BTC/USD', market: 'crypto', type: 'crypto',
-    symbols: { twelveData: 'BTC/USD', finnhub: 'BINANCE:BTCUSDT', alphaVantage: 'BTC', fmp: 'BTCUSD', binance: 'BTCUSDT', coingecko: 'bitcoin', okx: 'BTC-USDT' },
-    decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
-    openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    // FIX (pendiente, sesión 03/09): okx primero — feed spot con menor delay que
-    // CoinGecko (agregador multi-exchange) frente al precio real de ejecución en
-    // Exness. No es el feed idéntico de Exness (eso requeriría MetaApi/MT5 directo,
-    // descartado por costo/infra), pero reduce el desfase confirmado (~94 puntos,
-    // señal BTCUSD bollinger_squeeze id 1788388806043, 03/09). Se probó bybit
-    // primero (mismo día): devolvía HTTP 403 consistente para BTCUSD desde Render
-    // (bloqueo por IP de datacenter), se reemplazó por okx sin ese problema en la
-    // prueba inicial — igual monitorear logs por si aparecen fallos. coingecko
-    // queda como fallback si okx falla o bloquea la región.
-    providerPriority: ['okx', 'coingecko', 'twelveData', 'alphaVantage']
-  },
-  ETHUSD: {
-    name: 'ETH/USD', market: 'crypto', type: 'crypto',
-    symbols: { twelveData: 'ETH/USD', finnhub: 'BINANCE:ETHUSDT', alphaVantage: 'ETH', fmp: 'ETHUSD', binance: 'ETHUSDT', coingecko: 'ethereum', okx: 'ETH-USDT' },
-    decimals: 2, pipSize: 1, is24h: true, timezone: 'UTC',
-    openHour: 0, closeHour: 24, openDays: [0,1,2,3,4,5,6],
-    // Ver nota en BTCUSD — mismo fix, mismo motivo.
-    providerPriority: ['okx', 'coingecko', 'twelveData', 'alphaVantage']
+  // (20/9) Activos de la app: XAUUSD, EURUSD, US500, GBPUSD. BTCUSD/ETHUSD salieron.
+  // scheduleProfile enlaza con SCHEDULE_PROFILES (horarios Exness por instrumento, más abajo).
+  XAUUSD: {
+    name: 'XAU/USD (Oro)', market: 'forex', type: 'commodity',
+    symbols: { twelveData: 'XAU/USD', finnhub: 'OANDA:XAU_USD', alphaVantage: 'XAU', fmp: 'GCUSD' },
+    decimals: 2, pipSize: 0.1, is24h: false, timezone: 'UTC', scheduleProfile: 'gold',
+    providerPriority: ['twelveData', 'fmp', 'alphaVantage']
   },
   EURUSD: {
     name: 'EUR/USD', market: 'forex', type: 'forex',
     symbols: { twelveData: 'EUR/USD', finnhub: 'OANDA:EUR_USD', alphaVantage: 'EURUSD', fmp: 'EURUSD', exchangerate: 'EUR' },
-    decimals: 5, pipSize: 0.0001, is24h: false, timezone: 'UTC',
+    decimals: 5, pipSize: 0.0001, is24h: false, timezone: 'UTC', scheduleProfile: 'forex',
     // v4.6.3: exchangerate (open.er-api.com) pasado a último recurso — su tasa se
     // actualiza 1x/día, no sirve como fuente primaria para seguimiento de SL/TP en vivo.
     // Ver detección de congelamiento en ProviderAdapters.exchangerate.fetchQuote.
     providerPriority: ['twelveData', 'alphaVantage', 'exchangerate']
   },
-  XAUUSD: {
-    name: 'XAU/USD (Oro)', market: 'forex', type: 'commodity',
-    symbols: { twelveData: 'XAU/USD', finnhub: 'OANDA:XAU_USD', alphaVantage: 'XAU', fmp: 'GCUSD' },
-    decimals: 2, pipSize: 0.1, is24h: false, timezone: 'UTC',
-    providerPriority: ['twelveData', 'fmp', 'alphaVantage']
+  US500: {
+    // NUEVO (20/9). Índice S&P 500. Twelve Data lo publica como 'SPX' y en el plan gratis NO
+    // está incluido (los índices arrancan en el plan Grow). Sin otro proveedor confiable para
+    // velas de índice, providerPriority queda solo en twelveData a propósito: si el plan no
+    // lo cubre, el activo muestra 'no-data' sin afectar a los demás (ver bloqueo por símbolo
+    // en markProviderCooldown). pipSize 0.1 => 1 punto de índice = 10 "pips" (mismas unidades
+    // que ya usa XAUUSD). El precio de Exness (US500) puede diferir unos puntos del índice SPX
+    // (CFD sobre futuros): mismo tipo de desfase conocido que tenía BTC/ETH vs Exness.
+    name: 'US500 (S&P 500)', market: 'index', type: 'index',
+    symbols: { twelveData: 'SPX' },
+    decimals: 2, pipSize: 0.1, is24h: false, timezone: 'UTC', scheduleProfile: 'index',
+    providerPriority: ['twelveData']
+  },
+  GBPUSD: {
+    // NUEVO (20/9).
+    name: 'GBP/USD', market: 'forex', type: 'forex',
+    symbols: { twelveData: 'GBP/USD', finnhub: 'OANDA:GBP_USD', alphaVantage: 'GBPUSD', fmp: 'GBPUSD', exchangerate: 'GBP' },
+    decimals: 5, pipSize: 0.0001, is24h: false, timezone: 'UTC', scheduleProfile: 'forex',
+    providerPriority: ['twelveData', 'alphaVantage', 'exchangerate']
   }
 };
 
@@ -695,7 +723,13 @@ function resetAutoTune() {
   BacktestEngine.runAll(true);
 }
 
-const PROVIDER_DAILY_LIMITS = { twelveData: 800, finnhub: null, alphaVantage: 25, fmp: 250 };
+// (20/9) Twelve Data: el plan gratis tiene 800 créditos/día; el plan Grow no tiene tope diario
+// (sí 55 llamadas/min). Tras pasar a Grow, definir en Render la variable de entorno
+// TWELVEDATA_DAILY_LIMIT=none para sacar el freno interno. Sin variable = 800 (como antes).
+const TD_LIMIT_ENV = process.env.TWELVEDATA_DAILY_LIMIT;
+const TWELVEDATA_DAILY_LIMIT = (TD_LIMIT_ENV === undefined || TD_LIMIT_ENV === '') ? 800
+  : (String(TD_LIMIT_ENV).toLowerCase() === 'none' ? null : (parseInt(TD_LIMIT_ENV, 10) || 800));
+const PROVIDER_DAILY_LIMITS = { twelveData: TWELVEDATA_DAILY_LIMIT, finnhub: null, alphaVantage: 25, fmp: 250 };
 
 const RequestTracker = {
   todayKey() { return 'pt_req_count_' + new Date().toISOString().slice(0, 10); },
@@ -722,51 +756,137 @@ async function fetchWithTimeout(url, timeout = CONFIG.REQUEST_TIMEOUT, options =
   }
 }
 
-function getAssetLocalTime(asset) {
-  const now = getNow();
-  if (asset.timezone === 'UTC') return now;
-  try { return new Date(now.toLocaleString('en-US', { timeZone: asset.timezone })); } catch(e) { return now; }
+// ============================================================
+// HORARIOS DE MERCADO POR INSTRUMENTO (NUEVO 20/9)
+// ============================================================
+// Exness publica horarios propios por instrumento (servidores en UTC+0) y con horario de
+// verano de EE.UU.: "verano" = 2º domingo de marzo -> 1º domingo de noviembre. Este módulo
+// deriva de esa regla los tramos en que cada activo NO cotiza (cierre semanal, pausa diaria,
+// feriados) y los tramos en que cotiza pero conviene NO emitir señales nuevas (minutos
+// previos a una pausa/cierre, reapertura reciente, rollover con spreads anchos).
+//   - open=false            -> no se piden datos ni se evalúa nada (como antes con MERCADO_CERRADO)
+//   - open=true, signalsAllowed=false -> se sigue trackeando SL/TP de señales en curso, pero
+//                              NO se generan señales nuevas.
+// FUENTES / CONFIANZA de cada perfil (tiempos de verano UTC; en invierno todo corre +1h):
+//   forex (EURUSD, GBPUSD): OFICIAL Exness — Dom 21:05 a Vie 20:59. Rollover Lun-Jue 21:00
+//        (1-2h de spreads anchos, ver Help Center "Instrument trading hours"): bloquea señales.
+//   gold  (XAUUSD): Exness + fuentes terceras coincidentes — apertura Dom 22:05, cierre Vie
+//        20:58, pausa diaria 20:58-22:01 (el oro cierra durante el rollover forex).
+//   index (US500): ESTIMADO, CONSERVADO. No se pudo leer la tabla oficial por instrumento
+//        (es un widget dinámico del Help Center). Se asume apertura Dom 21:55, cierre Vie
+//        19:59 y pausa diaria 20:00-22:00 (cubre cierre del cash y reapertura de futuros).
+//        Verificar en https://get.exness.help/hc/en-us/articles/4405235684498-Instrument-trading-hours
+//        y ajustar SCHEDULE_PROFILES.index si difiere. Aunque este perfil se equivoque, la
+//        capa de "feed sin velas nuevas" (SCHEDULE_CONFIG.feedStaleMultiplier) bloquea igual.
+const SCHEDULE_CONFIG = {
+  preCloseBlockMin: 15,      // sin señales nuevas en los N min previos a una pausa/cierre
+  postOpenBlockMin: 30,      // ni en los N min posteriores a reabrir (liquidez fina, spreads anchos)
+  feedStaleMultiplier: 3     // sin velas nuevas por más de N x timeframe => feed pausado o caído
+};
+const SCHEDULE_PROFILES = {
+  forex: {
+    label: 'Forex', estimated: false,
+    weekOpen: { h: 21, m: 5 }, weekClose: { h: 20, m: 59 },
+    dailyBreaks: [],
+    rollover: { h: 21, m: 0, durMin: 65 }
+  },
+  gold: {
+    label: 'Oro', estimated: false,
+    weekOpen: { h: 22, m: 5 }, weekClose: { h: 20, m: 58 },
+    dailyBreaks: [{ h: 20, m: 58, durMin: 63 }],
+    rollover: null
+  },
+  index: {
+    label: 'Índice', estimated: true,
+    weekOpen: { h: 21, m: 55 }, weekClose: { h: 19, m: 59 },
+    dailyBreaks: [{ h: 20, m: 0, durMin: 120 }],
+    rollover: null
+  }
+};
+// Feriados con cierre total (fechas UTC 'YYYY-MM-DD'), de la lista publicada por Exness para
+// 2026-2027. Exness avisa por email el horario exacto de cada feriado por instrumento: los
+// feriados con horario reducido (no cierre total) se bloquean acá por conservador solo si
+// se agregan. Actualizar cada año.
+const HOLIDAY_CLOSURES = {
+  ALL: ['2026-12-25', '2027-01-01'],
+  US500: ['2026-11-26']   // Thanksgiving (EE.UU.)
+};
+const SCHEDULE_PHASE_LABEL = { weekend: 'cierre semanal del mercado', daily_break: 'pausa diaria', holiday: 'feriado', rollover: 'rollover diario' };
+const SCHEDULE_PHASE_WITH_ARTICLE = { weekend: 'el cierre semanal del mercado', daily_break: 'la pausa diaria', holiday: 'el feriado', rollover: 'el rollover diario' };
+
+function nthSundayUTC(year, month, n) {
+  const firstDow = new Date(Date.UTC(year, month, 1)).getUTCDay();
+  return Date.UTC(year, month, 1 + ((7 - firstDow) % 7) + (n - 1) * 7);
 }
-
-function isForexWeekOpen() {
-  const now = new Date(); const day = now.getUTCDay(); const hour = now.getUTCHours();
-  if (day === 6) return false; if (day === 0) return hour >= 22; if (day === 5) return hour < 22; return true;
+function isExnessSummer(ms) {
+  const y = new Date(ms).getUTCFullYear();
+  return ms >= nthSundayUTC(y, 2, 2) && ms < nthSundayUTC(y, 10, 1);
 }
-
-const FX_SESSIONS = [
-  { key: 'sydney', label: 'Sídney', start: 21, end: 6 },
-  { key: 'tokyo', label: 'Tokio', start: 0, end: 9 },
-  { key: 'london', label: 'Londres', start: 7, end: 16 },
-  { key: 'newyork', label: 'Nueva York', start: 12, end: 21 }
-];
-
-function getActiveForexSessions() {
-  if (!isForexWeekOpen()) return [];
-  const hour = new Date().getUTCHours();
-  return FX_SESSIONS.filter(s => s.start < s.end ? (hour >= s.start && hour < s.end) : (hour >= s.start || hour < s.end));
+function isScheduleHoliday(symbol, dateKey) {
+  return (HOLIDAY_CLOSURES.ALL || []).includes(dateKey) || (HOLIDAY_CLOSURES[symbol] || []).includes(dateKey);
 }
-
-function isMarketOpenForAsset(symbol) {
-  const asset = ASSETS[symbol]; if (!asset) return false;
-  if (asset.is24h) return true; if (asset.market === 'forex') return isForexWeekOpen();
-  const localTime = getAssetLocalTime(asset); const day = localTime.getDay(); const hour = localTime.getHours();
-  if (!asset.openDays.includes(day)) return false;
-  if (hour < asset.openHour || hour >= asset.closeHour) return false;
-  return true;
+function getScheduleIntervals(profile, symbol, nowMs) {
+  const MIN = 60000, DAY = 86400000;
+  const closed = [], blackouts = [];
+  const nd = new Date(nowMs);
+  const base = Date.UTC(nd.getUTCFullYear(), nd.getUTCMonth(), nd.getUTCDate());
+  for (let off = -9; off <= 9; off++) {
+    const dayMs = base + off * DAY;
+    const dow = new Date(dayMs).getUTCDay();
+    const shift = isExnessSummer(dayMs) ? 0 : 60;
+    const at = (hm, addMin = 0) => dayMs + (hm.h * 60 + hm.m + shift + addMin) * MIN;
+    if (dow === 5) {
+      const sunMs = dayMs + 2 * DAY;
+      const sunShift = isExnessSummer(sunMs) ? 0 : 60;
+      closed.push({ start: at(profile.weekClose), end: sunMs + (profile.weekOpen.h * 60 + profile.weekOpen.m + sunShift) * MIN, type: 'weekend' });
+    }
+    if (dow >= 1 && dow <= 4) {
+      profile.dailyBreaks.forEach(b => closed.push({ start: at(b), end: at(b, b.durMin), type: 'daily_break' }));
+      if (profile.rollover) blackouts.push({ start: at(profile.rollover), end: at(profile.rollover, profile.rollover.durMin), type: 'rollover' });
+    }
+    if (isScheduleHoliday(symbol, new Date(dayMs).toISOString().slice(0, 10))) closed.push({ start: dayMs, end: dayMs + DAY, type: 'holiday' });
+  }
+  return { closed, blackouts };
 }
-
-function getNextMarketOpen(asset) {
-  if (asset.market === 'forex') return `Dom 22:00 UTC (apertura de Sídney)`;
-  let next = new Date(getAssetLocalTime(asset)); let daysChecked = 0;
-  while (daysChecked < 7) { next.setDate(next.getDate() + 1); next.setHours(asset.openHour, 0, 0, 0); if (asset.openDays.includes(next.getDay())) break; daysChecked++; }
-  const days = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
-  return `${days[next.getDay()]} ${String(next.getHours()).padStart(2,'0')}:00 ${asset.timezone}`;
+function getMarketStatus(symbol, nowMs = Date.now()) {
+  const asset = ASSETS[symbol];
+  const profile = asset && SCHEDULE_PROFILES[asset.scheduleProfile];
+  if (!profile) return { symbol, open: true, signalsAllowed: true, phase: 'no_schedule', reason: null, resumesAtUtc: null, estimated: false };
+  const MIN = 60000;
+  const { closed, blackouts } = getScheduleIntervals(profile, symbol, nowMs);
+  const iso = ms => new Date(ms).toISOString();
+  const current = closed.filter(iv => nowMs >= iv.start && nowMs < iv.end).sort((a, b) => b.end - a.end)[0];
+  if (current) {
+    let end = current.end, grew = true;
+    while (grew) { grew = false; for (const iv of closed) { if (iv.start <= end && iv.end > end) { end = iv.end; grew = true; } } }
+    return { symbol, open: false, signalsAllowed: false, phase: current.type,
+      reason: `${SCHEDULE_PHASE_LABEL[current.type]} — reabre ${iso(end).slice(0, 16).replace('T', ' ')} UTC`,
+      resumesAtUtc: iso(end), estimated: !!profile.estimated };
+  }
+  let block = null;
+  for (const iv of closed) {
+    if (nowMs >= iv.start - SCHEDULE_CONFIG.preCloseBlockMin * MIN && nowMs < iv.start) {
+      block = { reason: `faltan ${Math.ceil((iv.start - nowMs) / MIN)} min para ${SCHEDULE_PHASE_WITH_ARTICLE[iv.type]}`, until: iv.start };
+    } else if (nowMs >= iv.end && nowMs < iv.end + SCHEDULE_CONFIG.postOpenBlockMin * MIN) {
+      block = { reason: `reapertura reciente (tras ${SCHEDULE_PHASE_WITH_ARTICLE[iv.type]}) — liquidez fina`, until: iv.end + SCHEDULE_CONFIG.postOpenBlockMin * MIN };
+    }
+  }
+  for (const iv of blackouts) {
+    if (nowMs >= iv.start && nowMs < iv.end) block = { reason: 'rollover diario — spreads anchos', until: iv.end };
+  }
+  return { symbol, open: true, signalsAllowed: !block, phase: block ? 'signal_block' : 'open',
+    reason: block ? block.reason : null, resumesAtUtc: block ? iso(block.until) : null, estimated: !!profile.estimated };
 }
-
-function formatTradingHours(asset) {
-  if (asset.is24h) return '24/7'; if (asset.market === 'forex') return 'Dom 22:00 - Vie 22:00 UTC (Sídney→Tokio→Londres→NY)';
-  const days = asset.openDays.map(d => ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'][d]).join(',');
-  return `${days} ${String(asset.openHour).padStart(2,'0')}:00-${String(asset.closeHour).padStart(2,'0')}:00 ${asset.timezone}`;
+function isMarketOpenForAsset(symbol) { return getMarketStatus(symbol).open; }
+// Capa de respaldo, independiente de la tabla de horarios: si el feed no trae velas nuevas
+// hace más de N x timeframe estando "abierto" según el calendario (feriado no listado, pausa
+// no prevista, proveedor caído o sirviendo caché viejo), no se generan señales nuevas.
+function getFeedStatus(candles, tf) {
+  const tfMin = ({ '5m': 5, '15m': 15, '1h': 60 })[tf] || 15;
+  const last = candles && candles.length ? candles[candles.length - 1] : null;
+  const ageMin = last ? (Date.now() - last.time) / 60000 : Infinity;
+  const stale = ageMin > tfMin * SCHEDULE_CONFIG.feedStaleMultiplier;
+  return { stale, ageMin: Number.isFinite(ageMin) ? Math.round(ageMin) : null, tfMin };
 }
 
 function calculateSpread(bid, ask, pipSize = 0.0001) { if (!bid || !ask || bid <= 0 || ask <= 0) return null; return (ask - bid) / pipSize; }
@@ -810,7 +930,28 @@ function getProviderCooldownMs(errorMessage) {
   return null;
 }
 
-function markProviderCooldown(providerName, errorMessage) {
+// NUEVO (20/9): un error de "este símbolo no está incluido en tu plan / no existe" (caso
+// típico: US500 en el plan gratis de Twelve Data) NO debe poner en cooldown al proveedor
+// entero — dejaría sin datos a los otros 3 activos. Se bloquea solo esa combinación
+// proveedor+símbolo por SYMBOL_BLOCK_MS. Los errores de cupo/límite siguen siendo
+// cooldown de proveedor completo, como siempre.
+const SYMBOL_BLOCK_MS = 6 * 60 * 60 * 1000;
+function isSymbolAccessError(errorMessage) {
+  const msg = (errorMessage || '').toLowerCase();
+  if (/per day|requests per|api credits|rate limit|429|too many requests|spreading out/.test(msg)) return false;
+  return /available starting|upgrade|grow|venture|pro plan|premium|your plan|symbol.*(not found|invalid|missing)|figi/.test(msg);
+}
+function isProviderSymbolBlocked(providerName, symbol) {
+  const until = state.providerSymbolBlockedUntil && state.providerSymbolBlockedUntil[`${providerName}:${symbol}`];
+  return !!until && Date.now() < until;
+}
+function markProviderCooldown(providerName, errorMessage, symbol = null) {
+  if (symbol && isSymbolAccessError(errorMessage)) {
+    state.providerSymbolBlockedUntil = state.providerSymbolBlockedUntil || {};
+    state.providerSymbolBlockedUntil[`${providerName}:${symbol}`] = Date.now() + SYMBOL_BLOCK_MS;
+    console.warn(`[proveedor] ${providerName} no sirve ${symbol} (${errorMessage}) — bloqueado solo para ese símbolo por ${SYMBOL_BLOCK_MS / 3600000}h; el resto de los activos sigue normal`);
+    return;
+  }
   const ms = getProviderCooldownMs(errorMessage); if (!ms) return;
   state.providerCooldownUntil = state.providerCooldownUntil || {};
   state.providerCooldownUntil[providerName] = Date.now() + ms;
@@ -840,6 +981,9 @@ const ResponseCache = {
 // (se descartó Finnhub — /calendar/economic confirmado fuera del tier gratis, ver
 // respaldo de sesión). Cache propio de 30min (no el CACHE_TTL de 30s de ResponseCache,
 // que es para cotizaciones — un calendario semanal no cambia de un ciclo al siguiente).
+// NUEVO (20/9): divisas cuyas noticias de alto impacto afectan el score de cada activo.
+// GBPUSD suma GBP (decisiones del BoE, IPC UK). EURUSD/XAUUSD/US500 quedan solo en USD, como antes.
+const NEWS_CURRENCIES_BY_SYMBOL = { XAUUSD: ['USD'], EURUSD: ['USD'], US500: ['USD'], GBPUSD: ['USD', 'GBP'] };
 const NewsCalendar = {
   FEED_URL: 'https://nfs.faireconomy.media/ff_calendar_thisweek.json',
   CACHE_MS: 30 * 60 * 1000,
@@ -908,8 +1052,9 @@ const NewsCalendar = {
     const windowMs = windowMinutes * 60 * 1000;
     let closest = null;
     let closestDist = Infinity;
+    const currencies = Array.isArray(currency) ? currency : [currency]; // (20/9) acepta lista
     for (const ev of events) {
-      if (!ev || ev.country !== currency) continue;
+      if (!ev || !currencies.includes(ev.country)) continue;
       if ((ev.impact || '').toLowerCase() !== 'high') continue;
       const ts = Date.parse(ev.date);
       if (isNaN(ts)) continue;
@@ -924,100 +1069,10 @@ const NewsCalendar = {
 };
 
 const ProviderAdapters = {
-  // FIX (pendiente, sesión 03/09): adapter OKX spot público (sin auth), agregado
-  // para BTCUSD/ETHUSD como primario por delante de coingecko — ver justificación
-  // y providerPriority en ASSETS.BTCUSD/ETHUSD. Se probó Bybit primero el mismo
-  // día: HTTP 403 consistente para BTCUSD desde Render (bloqueo por IP de
-  // datacenter), reemplazado por OKX. Solo fetchQuote: el OHLCV histórico sigue
-  // viniendo de coingecko/twelveData sin cambios (MarketDataProvider.getOHLCV ya
-  // filtra por !adapter.fetchOHLCV, así que no hace falta implementarlo acá).
-  okx: {
-    name: 'OKX Spot', requiresKey: false, supports: ['BTCUSD','ETHUSD'],
-    async fetchQuote(symbol) {
-      const asset = ASSETS[symbol];
-      const cacheKey = `okx_quote_${symbol}`;
-      const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const res = await fetchWithTimeout(`${CONFIG.ENDPOINTS.OKX}/market/ticker?instId=${asset.symbols.okx}`);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const d = await res.json();
-      const ticker = d?.data?.[0];
-      if (!ticker) throw new Error('OKX: sin datos de ticker');
-      const bid = parseFloat(ticker.bidPx), ask = parseFloat(ticker.askPx), last = parseFloat(ticker.last);
-      const data = new MarketData({
-        bid, ask, last,
-        open: parseFloat(ticker.open24h), high: parseFloat(ticker.high24h), low: parseFloat(ticker.low24h),
-        close: parseFloat(ticker.open24h), volume: parseFloat(ticker.vol24h), timestamp: Date.now(),
-        timeframe: '1d', marketStatus: 'open',
-        spread: calculateSpread(bid, ask, asset.pipSize),
-        source: 'OKX Spot', symbol, estimatedSpread: false
-      });
-      ResponseCache.set(cacheKey, data); return data;
-    }
-  },
-  binanceSpot: {
-    name: 'Binance Spot', requiresKey: false, supports: ['BTCUSD','ETHUSD'],
-    async fetchQuote(symbol) {
-      const asset = ASSETS[symbol];
-      const cacheKey = `bs_quote_${symbol}`;
-      const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const res = await fetchWithTimeout(`${CONFIG.ENDPOINTS.BINANCE_SPOT}/ticker/24hr?symbol=${asset.symbols.binance}`);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const d = await res.json();
-      const data = new MarketData({
-        bid: parseFloat(d.bidPrice), ask: parseFloat(d.askPrice), last: parseFloat(d.lastPrice),
-        open: parseFloat(d.openPrice), high: parseFloat(d.highPrice), low: parseFloat(d.lowPrice),
-        close: parseFloat(d.prevClosePrice), volume: parseFloat(d.volume), timestamp: Date.now(),
-        timeframe: '1d', marketStatus: 'open',
-        spread: calculateSpread(parseFloat(d.bidPrice), parseFloat(d.askPrice), asset.pipSize),
-        source: 'Binance Spot', symbol, estimatedSpread: false
-      });
-      ResponseCache.set(cacheKey, data); return data;
-    },
-    async fetchOHLCV(symbol, interval, limit = 100) {
-      const asset = ASSETS[symbol];
-      const cacheKey = `bs_ohlcv_${symbol}_${interval}`;
-      const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const tfMap = { '5m': '5m', '15m': '15m', '1h': '1h' };
-      const res = await fetchWithTimeout(`${CONFIG.ENDPOINTS.BINANCE_SPOT}/klines?symbol=${asset.symbols.binance}&interval=${tfMap[interval]||'15m'}&limit=${limit}`);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      const result = new OHLCVData(data.map(k => ({ time: k[0], open: parseFloat(k[1]), high: parseFloat(k[2]), low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]) })));
-      ResponseCache.set(cacheKey, result); return result;
-    }
-  },
-  binanceFutures: {
-    name: 'Binance Futures', requiresKey: false, supports: ['BTCUSD','ETHUSD'],
-    async fetchQuote(symbol) {
-      const asset = ASSETS[symbol];
-      const cacheKey = `bf_quote_${symbol}`;
-      const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const res = await fetchWithTimeout(`${CONFIG.ENDPOINTS.BINANCE_FUTURES}/ticker/24hr?symbol=${asset.symbols.binance}`);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const d = await res.json();
-      const data = new MarketData({
-        bid: parseFloat(d.bidPrice), ask: parseFloat(d.askPrice), last: parseFloat(d.lastPrice),
-        open: parseFloat(d.openPrice), high: parseFloat(d.highPrice), low: parseFloat(d.lowPrice),
-        close: parseFloat(d.prevClosePrice), volume: parseFloat(d.volume), timestamp: Date.now(),
-        timeframe: '1d', marketStatus: 'open',
-        spread: calculateSpread(parseFloat(d.bidPrice), parseFloat(d.askPrice), asset.pipSize),
-        source: 'Binance Futures', symbol, estimatedSpread: false
-      });
-      ResponseCache.set(cacheKey, data); return data;
-    },
-    async fetchOHLCV(symbol, interval, limit = 100) {
-      const asset = ASSETS[symbol];
-      const cacheKey = `bf_ohlcv_${symbol}_${interval}`;
-      const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const tfMap = { '5m': '5m', '15m': '15m', '1h': '1h' };
-      const res = await fetchWithTimeout(`${CONFIG.ENDPOINTS.BINANCE_FUTURES}/klines?symbol=${asset.symbols.binance}&interval=${tfMap[interval]||'15m'}&limit=${limit}`);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      const result = new OHLCVData(data.map(k => ({ time: k[0], open: parseFloat(k[1]), high: parseFloat(k[2]), low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]) })));
-      ResponseCache.set(cacheKey, result); return result;
-    }
-  },
+  // (20/9) Retirados los adapters okx, binanceSpot, binanceFutures y coingecko: solo servían
+  // a BTCUSD/ETHUSD, que salieron de la app.
   exchangerate: {
-    name: 'ExchangeRate-API', requiresKey: false, supports: ['EURUSD'],
+    name: 'ExchangeRate-API', requiresKey: false, supports: ['EURUSD','GBPUSD'],
     // v4.6.3: open.er-api.com actualiza su tasa 1x/día. Como ahora es último recurso,
     // igual puede quedar "vivo" horas con el mismo valor si twelveData y alphaVantage
     // fallan. Se guarda el último valor+hora vistos (en memoria del proceso) y si el
@@ -1054,7 +1109,7 @@ const ProviderAdapters = {
     }
   },
   twelveData: {
-    name: 'Twelve Data', requiresKey: true, supports: ['BTCUSD','ETHUSD','EURUSD','XAUUSD'],
+    name: 'Twelve Data', requiresKey: true, supports: ['XAUUSD','EURUSD','US500','GBPUSD'],
     async fetchQuote(symbol) {
       if (!state.apiKeys.twelveData) throw new Error('API key no configurada');
       const asset = ASSETS[symbol];
@@ -1091,7 +1146,7 @@ const ProviderAdapters = {
     }
   },
   finnhub: {
-    name: 'Finnhub', requiresKey: true, supports: ['BTCUSD','ETHUSD','EURUSD','XAUUSD'],
+    name: 'Finnhub', requiresKey: true, supports: ['XAUUSD','EURUSD','GBPUSD'],
     async fetchQuote(symbol) {
       if (!state.apiKeys.finnhub) throw new Error('API key no configurada');
       const asset = ASSETS[symbol];
@@ -1123,78 +1178,17 @@ const ProviderAdapters = {
       ResponseCache.set(cacheKey, result); return result;
     }
   },
-  coingecko: {
-    name: 'CoinGecko', requiresKey: false, supports: ['BTCUSD','ETHUSD'],
-    async fetchQuote(symbol) {
-      const asset = ASSETS[symbol];
-      const id = asset.symbols.coingecko;
-      const cacheKey = `cg_quote_${symbol}`;
-      const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const headers = state.apiKeys.coingecko ? { 'x-cg-demo-api-key': state.apiKeys.coingecko } : {};
-      const url = `${CONFIG.ENDPOINTS.COINGECKO}/simple/price?ids=${id}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true&include_last_updated_at=true`;
-      const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, { headers }, 'coingecko');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      const d = data[id]; if (!d || d.usd == null) throw new Error('Respuesta inesperada de CoinGecko');
-      const price = d.usd;
-      const estBid = price * 0.9995, estAsk = price * 1.0005;
-      const marketData = new MarketData({
-        bid: estBid, ask: estAsk, last: price,
-        open: price, high: price, low: price, close: price, volume: d.usd_24h_vol || 0,
-        timestamp: (d.last_updated_at || Date.now() / 1000) * 1000, timeframe: '1d', marketStatus: 'open',
-        spread: calculateSpread(estBid, estAsk, asset.pipSize),
-        source: 'CoinGecko', symbol, estimatedSpread: true
-      });
-      ResponseCache.set(cacheKey, marketData); return marketData;
-    },
-    async fetchOHLCV(symbol, interval, limit = 100) {
-      const asset = ASSETS[symbol];
-      const id = asset.symbols.coingecko;
-      const cacheKey = `cg_ohlcv_${symbol}_${interval}`;
-      const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      const headers = state.apiKeys.coingecko ? { 'x-cg-demo-api-key': state.apiKeys.coingecko } : {};
-      // v4.6.4: el endpoint /coins/{id}/ohlc tiene granularidad FIJA que decide CoinGecko
-      // según 'days' (30min con days=1, 4h con days=3-30) — nunca da velas de 15m reales
-      // sin importar qué pidamos, por eso siempre topeaba en 48 velas/día. Se cambia a
-      // /market_chart, que devuelve precios a intervalos finos (~5min en days=1), y se
-      // agregan acá en velas de 15m/1h GENUINAS por bucket de tiempo — mismo timeframe
-      // que las estrategias esperan, no un timeframe distinto disfrazado.
-      const days = (interval === '1h') ? '14' : '1';
-      const url = `${CONFIG.ENDPOINTS.COINGECKO}/coins/${id}/market_chart?vs_currency=usd&days=${days}`;
-      const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, { headers }, 'coingecko');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      if (!data.prices || !Array.isArray(data.prices) || !data.prices.length) throw new Error('Sin datos históricos de CoinGecko');
-      const bucketMs = (interval === '1h') ? 60 * 60 * 1000 : 15 * 60 * 1000;
-      const buckets = new Map();
-      for (const [t, price] of data.prices) {
-        const bucketKey = Math.floor(t / bucketMs) * bucketMs;
-        let b = buckets.get(bucketKey);
-        if (!b) { b = { time: bucketKey, open: price, high: price, low: price, close: price, volume: 0 }; buckets.set(bucketKey, b); }
-        else { b.high = Math.max(b.high, price); b.low = Math.min(b.low, price); b.close = price; }
-      }
-      const candles = Array.from(buckets.values()).sort((a, b) => a.time - b.time);
-      // Descartamos la última vela si todavía no cerró (bucket en curso) para no mezclar
-      // una vela a medio formar con las cerradas — mismo criterio que usarían las demás fuentes.
-      if (candles.length && (Date.now() - candles[candles.length - 1].time) < bucketMs) candles.pop();
-      const result = new OHLCVData(candles.slice(-limit));
-      ResponseCache.set(cacheKey, result); return result;
-    }
-  },
   alphaVantage: {
-    name: 'Alpha Vantage', requiresKey: true, supports: ['BTCUSD','ETHUSD','EURUSD','XAUUSD'],
+    name: 'Alpha Vantage', requiresKey: true, supports: ['XAUUSD','EURUSD','GBPUSD'],
     async fetchQuote(symbol) {
       if (!state.apiKeys.alphaVantage) throw new Error('API key no configurada');
       const asset = ASSETS[symbol];
       const cacheKey = `av_quote_${symbol}`;
       const cached = ResponseCache.get(cacheKey); if (cached) return cached;
-      let url;
-      if (asset.type === 'crypto') {
-        url = `${CONFIG.ENDPOINTS.ALPHAVANTAGE}?function=CURRENCY_EXCHANGE_RATE&from_currency=${asset.symbols.alphaVantage}&to_currency=USD&apikey=${state.apiKeys.alphaVantage}`;
-      } else {
-        const fromCurr = asset.symbols.alphaVantage === 'EURUSD' ? 'EUR' : 'XAU';
-        url = `${CONFIG.ENDPOINTS.ALPHAVANTAGE}?function=CURRENCY_EXCHANGE_RATE&from_currency=${fromCurr}&to_currency=USD&apikey=${state.apiKeys.alphaVantage}`;
-      }
+      // FIX (20/9): antes todo lo que no fuera EURUSD se mapeaba a 'XAU' — con GBPUSD habría
+      // traído el precio del ORO como si fuera libra. Ahora la divisa base sale del propio símbolo.
+      const fromCurr = asset.symbols.alphaVantage === 'XAU' ? 'XAU' : asset.symbols.alphaVantage.slice(0, 3);
+      const url = `${CONFIG.ENDPOINTS.ALPHAVANTAGE}?function=CURRENCY_EXCHANGE_RATE&from_currency=${fromCurr}&to_currency=USD&apikey=${state.apiKeys.alphaVantage}`;
       const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, {}, 'alphaVantage');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
@@ -1216,13 +1210,8 @@ const ProviderAdapters = {
       const cacheKey = `av_ohlcv_${symbol}_${interval}`;
       const cached = ResponseCache.get(cacheKey); if (cached) return cached;
       const tfMap = { '5m': '5min', '15m': '15min', '1h': '60min' };
-      let url;
-      if (asset.type === 'crypto') {
-        url = `${CONFIG.ENDPOINTS.ALPHAVANTAGE}?function=CRYPTO_INTRADAY&symbol=${asset.symbols.alphaVantage}&market=USD&interval=${tfMap[interval]||'15min'}&apikey=${state.apiKeys.alphaVantage}`;
-      } else {
-        const fromSym = asset.symbols.alphaVantage === 'EURUSD' ? 'EUR' : 'XAU';
-        url = `${CONFIG.ENDPOINTS.ALPHAVANTAGE}?function=FX_INTRADAY&from_symbol=${fromSym}&to_symbol=USD&interval=${tfMap[interval]||'15min'}&apikey=${state.apiKeys.alphaVantage}`;
-      }
+      const fromSym = asset.symbols.alphaVantage === 'XAU' ? 'XAU' : asset.symbols.alphaVantage.slice(0, 3); // FIX (20/9): ver fetchQuote
+      const url = `${CONFIG.ENDPOINTS.ALPHAVANTAGE}?function=FX_INTRADAY&from_symbol=${fromSym}&to_symbol=USD&interval=${tfMap[interval]||'15min'}&apikey=${state.apiKeys.alphaVantage}`;
       const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, {}, 'alphaVantage');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
@@ -1238,7 +1227,7 @@ const ProviderAdapters = {
     }
   },
   fmp: {
-    name: 'Financial Modeling Prep', requiresKey: true, supports: ['BTCUSD','ETHUSD','EURUSD','XAUUSD'],
+    name: 'Financial Modeling Prep', requiresKey: true, supports: ['XAUUSD','EURUSD','GBPUSD'],
     // v4.6.4: detección de congelamiento genérica, mismo patrón que exchangerate.
     // Se vio en logs (24/8) que XAUUSD quedó con quote.last idéntico ~30min cuando
     // fmp era el proveedor activo (twelveData agotado). Por símbolo porque fmp sirve
@@ -1297,6 +1286,7 @@ const MarketDataProvider = {
       if (!adapter) return false;
       if (!adapter.supports.includes(symbol)) return false;
       if (adapter.requiresKey && !state.apiKeys[providerName]) return false;
+      if (isProviderSymbolBlocked(providerName, symbol)) return false;
       const usage = RequestTracker.getUsage(providerName);
       if (usage.limit && usage.used >= usage.limit) { logQuotaExcluded(providerName, symbol, usage); return false; }
       return true;
@@ -1327,7 +1317,7 @@ const MarketDataProvider = {
           lastSuccess: state.providerStats[providerName]?.lastSuccess || null,
           lastError: Date.now(), errorCount: (state.providerStats[providerName]?.errorCount || 0) + 1, lastErrorMsg: error.message
         };
-        markProviderCooldown(providerName, error.message);
+        markProviderCooldown(providerName, error.message, symbol);
         addLog(adapter.name, 'FALLO: ' + error.message, symbol);
         console.warn(`Provider ${providerName} falló para ${symbol}:`, error.message);
         await sleep(1500);
@@ -1359,6 +1349,7 @@ const MarketDataProvider = {
       const adapter = ProviderAdapters[providerName];
       if (!adapter || !adapter.fetchOHLCV || !adapter.supports.includes(symbol)) return false;
       if (adapter.requiresKey && !state.apiKeys[providerName]) return false;
+      if (isProviderSymbolBlocked(providerName, symbol)) return false;
       const usage = RequestTracker.getUsage(providerName);
       if (usage.limit && usage.used >= usage.limit) { logQuotaExcluded(providerName, symbol, usage); return false; }
       return true;
@@ -1385,15 +1376,15 @@ const MarketDataProvider = {
             // quien pidió HTF) no tiene suficientes velas para evaluar.
             console.warn(`OHLCV ${providerName} INSUFICIENTE para estrategias: ${symbol} ${tf} — recibió ${data.candles.length}, mínimo requerido ${effectiveMin}`);
           } else if (data.candles.length < limit) {
-            // Techo estructural esperado del endpoint gratuito de CoinGecko en 15m
-            // (days=1 → máx. ~96 velas de 15m); no afecta a ninguna estrategia activa.
+            // Proveedor devolvió menos velas de las pedidas (pero más que el mínimo
+            // requerido): no afecta a ninguna estrategia activa.
             console.info(`OHLCV ${providerName} ${symbol} ${tf} — recibió ${data.candles.length}/${limit} (techo del proveedor, dentro de lo requerido)`);
           }
           if (!state.klineHistory[symbol]) state.klineHistory[symbol] = {};
           state.klineHistory[symbol][tf] = data;
           return data;
         } catch (error) {
-          markProviderCooldown(providerName, error.message);
+          markProviderCooldown(providerName, error.message, symbol);
           console.warn(`OHLCV ${providerName} falló:`, error.message);
           await sleep(1500);
         }
@@ -1534,6 +1525,10 @@ const BacktestEngine = {
         console.warn(`Backtest: twelveData en cooldown, se corta ${symbol} en ${tf}`);
         break;
       }
+      if (isProviderSymbolBlocked('twelveData', symbol)) {
+        console.warn(`Backtest: twelveData no sirve ${symbol} (bloqueado por símbolo), se omite`);
+        break;
+      }
       try {
         const candles = await this.fetchCandles(symbol, tf);
         if (!candles || !candles.length) continue;
@@ -1542,7 +1537,7 @@ const BacktestEngine = {
         allCustomEvents = allCustomEvents.concat(customEvents);
       } catch (e) {
         console.warn(`Backtest: no se pudo traer historial de ${symbol} en ${tf}:`, e.message);
-        markProviderCooldown('twelveData', e.message);
+        markProviderCooldown('twelveData', e.message, symbol);
       }
       await sleep(6000);
     }
@@ -1646,6 +1641,24 @@ function renderCustomSignal(symbol, strategyKey, display) {
 }
 function renderConfidence() {}
 
+ // NUEVO (20/9): antes, con el mercado cerrado, refreshAsset solo tocaba state.lastDisplay (que
+// el panel no lee) y las tarjetas quedaban con lo último que hubiera. Ahora cada estrategia
+// habilitada para el símbolo, SIN trade abierto, muestra el motivo real del bloqueo
+// (pausa diaria, cierre semanal, feriado...). Un trade abierto conserva su tarjeta.
+function markMarketClosedDisplays(symbol, reason) {
+  const disabled = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
+  CONFIG.ENABLED_STRATEGIES.forEach(strategyKey => {
+    if (disabled.includes(strategyKey)) return;
+    if (state.activeCustomSignals[`${symbol}_${strategyKey}`]) return;
+    renderCustomSignal(symbol, strategyKey, { type: 'market-closed', reason });
+  });
+}
+function clearMarketClosedDisplays(symbol) {
+  const bucket = state.lastCustomDisplay && state.lastCustomDisplay[symbol];
+  if (!bucket) return;
+  Object.keys(bucket).forEach(k => { if (bucket[k] && bucket[k].type === 'market-closed') bucket[k] = { type: 'no-signal' }; });
+}
+
 function pushSignalHistory(signal) {
   if (signal.type !== 'long' && signal.type !== 'short') return;
   const entry = {
@@ -1666,6 +1679,7 @@ function pushSignalHistory(signal) {
     // historial. profitabilityMode/Reason/Sample/ExpectancyR solo tienen valor real
     // cuando profitabilityMode==='probation'; en 'ok' documentan que pasó el gate.
     riskWeight: signal.riskWeight != null ? signal.riskWeight : 1,
+    shadow: !!signal.shadow, // NUEVO (20/9): modo sombra (sin push, no cuenta para el Daily Risk Guard)
     profitabilityMode: signal.profitabilityMode || 'ok',
     profitabilityReason: signal.profitabilityReason || null,
     profitabilitySample: signal.profitabilitySample != null ? signal.profitabilitySample : null,
@@ -1706,7 +1720,10 @@ function updateStrategyStatsBySymbol(entry) {
   localStorage.setItem('pt_strategy_stats_by_symbol', JSON.stringify(state.strategyStatsBySymbol));
 
   checkCircuitBreaker(symbol, key, entry.result);
-  checkCircuitBreakerAggregate(key, entry.result);
+  // (20/9) una operación en modo sombra NO alimenta el breaker agregado (cruza símbolos): sus
+  // pérdidas simuladas no deben apagar la estrategia en los activos con dinero real. El breaker
+  // por combinación símbolo+estrategia SÍ la cuenta (mismas reglas que una señal real).
+  if (!entry.shadow) checkCircuitBreakerAggregate(key, entry.result);
   checkProbationGraduation(key);
 }
 
@@ -1766,6 +1783,16 @@ function evaluateProfitability(symbol, strategyKey, confidence) {
   if (recentSlice.length >= cfg.recentWindow && recentLosses >= cfg.maxRecentLosses) {
     return { decision: 'NO_TRADE', mode: 'RECENT_DETERIORATION', ...base,
       reason: `${recentLosses} de las últimas ${recentSlice.length} operaciones LIVE fueron pérdidas (umbral ${cfg.maxRecentLosses})` };
+  }
+
+  // S. MODO SOMBRA (20/9): activos nuevos (CONFIG.SHADOW_MODE.symbols) con muestra LIVE
+  // insuficiente — se registran y trackean sin push ni riesgo real, para poder juntar la
+  // muestra que la regla A exigiría de otro modo (círculo cerrado). Va después de D a
+  // propósito: un deterioro reciente sigue cortando incluso en sombra.
+  const shadowCfg = CONFIG.SHADOW_MODE;
+  if (shadowCfg && shadowCfg.enabled && (shadowCfg.symbols || []).includes(symbol) && sample < cfg.minLiveSample) {
+    return { decision: 'SHADOW', mode: 'SHADOW_SAMPLE', ...base,
+      reason: `modo sombra: ${sample}/${cfg.minLiveSample} operaciones LIVE — se registra sin push ni riesgo real hasta juntar muestra` };
   }
 
   // A. Muestra LIVE insuficiente
@@ -2249,7 +2276,8 @@ function appendClosedSignal(entry) {
     symbol: entry.symbol, type: entry.type, source: entry.source || 'legacy_untagged', // FIX (15/9, auditoría)
     result: entry.result, rMultiple: entry.rMultiple, timestamp: entry.timestamp,
     // NUEVO (auditoría 18/9 v2, punto A1): ver nota en resolveCustomSignal/frozen.
-    provider: entry.provider || 'unknown', estimatedSpread: !!entry.estimatedSpread
+    provider: entry.provider || 'unknown', estimatedSpread: !!entry.estimatedSpread,
+    shadow: !!entry.shadow // NUEVO (20/9)
   });
   localStorage.setItem(storageKey, JSON.stringify(dayList));
   let daysIndex;
@@ -2284,7 +2312,9 @@ function checkDailyRiskGuard(symbol) {
   const guard = CONFIG.DAILY_RISK_GUARD;
   if (!guard || !guard.enabled) return { blocked: false };
 
-  const today = getTodayClosedSignals();
+  // (20/9) las operaciones en modo sombra no cuentan: no son dinero real, no deben frenar
+  // (ni gastar el tope diario de) señales reales.
+  const today = getTodayClosedSignals().filter(s => !s.shadow);
   const symbolToday = today.filter(s => s.symbol === symbol);
 
   const symbolSignalCount = symbolToday.length;
@@ -2465,9 +2495,13 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
       // NUEVO (18/9, Motor de Rentabilidad V1): si la decisión fue PROBATION, el
       // multiplicador de riesgo original (STRATEGY_RISK_WEIGHT) se reduce además por
       // probationRiskMultiplier — no lo reemplaza, se combinan (ej. 1.5x * 0.5 = 0.75x).
-      riskWeight: ((CONFIG.STRATEGY_RISK_WEIGHT && CONFIG.STRATEGY_RISK_WEIGHT[customSig.strategy]) || 1) *
+      // (20/9) en modo sombra el tamaño sugerido es 0 (no operar con dinero real).
+      riskWeight: (profitabilityDecision && profitabilityDecision.decision === 'SHADOW') ? 0 :
+        ((CONFIG.STRATEGY_RISK_WEIGHT && CONFIG.STRATEGY_RISK_WEIGHT[customSig.strategy]) || 1) *
         ((profitabilityDecision && profitabilityDecision.decision === 'PROBATION') ? profitabilityDecision.riskMultiplier : 1),
-      profitabilityMode: (profitabilityDecision && profitabilityDecision.decision === 'PROBATION') ? 'probation' : 'ok',
+      shadow: !!(profitabilityDecision && profitabilityDecision.decision === 'SHADOW'),
+      profitabilityMode: (profitabilityDecision && profitabilityDecision.decision === 'SHADOW') ? 'shadow' :
+        ((profitabilityDecision && profitabilityDecision.decision === 'PROBATION') ? 'probation' : 'ok'),
       profitabilityReason: profitabilityDecision ? profitabilityDecision.reason : null,
       profitabilitySample: profitabilityDecision ? profitabilityDecision.sample : null,
       profitabilityExpectancyR: profitabilityDecision ? profitabilityDecision.expectancyR : null,
@@ -2490,7 +2524,9 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     // sin graduar corren igual (se guardan en history/activeCustomSignals, cuentan para
     // stats y circuit breaker) pero no mandan push — ver checkProbationGraduation().
     const inProbation = CONFIG.PROBATION_STRATEGIES.includes(customSig.strategy) && !state.probationGraduated[customSig.strategy];
-    if (inProbation) {
+    if (frozen.shadow) {
+      addLog(quote.source, `[${customSig.label}] señal ${customSig.direction === 'long' ? 'LONG' : 'SHORT'} registrada en MODO SOMBRA (sin push, tamaño 0) — ${symbol} juntando muestra LIVE`, symbol);
+    } else if (inProbation) {
       addLog(quote.source, `[${customSig.label}] señal ${customSig.direction === 'long' ? 'LONG' : 'SHORT'} registrada en modo probation (sin push) — estrategia nueva, esperando muestra mínima`, symbol);
     } else {
       notifyNewSignal(frozen);
@@ -2556,7 +2592,18 @@ function refreshActiveCustomSignalsDisplay(symbol, quote, skipStrategies = new S
 async function refreshAsset(symbol, forceRefresh = false) {
   const asset = ASSETS[symbol];
   renderMarketBanner(symbol); renderAssetHoursPill(symbol); renderApiError(symbol, null);
-  if (!isMarketOpenForAsset(symbol)) { renderSignal(symbol, { type: 'market-closed' }); return; }
+  // NUEVO (20/9): horarios reales por instrumento (ver getMarketStatus). Cerrado => no se
+  // piden datos. Abierto pero en tramo de bloqueo (previo/posterior a pausa, rollover) o con
+  // feed sin velas nuevas => se sigue trackeando SL/TP pero NO se generan señales nuevas.
+  const mkt = getMarketStatus(symbol);
+  state.marketStatus = state.marketStatus || {};
+  state.marketStatus[symbol] = mkt;
+  if (!mkt.open) {
+    markMarketClosedDisplays(symbol, mkt.reason);
+    renderSignal(symbol, { type: 'market-closed', reason: mkt.reason });
+    return;
+  }
+  clearMarketClosedDisplays(symbol);
   try {
     // FIX (09/9): getQuote ahora también cae a un fallback (último quote exitoso
     // cacheado en state.lastQuote) en vez de rechazar el Promise.all entero y
@@ -2588,7 +2635,17 @@ async function refreshAsset(symbol, forceRefresh = false) {
     state.htfDiagnostics = state.htfDiagnostics || {};
     state.htfDiagnostics[symbol] = { tf: htfTF, count: htfCandles ? htfCandles.length : 0, at: Date.now() };
     checkHistoryOutcomes(symbol, quote.last, ohlcv.candles);
-    
+
+    const feed = getFeedStatus(ohlcv.candles, state.currentTF);
+    const signalBlockReason = !mkt.signalsAllowed ? mkt.reason
+      : (feed.stale ? `feed sin velas nuevas hace ${feed.ageMin} min (posible pausa/feriado no listado o proveedor caído)` : null);
+    state.marketStatus[symbol] = { ...mkt, feedStale: feed.stale, feedAgeMin: feed.ageMin, signalBlockReason };
+    if (signalBlockReason) {
+      addLog('schedule', `sin señales nuevas: ${signalBlockReason}`, symbol);
+      refreshActiveCustomSignalsDisplay(symbol, quote, new Set());
+      return;
+    }
+
     try {
       // v4.7.3 (Etapa 3 — scoring contextual): se pasa el historial reciente
       // símbolo+estrategia como symbolStats, 5º parámetro nuevo de evaluateAll().
@@ -2598,7 +2655,7 @@ async function refreshAsset(symbol, forceRefresh = false) {
       // dentro de ±60min, si lo hay. Uso exclusivo de computeContextualScore(): ajusta
       // el mismo score informativo que ya existe, no agrega campos nuevos a la señal
       // ni se muestra en la UI (decisión explícita de Soy).
-       const newsContext = await NewsCalendar.getNearbyHighImpact('USD', 60);
+       const newsContext = await NewsCalendar.getNearbyHighImpact(NEWS_CURRENCIES_BY_SYMBOL[symbol] || ['USD'], 60);
       const rawSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles, state.strategyStatsBySymbol[symbol] || null, newsContext, CONFIG.MIN_CONFIDENCE_SCORE);
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
       const filteredSignals = rawSignals.filter(sig => {
@@ -2646,41 +2703,8 @@ async function refreshAllData(forceRefresh = false) {
   }
 }
 async function requestWakeLock() {}
-// FIX (7.1, medida intermedia): chequeo liviano de precio para BTC/ETH, en paralelo al
-// ciclo principal (ver CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS). No evalúa estrategias ni
-// genera señales nuevas — solo pide el precio actual y lo pasa a checkHistoryOutcomes
-// para detectar más rápido si una señal ya en curso tocó SL o TP, usando las últimas
-// velas ya cacheadas (state.klineHistory) en vez de pedir OHLCV/HTF de nuevo.
-async function quickPriceCheck(symbol) {
-  const asset = ASSETS[symbol];
-  if (!asset || asset.type !== 'crypto') return;
-  if (!isMarketOpenForAsset(symbol)) return;
-  try {
-    const quote = await MarketDataProvider.getQuote(symbol, false);
-    updatePriceUI(symbol, quote, asset);
-    const cachedCandles = (state.klineHistory[symbol] && state.klineHistory[symbol][state.currentTF] && state.klineHistory[symbol][state.currentTF].candles) || [];
-    checkHistoryOutcomes(symbol, quote.last, cachedCandles);
-  } catch (e) {
-    console.warn(`quickPriceCheck: fallo en ${symbol}:`, e.message);
-  }
-}
-let cryptoQuickCheckTimer = null;
-async function cryptoQuickCheckTick() {
-  try {
-    for (const symbol of Object.keys(ASSETS)) {
-      if (ASSETS[symbol].type === 'crypto') await quickPriceCheck(symbol);
-    }
-  } finally {
-    cryptoQuickCheckTimer = setTimeout(cryptoQuickCheckTick, CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS);
-  }
-}
-function startCryptoQuickCheckLoop() {
-  if (cryptoQuickCheckTimer) return;
-  cryptoQuickCheckTimer = setTimeout(cryptoQuickCheckTick, CONFIG.CRYPTO_QUICK_CHECK_INTERVAL_MS);
-}
-function stopCryptoQuickCheckLoop() {
-  if (cryptoQuickCheckTimer) { clearTimeout(cryptoQuickCheckTimer); cryptoQuickCheckTimer = null; }
-}
+// (20/9) Retirado el chequeo liviano de precio para BTC/ETH (quickPriceCheck / cryptoQuickCheck*):
+// era solo para crypto, que salió de la app.
 
 let autoRefreshTimer = null;
 async function autoRefreshTick() {
@@ -2774,7 +2798,12 @@ function applyRetroactiveCircuitBreaker() {
 function assertStrategyFlagsSync() {
   const checks = [
     { flag: 'ETH_VWAP_SCALP_ENABLED', key: 'eth_vwap_scalp', value: CustomStrategies.ETH_VWAP_SCALP_ENABLED },
-    { flag: 'ETH_MOMENTUM_BREAKOUT_ENABLED', key: 'eth_momentum_breakout', value: CustomStrategies.ETH_MOMENTUM_BREAKOUT_ENABLED }
+    { flag: 'ETH_MOMENTUM_BREAKOUT_ENABLED', key: 'eth_momentum_breakout', value: CustomStrategies.ETH_MOMENTUM_BREAKOUT_ENABLED },
+    // NUEVO (20/9): mismos flags para las demás estrategias apagadas, para no gastar cómputo
+    // ni ensuciar logs con señales que la whitelist descarta igual.
+    { flag: 'SESSION_FALSE_BREAKOUT_ENABLED', key: 'session_false_breakout', value: CustomStrategies.SESSION_FALSE_BREAKOUT_ENABLED },
+    { flag: 'PRICE_ACTION_RSI_EMA_ENABLED', key: 'price_action_rsi_ema', value: CustomStrategies.PRICE_ACTION_RSI_EMA_ENABLED },
+    { flag: 'RSI_DIVERGENCE_ENABLED', key: 'rsi_divergence', value: CustomStrategies.RSI_DIVERGENCE_ENABLED }
   ];
   checks.forEach(({ flag, key, value }) => {
     const inWhitelist = CONFIG.ENABLED_STRATEGIES.includes(key);
@@ -2787,6 +2816,31 @@ function assertStrategyFlagsSync() {
     }
   });
 }
+// NUEVO (20/9): BTCUSD/ETHUSD salieron de ASSETS, así que checkHistoryOutcomes() ya no corre
+// para ellos. Las operaciones que hubieran quedado 'pending' (y sus entradas en
+// activeCustomSignals) se quedarían "en curso" para siempre. Se retiran una sola vez, al
+// arrancar: result 'expired' con 0R — 'expired' NO cuenta para winrate/expectancy/circuit
+// breaker (solo cuentan 'win'/'loss'), así que no toca ninguna estadística. El historial
+// ya cerrado (ganadas/perdidas de BTC/ETH) se conserva intacto.
+function retireRemovedSymbols() {
+  let retired = 0;
+  (state.signalHistory || []).forEach(h => {
+    if (h && h.result === 'pending' && h.symbol && !ASSETS[h.symbol]) {
+      h.result = 'expired'; h.rMultiple = 0; h.retiredReason = 'activo retirado de la app'; retired++;
+    }
+  });
+  let activeRemoved = 0;
+  Object.keys(state.activeCustomSignals || {}).forEach(k => {
+    const sym = k.slice(0, k.indexOf('_'));
+    if (sym && !ASSETS[sym]) { delete state.activeCustomSignals[k]; activeRemoved++; }
+  });
+  if (retired || activeRemoved) {
+    try { localStorage.setItem('pt_v4_signals', JSON.stringify(state.signalHistory)); } catch (e) {}
+    try { localStorage.setItem('pt_active_custom_signals', JSON.stringify(state.activeCustomSignals)); } catch (e) {}
+    console.log(`[retiro de activos] ${retired} operaciones 'pending' y ${activeRemoved} señales activas de símbolos retirados marcadas como expiradas (0R, sin impacto en estadísticas)`);
+  }
+}
+retireRemovedSymbols();
 assertStrategyFlagsSync();
 migrateRenamedStrategyKeys();
 applyRetroactiveCircuitBreaker();
@@ -2794,5 +2848,5 @@ applyRetroactiveCircuitBreaker();
 module.exports = {
   state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
   startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isKillZoneWindow,
-  startCryptoQuickCheckLoop, stopCryptoQuickCheckLoop
+  getMarketStatus
 };
