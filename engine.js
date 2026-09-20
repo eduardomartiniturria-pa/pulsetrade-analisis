@@ -383,6 +383,24 @@ const CONFIG = {
     dailyLossCapRPerSymbol: -2,
     dailyLossCapRGlobal: -3
   },
+  // NUEVO (auditoría 20/9 v2): compuerta de costo. Estaba documentada en
+  // PulseTrade_PRO_Estrategias_y_Parametros.md como implementada desde el 20/9
+  // ("se descarta la señal si el spread estimado supera el 25% del stop"), pero
+  // nunca se escribió en el código — ni acá ni en custom-strategies.js (evaluateAll
+  // no recibe spread como parámetro, así que tampoco pudo haberse hecho del lado de
+  // las estrategias). Motivo real, documentado en el .md con datos de producción:
+  // EURUSD con stops de 2-4 pips perdía -1.33R a -1.75R en vez de -1R por el costo
+  // del spread relativo al stop. Un gate dinámico (spread/stop) en vez de un piso
+  // fijo de pips por símbolo: con ESTIMATED_SPREAD_PIPS_BY_SYMBOL.EURUSD=1.5 y este
+  // umbral de 0.25, ya exige de facto un stop >=6 pips en EURUSD — sin mantener un
+  // segundo número (piso fijo) que pueda desincronizarse del real, y reacciona solo
+  // si el spread se ensancha puntualmente (rollover, noticia, feed débil), que es
+  // justo cuando más protege. Se evalúa en resolveCustomSignal() con quote.spread
+  // (ya viene en pips, real o estimado según el proveedor) y slPips.
+  QUALITY_GATES: {
+    enabled: true,
+    maxSpreadPctOfStop: 0.25
+  },
   // NUEVO (15/9, auditoría — "diworsification"): con 7-10 estrategias corriendo con
   // peso parejo, la ganancia real de las 2-3 que sí tienen edge (sobre todo
   // ny_open_kill_zone) se diluye con el resto, que empata o resta. Esto NO cambia el
@@ -1407,7 +1425,6 @@ const MarketDataProvider = {
     }
   }
 };
-
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 const BacktestEngine = {
@@ -2440,6 +2457,12 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
       };
     }
   }
+  // NUEVO (auditoría 20/9 v2): compuerta de costo — ver CONFIG.QUALITY_GATES. A
+  // diferencia de los tres gates de arriba, no puede evaluarse antes de este punto:
+  // depende de slPips, que solo existe una vez calculados entry/sl (y, en XAUUSD,
+  // después del ensanche de holgura del SL) más abajo. Se declara acá para que
+  // quede disponible en el return final, mismo patrón que los demás.
+  let costGateBlockedDisplay = null;
   if (isNewDirection && !inCooldown && meetsConfidenceThreshold && !riskGuardBlockedDisplay && !profitabilityBlockedDisplay) {
     let entry = customSig.entry || quote.last;
     let sl = customSig.sl;
@@ -2476,7 +2499,30 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     const slPips = toPips(sl, entry, asset);
     const tp1Pips = toPips(tp1, entry, asset);
     const tp2Pips = toPips(tp2, entry, asset);
-    
+
+    // GATE 2b — compuerta de costo (ver CONFIG.QUALITY_GATES): descarta la señal si
+    // el spread (real si el proveedor lo trae, estimado si no — quote.spread ya viene
+    // en pips, ver calculateSpread) supera maxSpreadPctOfStop del stop en pips. Mismo
+    // patrón que riskGuardBlockedDisplay/profitabilityBlockedDisplay: no se cuenta
+    // como operación real (no entra a activeCustomSignals/signalHistory, no dispara
+    // push), pero sí se manda a renderCustomSignal como informativa. En XAUUSD corre
+    // ya con slPips post-ensanche (arriba), así que mide el riesgo real de la operación.
+    const qGates = CONFIG.QUALITY_GATES;
+    if (qGates && qGates.enabled && quote.spread != null && slPips) {
+      const spreadPctOfStop = quote.spread / slPips;
+      if (spreadPctOfStop > qGates.maxSpreadPctOfStop) {
+        costGateBlockedDisplay = {
+          type: customSig.direction, symbol, costGateBlocked: true,
+          costGateReason: `spread ${quote.spread.toFixed(1)} pips = ${(spreadPctOfStop * 100).toFixed(0)}% del stop (${slPips.toFixed(1)} pips) — supera el ${(qGates.maxSpreadPctOfStop * 100).toFixed(0)}% permitido`,
+          confidence: customSig.confidence,
+          strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
+          detectedAt: Date.now()
+        };
+        addLog(quote.source, `[${customSig.label}] señal ${customSig.direction === 'long' ? 'LONG' : 'SHORT'} detectada pero descartada por compuerta de costo: ${costGateBlockedDisplay.costGateReason}`, symbol);
+      }
+    }
+
+    if (!costGateBlockedDisplay) {
     const currentRisk = Math.abs(entry - sl);
     const formatRR = tp => {
       if (tp === null || !currentRisk) return null;
@@ -2531,9 +2577,10 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     } else {
       notifyNewSignal(frozen);
     }
+    } // cierre if (!costGateBlockedDisplay)
   }
   const frozen = state.activeCustomSignals[key];
-  if (!frozen) return belowThresholdDisplay || riskGuardBlockedDisplay || profitabilityBlockedDisplay;
+  if (!frozen) return belowThresholdDisplay || riskGuardBlockedDisplay || profitabilityBlockedDisplay || costGateBlockedDisplay;
   return evaluateCustomSignalOutcome(symbol, key, quote, frozen);
 }
 function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
