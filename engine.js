@@ -1414,10 +1414,11 @@ const MarketDataProvider = {
           // más chicos (HTF) se compara contra lo efectivamente pedido (limit).
           const isBaseTFRequest = limit >= CONFIG.OHLCV_STRATEGY_MIN_CANDLES;
           const effectiveMin = isBaseTFRequest ? CONFIG.OHLCV_STRATEGY_MIN_CANDLES : limit;
-        // TP2 o SL, igual que en producción. Si se acaba el horizonte de MAX_HOLD_CANDLES
-        // con TP1 ya tocado (sin SL ni TP2), se cuenta como ganada al R de TP1 — el mismo
-        // criterio que la expiración en checkHistoryOutcomes.
-        console.warn(`OHLCV ${providerName} INSUFICIENTE para estrategias: ${symbol} ${tf} — recibió ${data.candles.length}, mínimo requerido ${effectiveMin}`);
+          if (data.candles.length < effectiveMin) {
+            // Caso real de riesgo: por debajo de esto, la estrategia que hizo este
+            // pedido (bollinger_squeeze en TF base, o el filtro de tendencia HTF de
+            // quien pidió HTF) no tiene suficientes velas para evaluar.
+            console.warn(`OHLCV ${providerName} INSUFICIENTE para estrategias: ${symbol} ${tf} — recibió ${data.candles.length}, mínimo requerido ${effectiveMin}`);
           } else if (data.candles.length < limit) {
             // Proveedor devolvió menos velas de las pedidas (pero más que el mínimo
             // requerido): no afecta a ninguna estrategia activa.
