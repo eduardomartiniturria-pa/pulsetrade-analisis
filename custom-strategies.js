@@ -1,4 +1,14 @@
 // ============================================================
+// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.14 (20/9, activos sin crypto)
+// ============================================================
+// Cambios v4.14 (20/9): activos de la app = XAUUSD, EURUSD, US500, GBPUSD (BTC/ETH salieron).
+// - Activas: kill_zone_ny (los 4), supply_demand (los 4), session_breakout_vwap (EURUSD,
+//   XAUUSD y GBPUSD — ver SESSION_BREAKOUT_VWAP_SYMBOLS).
+// - Apagadas por flag (código conservado): eth_momentum_breakout, session_false_breakout,
+//   price_action_rsi_ema, rsi_divergence, eth_vwap_scalp. engine.js verifica al arrancar
+//   que cada flag coincida con CONFIG.ENABLED_STRATEGIES.
+// - Sin cambios en la lógica de detección de ninguna estrategia.
+// ============================================================
 // ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.13 (18/9, auditoría completa)
 // ============================================================
 // Cambios v4.13 (18/9, auditoría completa a pedido de Soy — "revisa todo completo"):
@@ -174,7 +184,24 @@ const ETH_VWAP_SCALP_ENABLED = false;
 // v4.10 (29/8): ESTRATEGIA NUEVA — ver detectEthMomentumBreakout() más abajo.
 // Debe coincidir manualmente con si 'eth_momentum_breakout' está en
 // engine.js:CONFIG.ENABLED_STRATEGIES — no hay lectura cruzada entre archivos.
-const ETH_MOMENTUM_BREAKOUT_ENABLED = true;
+// (20/9) APAGADA: era solo para ETHUSD, que salió de la app. La función se conserva.
+const ETH_MOMENTUM_BREAKOUT_ENABLED = false;
+
+// NUEVO (20/9): flags para las demás estrategias apagadas, así evaluateAll() no las calcula
+// cada ciclo para descartarlas después en la whitelist (cómputo y logs "[v4.6] ignorada"
+// sin efecto). Deben coincidir con engine.js:CONFIG.ENABLED_STRATEGIES — engine.js lo
+// verifica al arrancar (assertStrategyFlagsSync) y aborta si no coinciden.
+const PRICE_ACTION_RSI_EMA_ENABLED = false;
+const RSI_DIVERGENCE_ENABLED = false;
+// Session False Breakout (Unger): era solo BTC/ETH (16/9: sin edge en forex/oro). Con crypto
+// fuera queda sin símbolos. Para reactivarla: flag en true, símbolos acá y en ENABLED_STRATEGIES.
+const SESSION_FALSE_BREAKOUT_ENABLED = false;
+const SESSION_FALSE_BREAKOUT_SYMBOLS = [];
+// Session Breakout + VWAP: EURUSD/XAUUSD (origen) + GBPUSD (20/9, sesión de Londres = su caso
+// natural; ventanas Córdoba 05-08 y 10-13 = 08-11 y 13-16 UTC). US500 NO: sin volumen real
+// confiable el VWAP cae a fallback de precio y las ventanas no coinciden con la apertura del
+// cash de EE.UU.
+const SESSION_BREAKOUT_VWAP_SYMBOLS = ['EURUSD', 'XAUUSD', 'GBPUSD'];
 
 // NOTA (limpieza, esta revisión): existían acá 3 funciones de ventana de
 // sesión (isLondonSession, isLondonNYOverlap, isNYOpenWindow) que definían
@@ -1459,7 +1486,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
   // Pivots Breakout & Reversal eliminada del código (16/9, plan de rentabilidad) —
   // ver nota junto a findStrictPivotHighs/Lows en la sección de indicadores.
 
-  const pa = safeRun('price_action_rsi_ema', detectPriceActionRsiEma, candles);
+  const pa = PRICE_ACTION_RSI_EMA_ENABLED ? safeRun('price_action_rsi_ema', detectPriceActionRsiEma, candles) : { bullish: false, bearish: false };
   if (pa.bullish || pa.bearish) {
     signals.push({
       strategy: 'price_action_rsi_ema', label: 'Price Action + RSI + EMA',
@@ -1481,7 +1508,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
   // plan de rentabilidad) — ver notas junto a getHtfTrendDirection() y
   // calculateBollingerSeries() más arriba.
 
-  const rsiDiv = safeRun('rsi_divergence', detectRsiDivergence, candles);
+  const rsiDiv = RSI_DIVERGENCE_ENABLED ? safeRun('rsi_divergence', detectRsiDivergence, candles) : { bullish: false, bearish: false };
   if (rsiDiv.bullish || rsiDiv.bearish) {
     signals.push({
       strategy: 'rsi_divergence', label: 'Divergencia RSI',
@@ -1490,9 +1517,8 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
     });
   }
 
-  // Las siguientes tres son específicas de UN símbolo (a diferencia de las
-  // 7 de arriba, que corren en los 4 activos): requieren htfCandles (H1) y/o
-  // VWAP, y quedan filtradas por `symbol` acá mismo.
+  // Las siguientes son específicas de ciertos símbolos (a diferencia de Kill Zone y
+  // Supply and Demand, que corren en los 4 activos): quedan filtradas por `symbol` acá mismo.
   // v4.9 (27/8): eth_vwap_scalp NO está en engine.js CONFIG.ENABLED_STRATEGIES
   // (whitelist real de 5) — su resultado siempre se descartaba después, pero
   // calculateVWAPSeries() se seguía ejecutando en cada ciclo para ETHUSD,
@@ -1526,9 +1552,9 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
     }
   }
 
-  // Estrategia nueva, filtro por símbolo (mismo patrón que eth_vwap_scalp/
-  // eth_momentum_breakout arriba): solo EURUSD y XAUUSD.
-  if (SESSION_BREAKOUT_VWAP_ENABLED && (symbol === 'EURUSD' || symbol === 'XAUUSD')) {
+  // Filtro por símbolo (mismo patrón que eth_vwap_scalp/eth_momentum_breakout arriba):
+  // SESSION_BREAKOUT_VWAP_SYMBOLS (EURUSD, XAUUSD, GBPUSD).
+  if (SESSION_BREAKOUT_VWAP_ENABLED && SESSION_BREAKOUT_VWAP_SYMBOLS.includes(symbol)) {
     const sbv = safeRun('session_breakout_vwap', detectSessionBreakoutVwap, candles);
     if (sbv.bullish || sbv.bearish) {
       signals.push({
@@ -1547,7 +1573,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
   // función para activos is24h:false (ver más arriba): en FX/oro real, incluso
   // acotando la confirmación a la sesión de Londres/NY, la estrategia sigue sin
   // edge; se saca del todo en vez de seguir parcheando el filtro horario.
-  if (symbol === 'BTCUSD' || symbol === 'ETHUSD') {
+  if (SESSION_FALSE_BREAKOUT_ENABLED && SESSION_FALSE_BREAKOUT_SYMBOLS.includes(symbol)) {
   const sfb = safeRun('session_false_breakout', detectSessionFalseBreakout, candles, asset);
   if (sfb.bullish || sfb.bearish) {
     signals.push({
@@ -1612,7 +1638,11 @@ module.exports = {
   // Antes la sincronización era manual sin lectura cruzada entre archivos — la misma
   // clase de error que ya causó el bug de STRATEGY_RISK_WEIGHT con la key vieja.
   ETH_VWAP_SCALP_ENABLED,
-  ETH_MOMENTUM_BREAKOUT_ENABLED
+  ETH_MOMENTUM_BREAKOUT_ENABLED,
+  SESSION_FALSE_BREAKOUT_ENABLED,
+  PRICE_ACTION_RSI_EMA_ENABLED,
+  RSI_DIVERGENCE_ENABLED,
+  SESSION_BREAKOUT_VWAP_SYMBOLS
 };
 
 // ============================================================
