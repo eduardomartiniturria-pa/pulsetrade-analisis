@@ -18,7 +18,7 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
   // startAutoRefreshLoop reemplaza al cron fijo de 5 min: corre solo, y decide internamente
   // cada cuánto refrescar (15 min normal, 1 min dentro de la ventana Kill Zone NY 10:30-13:30 ARG).
   // (20/9) Retirado el loop de chequeo rápido de precio (era solo para BTC/ETH).
-  const { state, ASSETS, CONFIG, refreshAllData, BacktestEngine, startAutoRefreshLoop, stopAutoRefreshLoop, getMarketStatus } = require('./engine.js');
+  const { state, ASSETS, CONFIG, refreshAllData, BacktestEngine, startAutoRefreshLoop, stopAutoRefreshLoop, getMarketStatus, getDiagnostics } = require('./engine.js');
 
   // Se registra ACÁ (no en localStorage.js, que se carga antes y no conoce a engine.js)
   // para que, apenas llegue SIGTERM (redeploy en Render), el motor deje de arrancar
@@ -99,6 +99,9 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
         const cycle = (state.marketStatus && state.marketStatus[sym]) || {};
         return [sym, { ...getMarketStatus(sym), feedStale: cycle.feedStale, feedAgeMin: cycle.feedAgeMin, signalBlockReason: cycle.signalBlockReason || null }];
       })),
+      // NUEVO (20/9, Etapa 0 de la auditoría, solo lectura): antigüedad de la última vela (¿en formación?),
+      // spread realmente usado por la compuerta de costo y cupo diario de proveedores. Ver engine.js v4.8.1.
+      diagnostics: getDiagnostics(),
       // Combinaciones/activos en modo sombra (señales sin push hasta juntar muestra LIVE).
       shadowMode: CONFIG.SHADOW_MODE,
       strictMode: state.strictMode,
