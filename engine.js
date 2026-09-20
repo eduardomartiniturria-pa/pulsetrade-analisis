@@ -1414,11 +1414,10 @@ const MarketDataProvider = {
           // más chicos (HTF) se compara contra lo efectivamente pedido (limit).
           const isBaseTFRequest = limit >= CONFIG.OHLCV_STRATEGY_MIN_CANDLES;
           const effectiveMin = isBaseTFRequest ? CONFIG.OHLCV_STRATEGY_MIN_CANDLES : limit;
-          if (data.candles.length < effectiveMin) {
-            // Caso real de riesgo: por debajo de esto, la estrategia que hizo este
-            // pedido (bollinger_squeeze en TF base, o el filtro de tendencia HTF de
-            // quien pidió HTF) no tiene suficientes velas para evaluar.
-            console.warn(`OHLCV ${providerName} INSUFICIENTE para estrategias: ${symbol} ${tf} — recibió ${data.candles.length}, mínimo requerido ${effectiveMin}`);
+        // TP2 o SL, igual que en producción. Si se acaba el horizonte de MAX_HOLD_CANDLES
+        // con TP1 ya tocado (sin SL ni TP2), se cuenta como ganada al R de TP1 — el mismo
+        // criterio que la expiración en checkHistoryOutcomes.
+        console.warn(`OHLCV ${providerName} INSUFICIENTE para estrategias: ${symbol} ${tf} — recibió ${data.candles.length}, mínimo requerido ${effectiveMin}`);
           } else if (data.candles.length < limit) {
             // Proveedor devolvió menos velas de las pedidas (pero más que el mínimo
             // requerido): no afecta a ninguna estrategia activa.
@@ -1905,10 +1904,30 @@ function migrateRenamedStrategyKeys() {
 
       console.log(`[MIGRATE] ${symbol}: fusionadas stats de '${oldKey}' -> '${newKey}' (${oldStats.wins}W/${oldStats.losses}L, ${oldStats.totalR}R)`);
     });
+
+    // FIX (20/9): la migración de arriba cubre strategyStatsBySymbol/consecutiveLosses/
+    // autoDisabledStrategies (por símbolo+estrategia), pero nunca tocaba el breaker
+    // AGREGADO (across símbolos) — confirmado con /api/state real: 'ny_open_kill_zone'
+    // y 'kill_zone_ny' coexistían como keys separadas en consecutiveLossesAggregate.
+    // Mismo criterio que arriba: nos quedamos con el máximo de la racha activa.
+    if (state.consecutiveLossesAggregate[oldKey] != null) {
+      state.consecutiveLossesAggregate[newKey] = Math.max(
+        state.consecutiveLossesAggregate[newKey] || 0,
+        state.consecutiveLossesAggregate[oldKey]
+      );
+      delete state.consecutiveLossesAggregate[oldKey];
+      console.log(`[MIGRATE] aggregate: fusionada racha de '${oldKey}' -> '${newKey}'`);
+    }
+    if (state.autoDisabledStrategiesAggregate[oldKey] && !state.autoDisabledStrategiesAggregate[newKey]) {
+      state.autoDisabledStrategiesAggregate[newKey] = { ...state.autoDisabledStrategiesAggregate[oldKey], key: newKey };
+    }
+    delete state.autoDisabledStrategiesAggregate[oldKey];
   });
   localStorage.setItem('pt_strategy_stats_by_symbol', JSON.stringify(state.strategyStatsBySymbol));
   localStorage.setItem('pt_consecutive_losses', JSON.stringify(state.consecutiveLosses));
   localStorage.setItem('pt_auto_disabled_strategies', JSON.stringify(state.autoDisabledStrategies));
+  localStorage.setItem('pt_consecutive_losses_aggregate', JSON.stringify(state.consecutiveLossesAggregate));
+  localStorage.setItem('pt_auto_disabled_strategies_aggregate', JSON.stringify(state.autoDisabledStrategiesAggregate));
 }
 
 // v4.9 (sección 14, 27/8): breaker agregado — pérdidas seguidas de una estrategia sin
