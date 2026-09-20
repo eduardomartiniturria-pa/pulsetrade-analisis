@@ -1,4 +1,18 @@
 // ============================================================
+// PULSE TRADE v4.8.1 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.8.1 (20/9, ETAPA 0 de la auditoría — SOLO instrumentación, SIN cambios de lógica):
+// Ninguna señal, compuerta, umbral ni cálculo cambia. Se agrega state.diagnostics (expuesto en
+// /api/state -> diagnostics) para confirmar con datos reales, sin depender de logs de Render:
+//  (a) candleAge[symbol]: antigüedad de la última vela del TF base en cada ciclo y si está
+//      "en formación" (edad < timeframe). Confirma o descarta la hipótesis C2 (la última vela
+//      llega abierta y se evalúa como cerrada). Incluye contadores acumulados desde el arranque.
+//  (b) quote[symbol]: proveedor, bid, ask, spread y si es estimado. costGate[symbol]: última
+//      evaluación real de la compuerta de costo (spread usado, stop, % del stop). Confirma C4.
+//  (c) providerUsage: cupo diario efectivo y uso del día por proveedor (TWELVEDATA_DAILY_LIMIT
+//      leído del entorno). Confirma A8.
+// ============================================================
+// ============================================================
 // PULSE TRADE v4.8.0 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
 // Cambios v4.8.0 (20/9, "ordenar": activos XAUUSD/EURUSD/US500/GBPUSD, sin crypto):
@@ -2522,6 +2536,9 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     const qGates = CONFIG.QUALITY_GATES;
     if (qGates && qGates.enabled && quote.spread != null && slPips) {
       const spreadPctOfStop = quote.spread / slPips;
+      state.diagnostics = state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }; // E0 (solo lectura)
+      state.diagnostics.costGate[symbol] = { strategy: customSig.strategy, spreadUsedPips: +Number(quote.spread).toFixed(2), stopPips: +Number(slPips).toFixed(1), spreadPctOfStop: +(spreadPctOfStop * 100).toFixed(0), wouldBlock: spreadPctOfStop > qGates.maxSpreadPctOfStop, provider: quote.source || null, at: Date.now() };
+      console.log(`[E0-costo] ${symbol} ${customSig.strategy}: spread ${Number(quote.spread).toFixed(2)} pips / stop ${Number(slPips).toFixed(1)} pips = ${(spreadPctOfStop * 100).toFixed(0)}% (limite ${(qGates.maxSpreadPctOfStop * 100).toFixed(0)}%, via ${quote.source})`);
       if (spreadPctOfStop > qGates.maxSpreadPctOfStop) {
         costGateBlockedDisplay = {
           type: customSig.direction, symbol, costGateBlocked: true,
@@ -2648,6 +2665,54 @@ function refreshActiveCustomSignalsDisplay(symbol, quote, skipStrategies = new S
     renderCustomSignal(symbol, frozen.strategyKeys[0], display);
   });
 }
+// ETAPA 0 (v4.8.1): instrumentación de diagnóstico. Solo LEE y guarda contadores en
+// state.diagnostics; no toca señales ni decisiones.
+function recordCandleAgeDiagnostic(symbol, candles, tf) {
+  try {
+    state.diagnostics = state.diagnostics || { candleAge: {}, quote: {}, costGate: {} };
+    const tfMin = ({ '5m': 5, '15m': 15, '1h': 60 })[tf] || 15;
+    const last = candles && candles.length ? candles[candles.length - 1] : null;
+    if (!last) return;
+    const ageMin = +(((Date.now() - last.time) / 60000)).toFixed(1);
+    const inProgress = ageMin >= 0 && ageMin < tfMin;
+    const prev = state.diagnostics.candleAge[symbol] || { cycles: 0, inProgressCycles: 0 };
+    const rec = {
+      tf, lastCandleOpenUtc: new Date(last.time).toISOString(), ageMin, inProgress,
+      cycles: prev.cycles + 1, inProgressCycles: prev.inProgressCycles + (inProgress ? 1 : 0),
+      at: Date.now()
+    };
+    rec.inProgressPct = +((rec.inProgressCycles / rec.cycles) * 100).toFixed(0);
+    state.diagnostics.candleAge[symbol] = rec;
+    console.log(`[E0-vela] ${symbol} ${tf}: ultima vela abierta ${rec.lastCandleOpenUtc}, edad ${ageMin} min, ${inProgress ? 'EN FORMACION' : 'cerrada'} (${rec.inProgressCycles}/${rec.cycles} ciclos en formacion)`);
+  } catch (e) {}
+}
+function recordQuoteDiagnostic(symbol, quote) {
+  try {
+    state.diagnostics = state.diagnostics || { candleAge: {}, quote: {}, costGate: {} };
+    const asset = ASSETS[symbol];
+    const bidEqAsk = quote.bid != null && quote.ask != null && quote.bid === quote.ask;
+    state.diagnostics.quote[symbol] = {
+      source: quote.source || null, last: quote.last, bid: quote.bid, ask: quote.ask,
+      spreadPips: quote.spread != null ? +Number(quote.spread).toFixed(2) : null,
+      estimatedSpread: !!quote.estimatedSpread, bidEqualsAsk: bidEqAsk,
+      estimatedTablePips: (CONFIG.ESTIMATED_SPREAD_PIPS_BY_SYMBOL && CONFIG.ESTIMATED_SPREAD_PIPS_BY_SYMBOL[symbol]) || null,
+      pipSize: asset ? asset.pipSize : null, at: Date.now()
+    };
+    console.log(`[E0-quote] ${symbol} via ${quote.source}: spread usado por la compuerta = ${state.diagnostics.quote[symbol].spreadPips} pips (bid==ask: ${bidEqAsk}, estimado: ${!!quote.estimatedSpread}, tabla Exness: ${state.diagnostics.quote[symbol].estimatedTablePips})`);
+  } catch (e) {}
+}
+function getDiagnostics() {
+  const usage = {};
+  Object.keys(PROVIDER_DAILY_LIMITS).forEach(p => { const u = RequestTracker.getUsage(p); usage[p] = { used: u.used, limit: u.limit }; });
+  return {
+    ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
+    providerUsage: usage,
+    env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
+    engineVersion: '4.8.1-E0',
+    generatedAt: Date.now()
+  };
+}
+
 async function refreshAsset(symbol, forceRefresh = false) {
   const asset = ASSETS[symbol];
   renderMarketBanner(symbol); renderAssetHoursPill(symbol); renderApiError(symbol, null);
@@ -2680,6 +2745,8 @@ async function refreshAsset(symbol, forceRefresh = false) {
       MarketDataProvider.getOHLCV(symbol, state.currentTF, 100, forceRefresh).catch(() => (state.klineHistory[symbol] && state.klineHistory[symbol][state.currentTF]) || new OHLCVData([]))
     ]);
     updatePriceUI(symbol, quote, asset);
+    recordQuoteDiagnostic(symbol, quote); // E0 (solo lectura)
+    recordCandleAgeDiagnostic(symbol, ohlcv.candles, state.currentTF); // E0 (solo lectura)
     const htfTF = CONFIG.HTF_MAP[state.currentTF] || null;
     let htfCandles = null;
     if (htfTF) {
@@ -2907,5 +2974,6 @@ applyRetroactiveCircuitBreaker();
 module.exports = {
   state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
   startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isKillZoneWindow,
+  getDiagnostics,
   getMarketStatus
 };
