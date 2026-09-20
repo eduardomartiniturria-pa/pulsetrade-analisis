@@ -451,9 +451,21 @@ const CONFIG = {
   // dinero). No cuenta para el Daily Risk Guard ni para el circuit breaker AGREGADO (sí para el
   // de la propia combinación). Al llegar a minLiveSample, el Motor de
   // Rentabilidad decide con las reglas de siempre (expectancy > 0 => opera normal).
+  // FIX (auditoría vía /api/state real, post-deploy 20/9): XAUUSD/EURUSD habían quedado
+  // AFUERA de esta lista bajo la premisa de que ya tenían muestra LIVE "sembrada" desde
+  // el historial real (XAUUSD kill_zone_ny 9G/11P +3.45R, ver .md). Esa siembra NUNCA se
+  // implementó — state.liveStrategyStatsBySymbol arranca vacío por diseño (ver el
+  // comentario en su inicialización más abajo: "no hay forma de reconstruir el historial
+  // LIVE puro hacia atrás sin volver a mezclar seed y live") y /api/state en producción
+  // lo confirma: {} para los 4 símbolos. Resultado real verificado: XAUUSD_kill_zone_ny
+  // —la única estrategia con edge comprobado del sistema— estaba en el mismo círculo
+  // cerrado que este modo sombra existe para romper, pero sin la válvula de escape que sí
+  // tenían US500/GBPUSD. Se corrige agregando los 4 símbolos: sin esto no hay forma de que
+  // ninguna combinación vuelva a operar con dinero real sin que una señal puntual toque
+  // >=80% de confianza (kill_zone_ny ronda 55-70%, ver CONFIDENCE_THRESHOLD arriba).
   SHADOW_MODE: {
     enabled: true,
-    symbols: ['US500', 'GBPUSD']
+    symbols: ['XAUUSD', 'EURUSD', 'US500', 'GBPUSD']
   },
   // NUEVO (16/9, plan de rentabilidad, punto 5): modo probation/sombra para
   // estrategias nuevas — corren y guardan historial normalmente, pero sin
