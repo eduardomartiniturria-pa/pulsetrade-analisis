@@ -563,21 +563,26 @@ const ASSETS = {
     // el futuro ES (E-mini): no existe ninguna con datos en vivo sin pago (Databento, Massive,
     // iTick, Portara son todas de pago desde el primer request).
     //
-    // FIX (20/9, sesión de fallback US500): se agrega Finnhub como proxy vía SPY (el ETF que
-    // replica el S&P 500) — Finnhub cubre acciones/ETFs de EE.UU. en su tier gratis (60
-    // calls/min, sin tarjeta). `priceMultiplier` convierte el precio de SPY a nivel de índice
-    // (SPY ≈ 1/10 del S&P 500 por diseño del fondo desde su lanzamiento en 1993). Valor
-    // calibrado el 20/9 con datos de mercado reales (SPX ~7511 / SPY ~769.35 el 28/8/2026)
-    // ≈ 9.76 — NO es exacto ni fijo: se corre con el tiempo por el expense ratio del fondo
-    // (0.09%/año) y pequeño tracking error. Recalibrar periódicamente contra el valor real
-    // del índice; no usar este proxy para comparar contra el precio exacto de Exness, mismo
-    // tipo de desfase conocido que ya tenía BTC/ETH vs Exness.
-    // twelveData queda igual en la lista, atrás, por si en algún momento se pasa a plan Grow.
+    // FIX (20/9): se probó primero Finnhub como proxy vía SPY. Funciona para /quote (gratis),
+    // pero /stock/candle (velas) quedó premium-only en el plan free de Finnhub (confirmado con
+    // key real: quote da precio correcto, candle devuelve "You don't have access to this
+    // resource." — por eso htfDiagnostics.US500 quedaba en count:0 y el feed se marcaba stale).
+    //
+    // FIX (21/9): se corrigió pasando SPY a Twelve Data en vez de Finnhub — Twelve Data SÍ
+    // incluye "real-time US equities" completo (quote + time_series) en su plan Basic/free,
+    // a diferencia de los índices. Mismo mecanismo de esta app, misma key que ya tenías
+    // configurada, sin necesidad de Finnhub para esto. `priceMultiplier` convierte el precio
+    // de SPY a nivel de índice (SPY ≈ 1/10 del S&P 500 por diseño del fondo desde 1993).
+    // Calibrado 21/9 con SPY real a $761.69 -> x9.76 ≈ 7434, dentro del rango real del índice.
+    // No es exacto ni fijo: se corre con el tiempo por el expense ratio del fondo (0.09%/año)
+    // y tracking error — recalibrar periódicamente contra el valor real del índice. Finnhub
+    // queda de respaldo secundario SOLO para quote (su /stock/candle sigue premium-only, así
+    // que si Twelve Data cae, el precio en vivo sigue pero las velas para las estrategias no).
     name: 'US500 (S&P 500)', market: 'index', type: 'index',
-    symbols: { twelveData: 'SPX', finnhub: 'SPY' },
+    symbols: { twelveData: 'SPY', finnhub: 'SPY' },
     decimals: 2, pipSize: 0.1, is24h: false, timezone: 'UTC', scheduleProfile: 'index',
     priceMultiplier: 9.76,
-    providerPriority: ['finnhub', 'twelveData']
+    providerPriority: ['twelveData', 'finnhub']
   },
   GBPUSD: {
     // NUEVO (20/9).
@@ -1174,13 +1179,15 @@ const ProviderAdapters = {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const d = await res.json();
       if (d.status === 'error') throw new Error(d.message || 'Error de Twelve Data');
-      const lastPrice = parseFloat(d.close);
-      const bid = parseFloat(d.bid) || lastPrice, ask = parseFloat(d.ask) || lastPrice;
+      const lastPrice = parseFloat(d.close) * (asset.priceMultiplier || 1);
+      const bid = (parseFloat(d.bid) || parseFloat(d.close)) * (asset.priceMultiplier || 1);
+      const ask = (parseFloat(d.ask) || parseFloat(d.close)) * (asset.priceMultiplier || 1);
+      const source = asset.priceMultiplier ? `Twelve Data (proxy ${asset.symbols.twelveData} x${asset.priceMultiplier})` : 'Twelve Data';
       const data = new MarketData({
-        bid, ask, last: lastPrice, open: parseFloat(d.open), high: parseFloat(d.high),
-        low: parseFloat(d.low), close: parseFloat(d.previous_close), volume: parseFloat(d.volume), timestamp: Date.now(),
+        bid, ask, last: lastPrice, open: parseFloat(d.open) * (asset.priceMultiplier || 1), high: parseFloat(d.high) * (asset.priceMultiplier || 1),
+        low: parseFloat(d.low) * (asset.priceMultiplier || 1), close: parseFloat(d.previous_close) * (asset.priceMultiplier || 1), volume: parseFloat(d.volume), timestamp: Date.now(),
         timeframe: '1d', marketStatus: d.is_market_open ? 'open' : 'closed',
-        spread: calculateSpread(bid, ask, asset.pipSize), source: 'Twelve Data', symbol, estimatedSpread: !d.bid || !d.ask
+        spread: calculateSpread(bid, ask, asset.pipSize), source, symbol, estimatedSpread: !d.bid || !d.ask
       });
       ResponseCache.set(cacheKey, data); return data;
     },
@@ -1195,7 +1202,11 @@ const ProviderAdapters = {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       if (data.status === 'error') throw new Error(data.message || 'Error de Twelve Data');
-      const result = new OHLCVData(data.values.reverse().map(k => ({ time: new Date(k.datetime).getTime(), open: parseFloat(k.open), high: parseFloat(k.high), low: parseFloat(k.low), close: parseFloat(k.close), volume: parseFloat(k.volume) })));
+      // FIX (21/9): US500 pasó de pedir 'SPX' (índice, plan Grow) a 'SPY' (ETF, plan free) —
+      // priceMultiplier escala las velas de vuelta a nivel de índice. Para el resto de
+      // símbolos priceMultiplier es undefined y "|| 1" no cambia nada.
+      const mult = asset.priceMultiplier || 1;
+      const result = new OHLCVData(data.values.reverse().map(k => ({ time: new Date(k.datetime).getTime(), open: parseFloat(k.open) * mult, high: parseFloat(k.high) * mult, low: parseFloat(k.low) * mult, close: parseFloat(k.close) * mult, volume: parseFloat(k.volume) })));
       ResponseCache.set(cacheKey, result); return result;
     }
   },
