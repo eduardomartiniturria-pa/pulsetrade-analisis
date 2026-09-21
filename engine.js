@@ -1,4 +1,16 @@
 // ============================================================
+// PULSE TRADE v4.8.2 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.8.2 (21/9, FIX: la app no mandaba push a la pantalla bloqueada):
+// - CAUSA RAÍZ: CONFIG.SHADOW_MODE.symbols tenía los 4 activos. Como las stats LIVE arrancan
+//   en 0, toda señal de XAUUSD/EURUSD caía en modo sombra (sin push, riskWeight 0). La señal
+//   se veía dentro de la app (cartel 👻 SOMBRA) pero nunca se disparaba notifyNewSignal().
+// - SHADOW_MODE.symbols vuelve a ['US500','GBPUSD'] (la decisión del 20/9).
+// - seedLiveStatsFromClosedHistory(): siembra única de las stats LIVE de XAUUSD/EURUSD desde
+//   sus operaciones reales cerradas (closed_signals), para que salgan del "círculo cerrado"
+//   sin depender de confianza >=80%. Se apaga con seedFromClosedHistory.enabled=false.
+// - notifyNewSignal(): log '[push] enviando ...' en Render en cada push real intentado.
+// ============================================================
 // PULSE TRADE v4.8.1 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
 // Cambios v4.8.1 (20/9, ETAPA 0 de la auditoría — SOLO instrumentación, SIN cambios de lógica):
@@ -477,9 +489,17 @@ const CONFIG = {
   // tenían US500/GBPUSD. Se corrige agregando los 4 símbolos: sin esto no hay forma de que
   // ninguna combinación vuelva a operar con dinero real sin que una señal puntual toque
   // >=80% de confianza (kill_zone_ny ronda 55-70%, ver CONFIDENCE_THRESHOLD arriba).
+  //
+  // FIX v4.8.2 (21/9): la lista había quedado con los 4 activos. Efecto real: TODA señal de
+  // XAUUSD/EURUSD (sin 12 operaciones LIVE por combinación) entraba en sombra => cero push a la
+  // pantalla bloqueada, aunque la señal sí se veía dentro de la app (con el cartel 👻 SOMBRA).
+  // La decisión del usuario (20/9) fue sombra SOLO para los activos nuevos: US500 y GBPUSD.
+  // XAUUSD/EURUSD salen de sombra y el "círculo cerrado" se rompe de otra forma: siembra de su
+  // historial real cerrado (ver PROFITABILITY_ENGINE_V1.seedFromClosedHistory y
+  // seedLiveStatsFromClosedHistory()).
   SHADOW_MODE: {
     enabled: true,
-    symbols: ['XAUUSD', 'EURUSD', 'US500', 'GBPUSD']
+    symbols: ['US500', 'GBPUSD']
   },
   // NUEVO (16/9, plan de rentabilidad, punto 5): modo probation/sombra para
   // estrategias nuevas — corren y guardan historial normalmente, pero sin
@@ -514,7 +534,16 @@ const CONFIG = {
     recentWindow: 8,
     maxRecentLosses: 5,
     probationMinConfidence: 80,
-    probationRiskMultiplier: 0.50
+    probationRiskMultiplier: 0.50,
+    // NUEVO v4.8.2 (21/9): una sola vez, reconstruye las stats LIVE de estos símbolos a partir de
+    // sus operaciones REALES ya cerradas (closed_signals:YYYY-MM-DD en Supabase — nunca del
+    // backtest). Sin esto XAUUSD/EURUSD arrancan con 0 operaciones LIVE y el Motor de
+    // Rentabilidad les exige >=80% de confianza (casi nunca) => quedan mudos. Para apagarlo:
+    // enabled:false (y borrar la key 'pt_live_stats_seed_v1' si se quiere volver a sembrar).
+    seedFromClosedHistory: {
+      enabled: true,
+      symbols: ['XAUUSD', 'EURUSD']
+    }
   }
 };
 
@@ -1855,6 +1884,66 @@ function getLiveProfitabilityStats(symbol, strategyKey) {
   return bucket || { wins: 0, losses: 0, totalR: 0, avgR: 0, recentResults: [] };
 }
 
+// NUEVO v4.8.2 (21/9): siembra UNA SOLA VEZ de state.liveStrategyStatsBySymbol para los
+// símbolos de CONFIG.PROFITABILITY_ENGINE_V1.seedFromClosedHistory.symbols, repitiendo
+// (replay) sus operaciones reales cerradas guardadas en closed_signals:YYYY-MM-DD.
+// - Fuente 100% LIVE (cierres reales por SL/TP1), nunca el backtest: no rompe la regla de
+//   "no mezclar seed y live" del Motor de Rentabilidad.
+// - Reemplaza (no suma) el bucket de cada combinación símbolo+estrategia habilitada: las
+//   operaciones cerradas desde el 18/9 ya estaban contadas en vivo y están también en
+//   closed_signals, así que el replay las reproduce sin duplicarlas.
+// - Mapea keys renombradas (ny_open_kill_zone -> kill_zone_ny) con RENAMED_STRATEGY_KEYS.
+// - Solo estrategias de ENABLED_STRATEGIES; el resto no interviene en ninguna decisión.
+// - Idempotente: deja la marca 'pt_live_stats_seed_v1' y no vuelve a correr.
+function seedLiveStatsFromClosedHistory() {
+  const cfg = CONFIG.PROFITABILITY_ENGINE_V1 && CONFIG.PROFITABILITY_ENGINE_V1.seedFromClosedHistory;
+  if (!cfg || !cfg.enabled) return;
+  const SEED_FLAG = 'pt_live_stats_seed_v1';
+  if (localStorage.getItem(SEED_FLAG)) return;
+  const seedSymbols = new Set(cfg.symbols || []);
+  const oldToNew = {};
+  Object.entries(CONFIG.RENAMED_STRATEGY_KEYS || {}).forEach(([newKey, oldKey]) => { oldToNew[oldKey] = newKey; });
+  let days;
+  try { days = JSON.parse(localStorage.getItem('closed_signals_days') || '[]'); } catch (e) { days = []; }
+  const entries = [];
+  days.forEach(day => {
+    let list;
+    try { list = JSON.parse(localStorage.getItem(`closed_signals:${day}`) || '[]'); } catch (e) { list = []; }
+    list.forEach(e => {
+      if (!e || (e.result !== 'win' && e.result !== 'loss') || !seedSymbols.has(e.symbol)) return;
+      const key = oldToNew[e.source] || e.source;
+      if (!CONFIG.ENABLED_STRATEGIES.includes(key)) return;
+      entries.push({ symbol: e.symbol, key, result: e.result, rMultiple: e.rMultiple, timestamp: e.timestamp || 0 });
+    });
+  });
+  entries.sort((a, b) => a.timestamp - b.timestamp); // del más viejo al más nuevo
+  const keepWindow = Math.max((CONFIG.PROFITABILITY_ENGINE_V1 && CONFIG.PROFITABILITY_ENGINE_V1.recentWindow) || 8, 8);
+  const rebuilt = {};
+  entries.forEach(e => {
+    rebuilt[e.symbol] = rebuilt[e.symbol] || {};
+    const b = rebuilt[e.symbol][e.key] = rebuilt[e.symbol][e.key] || { wins: 0, losses: 0, totalR: 0, avgR: 0, recentResults: [] };
+    if (e.result === 'win') b.wins++; else b.losses++;
+    const r = e.rMultiple != null ? e.rMultiple : (e.result === 'win' ? 2 : -1);
+    b.totalR = +((b.totalR || 0) + r).toFixed(2);
+    b.avgR = +(b.totalR / (b.wins + b.losses)).toFixed(2);
+    b.recentResults.unshift({ result: e.result, rMultiple: r, timestamp: e.timestamp }); // más reciente primero
+    if (b.recentResults.length > keepWindow) b.recentResults.length = keepWindow;
+  });
+  let combos = 0;
+  Object.keys(rebuilt).forEach(sym => {
+    state.liveStrategyStatsBySymbol[sym] = state.liveStrategyStatsBySymbol[sym] || {};
+    Object.keys(rebuilt[sym]).forEach(key => {
+      state.liveStrategyStatsBySymbol[sym][key] = rebuilt[sym][key];
+      const b = rebuilt[sym][key];
+      console.log(`[seed] ${sym} ${key}: ${b.wins}G/${b.losses}P, ${b.totalR}R, R prom ${b.avgR}`);
+      combos++;
+    });
+  });
+  localStorage.setItem('pt_live_strategy_stats_by_symbol', JSON.stringify(state.liveStrategyStatsBySymbol));
+  localStorage.setItem(SEED_FLAG, JSON.stringify({ at: Date.now(), combos, trades: entries.length }));
+  console.log(`[seed] stats LIVE sembradas desde el historial real: ${combos} combinaciones, ${entries.length} operaciones`);
+}
+
 // NUEVO (18/9, Motor de Rentabilidad V1): reglas A-E del plan de rentabilidad, en el
 // mismo orden lógico salvo D (deterioro reciente), que se chequea PRIMERO a propósito —
 // pedido explícito del plan: "no permitir que un historial antiguo positivo oculte un
@@ -1982,7 +2071,6 @@ function migrateRenamedStrategyKeys() {
   localStorage.setItem('pt_consecutive_losses_aggregate', JSON.stringify(state.consecutiveLossesAggregate));
   localStorage.setItem('pt_auto_disabled_strategies_aggregate', JSON.stringify(state.autoDisabledStrategiesAggregate));
 }
-
 // v4.9 (sección 14, 27/8): breaker agregado — pérdidas seguidas de una estrategia sin
 // importar el símbolo. Umbral 8 (no 5, el mismo que el breaker por símbolo): con 4 activos
 // en juego, una racha diluida entre todos tarda más en acumularse que una concentrada en
@@ -2474,6 +2562,10 @@ function notifyNewSignal(signal) {
   // CONFIG.STRATEGY_RISK_WEIGHT. Puramente informativo, no ajusta nada solo.
   const weightPart = (signal.riskWeight && signal.riskWeight !== 1) ? ` · Tamaño sugerido ${signal.riskWeight}x` : '';
   const body = `Entrada ${fmt(signal.entry, signal.decimals)} · SL ${fmt(signal.sl, signal.decimals)} · TP1 ${fmt(signal.tp1, signal.decimals)}${confPart}${weightPart}`;
+  // v4.8.2: deja rastro en los logs de Render cada vez que se intenta un push REAL (las señales
+  // en sombra/probation nunca llegan hasta acá) — permite distinguir "no se intentó enviar" de
+  // "se intentó y el push falló".
+  console.log(`[push] enviando ${signal.symbol} ${signal.type} (${signal.source || 'n/a'})`);
   sendPushToAll({ title, body, symbol: signal.symbol, signal }).catch(err => console.error('Error enviando push:', err.message));
 }
 function toggleSound() {}
@@ -3041,6 +3133,7 @@ function retireRemovedSymbols() {
 retireRemovedSymbols();
 assertStrategyFlagsSync();
 migrateRenamedStrategyKeys();
+seedLiveStatsFromClosedHistory(); // v4.8.2
 applyRetroactiveCircuitBreaker();
 
 module.exports = {
