@@ -557,17 +557,27 @@ const ASSETS = {
     providerPriority: ['twelveData', 'alphaVantage', 'exchangerate']
   },
   US500: {
-    // NUEVO (20/9). Índice S&P 500. Twelve Data lo publica como 'SPX' y en el plan gratis NO
-    // está incluido (los índices arrancan en el plan Grow). Sin otro proveedor confiable para
-    // velas de índice, providerPriority queda solo en twelveData a propósito: si el plan no
-    // lo cubre, el activo muestra 'no-data' sin afectar a los demás (ver bloqueo por símbolo
-    // en markProviderCooldown). pipSize 0.1 => 1 punto de índice = 10 "pips" (mismas unidades
-    // que ya usa XAUUSD). El precio de Exness (US500) puede diferir unos puntos del índice SPX
-    // (CFD sobre futuros): mismo tipo de desfase conocido que tenía BTC/ETH vs Exness.
+    // (20/9) Índice S&P 500. Twelve Data lo publica como 'SPX' y en el plan gratis NO está
+    // incluido (los índices arrancan en el plan Grow, $29/mo) — confirmado en la propia tabla
+    // de precios de Twelve Data. Se investigaron alternativas gratis reales para el índice o
+    // el futuro ES (E-mini): no existe ninguna con datos en vivo sin pago (Databento, Massive,
+    // iTick, Portara son todas de pago desde el primer request).
+    //
+    // FIX (20/9, sesión de fallback US500): se agrega Finnhub como proxy vía SPY (el ETF que
+    // replica el S&P 500) — Finnhub cubre acciones/ETFs de EE.UU. en su tier gratis (60
+    // calls/min, sin tarjeta). `priceMultiplier` convierte el precio de SPY a nivel de índice
+    // (SPY ≈ 1/10 del S&P 500 por diseño del fondo desde su lanzamiento en 1993). Valor
+    // calibrado el 20/9 con datos de mercado reales (SPX ~7511 / SPY ~769.35 el 28/8/2026)
+    // ≈ 9.76 — NO es exacto ni fijo: se corre con el tiempo por el expense ratio del fondo
+    // (0.09%/año) y pequeño tracking error. Recalibrar periódicamente contra el valor real
+    // del índice; no usar este proxy para comparar contra el precio exacto de Exness, mismo
+    // tipo de desfase conocido que ya tenía BTC/ETH vs Exness.
+    // twelveData queda igual en la lista, atrás, por si en algún momento se pasa a plan Grow.
     name: 'US500 (S&P 500)', market: 'index', type: 'index',
-    symbols: { twelveData: 'SPX' },
+    symbols: { twelveData: 'SPX', finnhub: 'SPY' },
     decimals: 2, pipSize: 0.1, is24h: false, timezone: 'UTC', scheduleProfile: 'index',
-    providerPriority: ['twelveData']
+    priceMultiplier: 9.76,
+    providerPriority: ['finnhub', 'twelveData']
   },
   GBPUSD: {
     // NUEVO (20/9).
@@ -1190,7 +1200,7 @@ const ProviderAdapters = {
     }
   },
   finnhub: {
-    name: 'Finnhub', requiresKey: true, supports: ['XAUUSD','EURUSD','GBPUSD'],
+    name: 'Finnhub', requiresKey: true, supports: ['XAUUSD','EURUSD','GBPUSD','US500'],
     async fetchQuote(symbol) {
       if (!state.apiKeys.finnhub) throw new Error('API key no configurada');
       const asset = ASSETS[symbol];
@@ -1199,11 +1209,18 @@ const ProviderAdapters = {
       const res = await fetchWithTimeout(`${CONFIG.ENDPOINTS.FINNHUB}/quote?symbol=${asset.symbols.finnhub}&token=${state.apiKeys.finnhub}`);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const d = await res.json(); if (d.error) throw new Error(d.error);
-      const price = d.c; const bid = price * 0.9995; const ask = price * 1.0005;
+      // FIX (20/9): US500 llega acá como proxy SPY — asset.priceMultiplier lo escala a nivel
+      // de índice. Para el resto de los símbolos (forex/oro) priceMultiplier es undefined y
+      // el "|| 1" lo deja sin efecto, mismo comportamiento que antes de este fix.
+      const mult = asset.priceMultiplier || 1;
+      const price = d.c * mult; const bid = price * 0.9995; const ask = price * 1.0005;
+      const source = asset.priceMultiplier
+        ? `Finnhub (proxy SPY x${asset.priceMultiplier})`
+        : 'Finnhub';
       const data = new MarketData({
-        bid, ask, last: price, open: d.o, high: d.h, low: d.l, close: d.pc, volume: d.v,
+        bid, ask, last: price, open: d.o * mult, high: d.h * mult, low: d.l * mult, close: d.pc * mult, volume: d.v,
         timestamp: Date.now(), timeframe: '1d', marketStatus: 'open',
-        spread: calculateSpread(bid, ask, asset.pipSize), source: 'Finnhub', symbol, estimatedSpread: true
+        spread: calculateSpread(bid, ask, asset.pipSize), source, symbol, estimatedSpread: true
       });
       ResponseCache.set(cacheKey, data); return data;
     },
@@ -1218,7 +1235,12 @@ const ProviderAdapters = {
       const res = await fetchWithTimeout(`${CONFIG.ENDPOINTS.FINNHUB}/stock/candle?symbol=${asset.symbols.finnhub}&resolution=${tfMap[interval]||'15'}&from=${from}&to=${now}&token=${state.apiKeys.finnhub}`);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json(); if (data.s !== 'ok') throw new Error('Sin datos de velas');
-      const result = new OHLCVData(data.t.map((t, i) => ({ time: t * 1000, open: data.o[i], high: data.h[i], low: data.l[i], close: data.c[i], volume: data.v[i] })));
+      // FIX (20/9): mismo escalado que fetchQuote, aplicado a las velas — así los indicadores
+      // (ATR, EMA, VWAP, etc.) de las estrategias trabajan sobre un precio ya a nivel de
+      // índice y no sobre la escala nativa de SPY (~1/10). Sin esto, SL/TP en unidades
+      // absolutas de las estrategias quedarían mal calibrados para US500.
+      const mult = asset.priceMultiplier || 1;
+      const result = new OHLCVData(data.t.map((t, i) => ({ time: t * 1000, open: data.o[i] * mult, high: data.h[i] * mult, low: data.l[i] * mult, close: data.c[i] * mult, volume: data.v[i] })));
       ResponseCache.set(cacheKey, result); return result;
     }
   },
