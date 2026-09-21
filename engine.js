@@ -580,9 +580,10 @@ const ASSETS = {
     // que si Twelve Data cae, el precio en vivo sigue pero las velas para las estrategias no).
     name: 'US500 (S&P 500)', market: 'index', type: 'index',
     symbols: { twelveData: 'SPY', finnhub: 'SPY' },
-    decimals: 2, pipSize: 0.1, is24h: false, timezone: 'UTC', scheduleProfile: 'index',
+    decimals: 2, pipSize: 0.1, is24h: false, timezone: 'UTC',
     priceMultiplier: 9.76,
-    providerPriority: ['twelveData', 'finnhub']
+    providerPriority: ['twelveData', 'finnhub'],
+    scheduleProfile: 'us500_cash'
   },
   GBPUSD: {
     // NUEVO (20/9).
@@ -859,6 +860,24 @@ const SCHEDULE_PROFILES = {
     label: 'Índice', estimated: true,
     weekOpen: { h: 21, m: 55 }, weekClose: { h: 19, m: 59 },
     dailyBreaks: [{ h: 20, m: 0, durMin: 120 }],
+    rollover: null
+  },
+  // FIX (21/9): US500 pasó a usar SPY (ETF de NYSE) como fuente de datos en vez del futuro/
+  // índice real — SPY solo tiene velas nuevas en el horario real de la bolsa de Nueva York
+  // (9:30am-4:00pm hora NY = 13:30-20:00 UTC en horario de verano, lunes a viernes). Antes,
+  // con el perfil 'index' (pensado para imitar el CFD ~24hs de Exness), el símbolo se marcaba
+  // "abierto" casi todo el día pero sin velas nuevas fuera de ese rango, y quedaba bloqueado
+  // igual por la capa de "feed sin velas nuevas" — funcionaba, pero de forma indirecta y con
+  // el estado mostrado ("open") sin coincidir con la realidad. Este perfil nuevo refleja el
+  // horario real de NYSE directamente: cierre nocturno todos los días (20:00 UTC a 13:30 UTC
+  // del día siguiente, modelado como "pausa diaria" de 1050 min) + fin de semana. Resultado:
+  // señales de US500 solo se generan durante el horario de NYSE (~6.5hs/día), no las ~24hs
+  // que ofrece Exness para ese símbolo — decisión aceptada por el usuario (opción A, 21/9)
+  // en vez de pagar Twelve Data Grow para tener el índice real con cobertura horaria completa.
+  us500_cash: {
+    label: 'US500 (horario NYSE vía SPY)', estimated: true,
+    weekOpen: { h: 13, m: 30 }, weekClose: { h: 20, m: 0 },
+    dailyBreaks: [{ h: 20, m: 0, durMin: 1050 }],
     rollover: null
   }
 };
