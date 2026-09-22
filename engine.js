@@ -1,8 +1,12 @@
 // ============================================================
 // PULSE TRADE v4.8.3 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
-// Cambios v4.8.3 (22/9, FIX: motor de aprendizaje mostraba datos muertos de hace 11
-// días — ver cleanupLegacyAutoTuneKeys() al final del archivo para el detalle):
+// Cambios v4.8.3 (22/9):
+// - FIX: motor de aprendizaje mostraba datos muertos de hace 11 días (ver
+//   cleanupLegacyAutoTuneKeys() al final del archivo).
+// - AHORRO DE CUPO (decisión del usuario): forex/oro dejan de pedir datos fuera de la
+//   sesión Londres+NY (3:00-17:00 NY, lun-vie). Ver isLondonNYSession(). No cambia
+//   ninguna estrategia ni parámetro de entrada/SL/TP, solo cuándo se consulta precio.
 // - runAutoTuneForKey ya aprendía correctamente por symbol+estrategia desde el 11/9,
 //   pero las keys viejas por-símbolo-solo nunca se borraron de autoTuneStats/
 //   autoConfidenceThreshold. /api/state las seguía mostrando como si fueran el
@@ -793,10 +797,30 @@ function isKillZoneWindow(nowMs = Date.now()) {
   const minutesNow = hour * 60 + minute;
   return minutesNow >= (9 * 60 + 30) && minutesNow < (12 * 60 + 30);
 }
+// NUEVO v4.8.3 (22/9, ahorro de cupo Twelve Data — decisión del usuario: operar solo
+// Londres+NY en vez de casi 24hs). Mismo patrón que isKillZoneWindow: calculado en hora
+// NY directamente, sin offsets fijos. Ventana 3:00-17:00 NY cubre Londres (abre ~3am NY)
+// + Nueva York (cierra ~5pm NY) combinadas. Lunes a viernes. No toca ninguna estrategia
+// ni parámetro de entrada/SL/TP — solo decide si vale la pena pedirle datos al proveedor.
+// US500 no se restringe acá porque su propio horario NYSE (ver perfil us500_cash) ya es
+// más angosto que esta ventana.
+function isLondonNYSession(nowMs = Date.now()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false
+  }).formatToParts(new Date(nowMs));
+  const weekday = parts.find(p => p.type === 'weekday').value;
+  if (weekday === 'Sat' || weekday === 'Sun') return false;
+  const hour = parseInt(parts.find(p => p.type === 'hour').value, 10) % 24;
+  const minute = parseInt(parts.find(p => p.type === 'minute').value, 10);
+  const minutesNow = hour * 60 + minute;
+  return minutesNow >= (3 * 60) && minutesNow < (17 * 60);
+}
+const ACTIVE_SESSION_PROFILES = ['forex', 'gold']; // US500 ya restringido por su propio horario NYSE
 
 function getDynamicRefreshIntervalMs() {
   return isKillZoneWindow() ? CONFIG.DYNAMIC_REFRESH.killZoneIntervalMs : CONFIG.DYNAMIC_REFRESH.normalIntervalMs;
 }
+
 function saveAutoTuneState() {
   localStorage.setItem('pt_auto_threshold_v2', JSON.stringify(state.autoConfidenceThreshold));
   localStorage.setItem('pt_auto_stats_v2', JSON.stringify(state.autoTuneStats));
@@ -1572,8 +1596,7 @@ const BacktestEngine = {
       let signals;
       try { signals = CustomStrategies.evaluateAll(window, symbol, asset, null); }
       catch (e) { continue; }
-      
-      const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
+            const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
       const filteredSignals = signals.filter(sig => {
         if (!CONFIG.ENABLED_STRATEGIES.includes(sig.strategy)) return false;
         if (disabledForSymbol.includes(sig.strategy)) return false;
@@ -2897,6 +2920,13 @@ async function refreshAsset(symbol, forceRefresh = false) {
   if (!mkt.open) {
     markMarketClosedDisplays(symbol, mkt.reason);
     renderSignal(symbol, { type: 'market-closed', reason: mkt.reason });
+    return;
+  }
+  // NUEVO v4.8.3: fuera de Londres+NY, no se pide dato al proveedor (ahorro de cupo).
+  // Aplica solo a forex/oro; US500 no lo necesita (ver isLondonNYSession arriba).
+  if (ACTIVE_SESSION_PROFILES.includes(asset.scheduleProfile) && !isLondonNYSession()) {
+    markMarketClosedDisplays(symbol, 'fuera de sesión Londres+NY (3:00-17:00 NY) — sin consultas para ahorrar cupo');
+    renderSignal(symbol, { type: 'market-closed', reason: 'fuera de sesión Londres+NY (3:00-17:00 NY) — sin consultas para ahorrar cupo' });
     return;
   }
   clearMarketClosedDisplays(symbol);
