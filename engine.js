@@ -1,4 +1,13 @@
 // ============================================================
+// PULSE TRADE v4.8.3 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.8.3 (22/9, FIX: motor de aprendizaje mostraba datos muertos de hace 11
+// días — ver cleanupLegacyAutoTuneKeys() al final del archivo para el detalle):
+// - runAutoTuneForKey ya aprendía correctamente por symbol+estrategia desde el 11/9,
+//   pero las keys viejas por-símbolo-solo nunca se borraron de autoTuneStats/
+//   autoConfidenceThreshold. /api/state las seguía mostrando como si fueran el
+//   aprendizaje vigente. Limpieza única al arrancar.
+// ============================================================
 // PULSE TRADE v4.8.2 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
 // Cambios v4.8.2 (21/9, FIX: la app no mandaba push a la pantalla bloqueada):
@@ -788,7 +797,6 @@ function isKillZoneWindow(nowMs = Date.now()) {
 function getDynamicRefreshIntervalMs() {
   return isKillZoneWindow() ? CONFIG.DYNAMIC_REFRESH.killZoneIntervalMs : CONFIG.DYNAMIC_REFRESH.normalIntervalMs;
 }
-
 function saveAutoTuneState() {
   localStorage.setItem('pt_auto_threshold_v2', JSON.stringify(state.autoConfidenceThreshold));
   localStorage.setItem('pt_auto_stats_v2', JSON.stringify(state.autoTuneStats));
@@ -3130,10 +3138,37 @@ function retireRemovedSymbols() {
     console.log(`[retiro de activos] ${retired} operaciones 'pending' y ${activeRemoved} señales activas de símbolos retirados marcadas como expiradas (0R, sin impacto en estadísticas)`);
   }
 }
+// NUEVO v4.8.3 (22/9, "el motor de aprendizaje es una mierda" — bug real confirmado):
+// runAutoTune() se corrigió el 11/9 para aprender por symbol+estrategia
+// ('XAUUSD_kill_zone_ny') en vez de por symbol solo ('XAUUSD'), pero las keys viejas
+// (una por cada símbolo, sin estrategia) nunca se borraron de
+// state.autoTuneStats/autoConfidenceThreshold. Quedaron congeladas con datos de antes
+// del fix y siguen expuestas en /api/state mezcladas con las nuevas, mostrando
+// expectancy/threshold que no se actualizan hace 11 días en vez del aprendizaje real
+// y vigente (que sí funciona, bajo la key con estrategia). Se borran una sola vez al
+// arrancar. Idempotente: deja la marca 'pt_autotune_legacy_cleanup_v1'.
+function cleanupLegacyAutoTuneKeys() {
+  const FLAG = 'pt_autotune_legacy_cleanup_v1';
+  if (localStorage.getItem(FLAG)) return;
+  let removed = 0;
+  [state.autoTuneStats, state.autoConfidenceThreshold].forEach(obj => {
+    Object.keys(obj || {}).forEach(key => {
+      if (ASSETS[key]) { delete obj[key]; removed++; } // key = symbol puro, sin '_estrategia' -> legacy
+    });
+  });
+  if (removed) {
+    try { localStorage.setItem('pt_auto_stats_v2', JSON.stringify(state.autoTuneStats)); } catch (e) {}
+    try { localStorage.setItem('pt_auto_threshold_v2', JSON.stringify(state.autoConfidenceThreshold)); } catch (e) {}
+    console.log(`[cleanup] ${removed} keys legacy de auto-tune (por símbolo, sin estrategia) borradas`);
+  }
+  try { localStorage.setItem(FLAG, '1'); } catch (e) {}
+}
+
 retireRemovedSymbols();
 assertStrategyFlagsSync();
 migrateRenamedStrategyKeys();
 seedLiveStatsFromClosedHistory(); // v4.8.2
+cleanupLegacyAutoTuneKeys(); // v4.8.3
 applyRetroactiveCircuitBreaker();
 
 module.exports = {
