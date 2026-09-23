@@ -1,7 +1,7 @@
 {
   "name": "PulseTrade PRO",
   "short_name": "PulseTrade",
-  "description": "Señales de trading SMC en tiempo real: BTC/USD, ETH/USD, EUR/USD, XAU/USD",
+  "description": "Señales de trading en tiempo real: XAU/USD, EUR/USD, GBP/USD, US500",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0a0f1a",
