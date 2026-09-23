@@ -3071,7 +3071,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.7-T1',
+    engineVersion: '4.8.8-S2',
     generatedAt: Date.now()
   };
 }
@@ -3120,7 +3120,11 @@ async function refreshAsset(symbol, forceRefresh = false) {
     const htfTF = CONFIG.HTF_MAP[state.currentTF] || null;
     let htfCandles = null;
     if (htfTF) {
-      try { const htfOhlcv = await MarketDataProvider.getOHLCV(symbol, htfTF, 60, forceRefresh); htfCandles = htfOhlcv.candles; }
+      try { // v4.8.8 (S2, auditoría punto E): se piden 100 velas H1 en vez de 60. La EMA50 del filtro de tendencia
+      // apenas converge con 60 y con T1 se descarta la vela abierta (quedan 59). Twelve Data cobra por pedido,
+      // no por cantidad de velas. Efecto secundario: supply_demand arma sus zonas sobre estas velas H1, así que
+      // ahora ve ~100 h de historia en vez de ~60 h.
+      const htfOhlcv = await MarketDataProvider.getOHLCV(symbol, htfTF, 100, forceRefresh); htfCandles = htfOhlcv.candles; }
       catch (e) { htfCandles = null; }
     }
     // FIX (7.2, sesión 25/8): antes la única forma de saber cuántas velas HTF llegan
