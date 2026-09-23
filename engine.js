@@ -1,5 +1,24 @@
 // ============================================================
-// PULSE TRADE v4.8.3 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.4 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.8.4 (23/9, punto I de la auditoría: velas sin proveedor en GBPUSD/US500):
+// - CAUSA RAÍZ (confirmada con /api/state y log de Render del 23/9): (a) Twelve Data llegó a
+//   786/800 pedidos porque TWELVEDATA_DAILY_LIMIT no está definida en Render (el motor se
+//   autolimita a 800 pese al plan Grow); al agotar el cupo interno queda afuera de getOHLCV y
+//   no queda ningún proveedor de velas real. (b) FMP (402) y Finnhub (403) NO incluyen velas
+//   OHLCV en su plan gratis: el error no es de cupo, es de plan. Como el cooldown es por
+//   PROVEEDOR ENTERO, ese 402/403 de velas también sacaba de circulación sus cotizaciones
+//   (que sí funcionan) durante 60/15 min. (c) Tras un 429 de Twelve Data (cooldown 10 min), si
+//   otro proveedor estaba "listo" getOHLCV probaba solo a ese y salteaba a Twelve Data.
+// - FIX 1: nuevo flag ohlcvSupported en los adaptadores. fmp y finnhub quedan SOLO para
+//   cotizaciones (ohlcvSupported=false); se rehabilitan sin tocar código con las variables de
+//   entorno FMP_OHLCV_ENABLED=true / FINNHUB_OHLCV_ENABLED=true si algún día cambian de plan.
+//   getOHLCV filtra por ese flag antes de armar la lista de elegibles.
+// - FIX 2: un 429 "pelado" de Twelve Data (sin texto de cupo diario) ahora enfría 90s en vez
+//   de 10min (típico por-minuto tras redeploy). Errores de cupo diario, 401, 402, 403, etc.
+//   y el resto de los proveedores: sin cambios.
+// - NO cambia ninguna estrategia, umbral, SL/TP ni compuerta. Acción de configuración pendiente
+//   del usuario (no es código): definir TWELVEDATA_DAILY_LIMIT=none en Render.
 // ============================================================
 // Cambios v4.8.3 (22/9):
 // - FIX: motor de aprendizaje mostraba datos muertos de hace 11 días (ver
@@ -1082,7 +1101,6 @@ function logQuotaExcluded(providerName, symbol, usage) {
   state.providerQuotaExclusions = state.providerQuotaExclusions || {};
   state.providerQuotaExclusions[providerName] = { used: usage.used, limit: usage.limit, lastSymbol: symbol, at: Date.now() };
 }
-
 function getProviderCooldownMs(errorMessage) {
   const msg = (errorMessage || '').toLowerCase();
   if (msg.includes('premium endpoint') || msg.includes('premium plan') || msg.includes('unlock all premium')) {
@@ -1123,7 +1141,9 @@ function markProviderCooldown(providerName, errorMessage, symbol = null) {
     console.warn(`[proveedor] ${providerName} no sirve ${symbol} (${errorMessage}) — bloqueado solo para ese símbolo por ${SYMBOL_BLOCK_MS / 3600000}h; el resto de los activos sigue normal`);
     return;
   }
-  const ms = getProviderCooldownMs(errorMessage); if (!ms) return;
+  let ms = getProviderCooldownMs(errorMessage); if (!ms) return;
+  // v4.8.4: 429 pelado de Twelve Data (típico límite por minuto tras un redeploy) -> 90s, no 10min.
+  if (providerName === 'twelveData' && ms === 10 * 60 * 1000) ms = 90 * 1000;
   state.providerCooldownUntil = state.providerCooldownUntil || {};
   state.providerCooldownUntil[providerName] = Date.now() + ms;
 }
@@ -1324,6 +1344,8 @@ const ProviderAdapters = {
   },
   finnhub: {
     name: 'Finnhub', requiresKey: true, supports: ['XAUUSD','EURUSD','GBPUSD','US500'],
+    // v4.8.4: las velas (candle) devuelven 403 en el plan gratis -> solo cotizaciones.
+    ohlcvSupported: process.env.FINNHUB_OHLCV_ENABLED === 'true',
     async fetchQuote(symbol) {
       if (!state.apiKeys.finnhub) throw new Error('API key no configurada');
       const asset = ASSETS[symbol];
@@ -1417,6 +1439,8 @@ const ProviderAdapters = {
   },
   fmp: {
     name: 'Financial Modeling Prep', requiresKey: true, supports: ['XAUUSD','EURUSD','GBPUSD'],
+    // v4.8.4: el endpoint historical-chart devuelve 402 en el plan gratis -> solo cotizaciones.
+    ohlcvSupported: process.env.FMP_OHLCV_ENABLED === 'true',
     // v4.6.4: detección de congelamiento genérica, mismo patrón que exchangerate.
     // Se vio en logs (24/8) que XAUUSD quedó con quote.last idéntico ~30min cuando
     // fmp era el proveedor activo (twelveData agotado). Por símbolo porque fmp sirve
@@ -1537,6 +1561,7 @@ const MarketDataProvider = {
     const eligible = providerList.filter(providerName => {
       const adapter = ProviderAdapters[providerName];
       if (!adapter || !adapter.fetchOHLCV || !adapter.supports.includes(symbol)) return false;
+      if (adapter.ohlcvSupported === false) return false; // v4.8.4: proveedor solo-cotizaciones en este plan
       if (adapter.requiresKey && !state.apiKeys[providerName]) return false;
       if (isProviderSymbolBlocked(providerName, symbol)) return false;
       const usage = RequestTracker.getUsage(providerName);
@@ -2172,7 +2197,6 @@ function disableAggregateByCircuitBreaker(key, streak, extra = {}) {
   const body = `${key} se auto-desactivó en los 4 activos tras ${streak} pérdidas seguidas repartidas entre símbolos. Revisala cuando puedas.`;
   sendPushToAll({ title, body, signal: { strategy: key, autoDisabled: true, aggregate: true } }).catch(err => console.error('Error enviando push de circuit breaker agregado:', err.message));
 }
-
 function checkCircuitBreakerAggregate(key, result) {
   if (!CONFIG.CIRCUIT_BREAKER || !CONFIG.CIRCUIT_BREAKER.enabled) return;
   if (result === 'win') {
