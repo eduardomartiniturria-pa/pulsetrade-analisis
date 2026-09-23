@@ -1,4 +1,18 @@
 // ============================================================
+// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.15 (23/9, auditoría punto E: B1)
+// ============================================================
+// Cambios v4.15 (23/9, hallazgo B1 de la auditoría del punto E):
+// - detectSessionBreakoutVwap, Modo B (vwap_reversion): el "rechazo" se cumplía si la mecha del
+//   lado del rechazo superaba 1.5x la mecha opuesta, sin importar el tamaño de la vela (una vela
+//   con mecha de 0.2 pips contra 0.1 pips ya calificaba). Combinado con RSI extremo contra la
+//   tendencia, era el punto más débil de la estrategia (XAUUSD -3.03R). Ahora exige el mismo
+//   criterio de pin bar que ya usa supply_demand (isPinBar: mecha >= 55% del rango y cuerpo
+//   <= 35%), conserva el cierre a favor de la reversión (close > open / close < open) y suma un
+//   piso de tamaño: rango de la vela >= SBV_REJECTION_MIN_RANGE_ATR (0.5) x ATR14.
+// - Comentarios desactualizados corregidos (cabecera de session_breakout_vwap y lista de
+//   estrategias activas de v4.12). Sin efecto en el trading.
+// - Sin cambios en el Modo A, kill_zone_ny ni supply_demand.
+// ============================================================
 // ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.14 (20/9, activos sin crypto)
 // ============================================================
 // Cambios v4.14 (20/9): activos de la app = XAUUSD, EURUSD, US500, GBPUSD (BTC/ETH salieron).
@@ -32,6 +46,8 @@
 //   calculateBollingerSeries, getHtfTrendDirection) se conservaron.
 // - Session False Breakout restringida a BTCUSD/ETHUSD (antes los 4 activos) — sin
 //   edge en EURUSD/XAUUSD ni siquiera acotando a Londres/NY (-3.89R y -0.3R).
+// (Lista histórica al 16/9 — hoy solo están activas kill_zone_ny, supply_demand y
+// session_breakout_vwap; ver v4.14 arriba. Las demás están apagadas por flag.)
 // Las estrategias activas ahora son: Kill Zone Apertura NY, Price Action + RSI + EMA
 // (fuera de whitelist en engine.js, sin cambios acá), Supply and Demand, Divergencia
 // RSI (ídem, fuera de whitelist), ETH VWAP Trend Scalp (ídem), ETH Momentum
@@ -316,8 +332,8 @@ function getH1Bias(htfCandles) {
 // como código muerto porque nada las llamaba — no por mal rendimiento
 // documentado. Esta es una implementación nueva, con nombre propio
 // (session_breakout_vwap), no una reactivación de aquellas.
-// Símbolos: solo EURUSD y XAUUSD (filtro por símbolo en evaluateAll, mismo
-// patrón que eth_vwap_scalp/eth_momentum_breakout).
+// Símbolos: EURUSD, XAUUSD y GBPUSD (SESSION_BREAKOUT_VWAP_SYMBOLS; filtro por
+// símbolo en evaluateAll, mismo patrón que eth_vwap_scalp/eth_momentum_breakout).
 // Ventanas horarias fijas en hora de Córdoba, Argentina (UTC-3, sin horario
 // de verano): 05:00-08:00 y 10:00-13:00. Fuera de esas ventanas, sin señal.
 // Dos modos, se evalúan en orden (A tiene prioridad si dispara ese ciclo):
@@ -332,7 +348,7 @@ function getH1Bias(htfCandles) {
 // pero no es VWAP institucional puro.
 // FLAG MANUAL: debe coincidir con si 'session_breakout_vwap' está en
 // engine.js:CONFIG.ENABLED_STRATEGIES — no hay lectura cruzada entre
-// archivos. Arranca en false (dormant) hasta validar en demo.
+// archivos. Hoy está en true (activa).
 const SESSION_BREAKOUT_VWAP_ENABLED = true;
 
 function getCordobaTimeParts(ms) {
@@ -355,6 +371,9 @@ function isCordobaSessionWindow(parts) {
   const inWindow2 = m >= (10 * 60) && m < (13 * 60); // 10:00-13:00
   return inWindow1 || inWindow2;
 }
+
+// Piso de tamaño para la vela de rechazo del Modo B (rango >= este múltiplo del ATR14). Ajustable.
+const SBV_REJECTION_MIN_RANGE_ATR = 0.5;
 
 function detectSessionBreakoutVwap(candles) {
   const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, mode: null };
@@ -409,8 +428,16 @@ function detectSessionBreakoutVwap(candles) {
     const rsiSeries = calculateRSISeries(candles, 14);
     const lastRsi = rsiSeries[rsiSeries.length - 1];
     if (lastRsi != null) {
-      const isRejectionBull = last.close > last.open && (last.open - last.low) > (last.high - last.close) * 1.5;
-      const isRejectionBear = last.close < last.open && (last.high - last.close) > (last.close - last.low) * 1.5;
+      // FIX (23/9, hallazgo B1 de la auditoría del punto E): antes el rechazo era solo
+      // "mecha del lado del rechazo > 1.5x la mecha opuesta", sin importar el tamaño de la vela.
+      // Ahora exige pin bar real (isPinBar, el mismo criterio que supply_demand), mantiene el
+      // cierre a favor de la reversión y pide un rango mínimo respecto del ATR14 para que una
+      // vela diminuta no califique. Si no hay ATR calculable (atr = 0), el piso de tamaño no se
+      // aplica y queda solo el criterio de pin bar.
+      const rangeLast = last.high - last.low;
+      const bigEnough = !(atr > 0) || rangeLast >= atr * SBV_REJECTION_MIN_RANGE_ATR;
+      const isRejectionBull = last.close > last.open && isPinBar(last, 'bull') && bigEnough;
+      const isRejectionBear = last.close < last.open && isPinBar(last, 'bear') && bigEnough;
       // FIX (18/9, auditoría completa): SL sin colchón (pegado exacto a la mecha de la
       // vela de señal) — candidato fuerte al mal resultado de este modo en XAUUSD
       // (-3.03R, terminó apagado por circuit breaker), un activo con mechas ruidosas
