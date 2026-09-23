@@ -1,5 +1,27 @@
 // ============================================================
-// PULSE TRADE v4.8.6 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.7 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.8.7 (23/9, hallazgo T1 de la auditoría del punto E: velas en formación):
+// - CAUSA RAÍZ (confirmada con /api/state: candleAge.inProgressPct=100 en todos los activos):
+//   evaluateAll() recibía ohlcv.candles con la última vela de 15m todavía abierta, así que
+//   kill_zone_ny, supply_demand y session_breakout_vwap tomaban como "cierre" el precio del
+//   momento del sondeo (falsos positivos por mechas, y rupturas confirmadas perdidas si el
+//   sondeo llegaba con la vela siguiente ya abierta).
+// - FIX 1: getClosedCandles() descarta la última vela si (apertura + timeframe) > ahora. Se aplica
+//   SOLO a lo que se le pasa a evaluateAll() (velas del TF base y velas H1). checkHistoryOutcomes,
+//   quote, feed stale y diagnósticos siguen usando las velas completas: el SL/TP se sigue
+//   vigilando con el precio en vivo, como antes.
+// - FIX 2: el refresco se alinea al cierre de cada vela (getAlignedRefreshDelayMs): el próximo
+//   ciclo cae a CANDLE_ALIGN_OFFSET_MS (12 s) después de cada :00/:15/:30/:45 en vez de a
+//   ciegas N minutos después del ciclo anterior. En Kill Zone se mantiene el sondeo de 4 min
+//   para SL/TP y se agrega el ciclo alineado al cierre.
+//   Si un ciclo empezó antes del cierre y lo cruzó (4 activos ~45 s), se repite a los 5 s.
+// - FIX 3: las velas H1 se cachean 15 min (CONFIG.HTF_CACHE_TTL_MS) en getOHLCV; antes se
+//   pedían en cada ciclo (el TTL global de ResponseCache es 30 s). forceRefresh lo saltea.
+// - NO cambia ningún parámetro de estrategia, SL/TP, umbrales ni custom-strategies.js: las
+//   estrategias ya identifican la vela de confirmación por su hora, no por "ahora".
+// - Nuevo diagnóstico en /api/state: diagnostics.closedCandle[symbol] (última vela cerrada
+//   evaluada y si se descartó una vela abierta). engineVersion ahora refleja la versión real.
 // ============================================================
 // Cambios v4.8.6 (23/9, punto B de la auditoría: keys legacy de auto-tune de símbolos retirados):
 // - CAUSA RAÍZ (confirmada en /api/state del 23/9: autoTune.threshold mostraba BTCUSD=74 y
@@ -321,6 +343,11 @@ const CONFIG = {
     normalIntervalMs: 15 * 60 * 1000,
     killZoneIntervalMs: 4 * 60 * 1000
   },
+  // v4.8.7 (T1): el ciclo alineado cae este tiempo después del cierre de cada vela, para dar
+  // margen a que el proveedor publique la vela recién cerrada.
+  CANDLE_ALIGN_OFFSET_MS: 12000,
+  // v4.8.7: las velas H1 solo cambian una vez por hora; se reusan este tiempo entre ciclos.
+  HTF_CACHE_TTL_MS: 15 * 60 * 1000,
   // (20/9) Retirado CRYPTO_QUICK_CHECK_INTERVAL_MS: el chequeo rápido de precio era solo
   // para BTC/ETH, que salieron de la app.
   // NUEVO (Etapa 3 real — auditoría de filtros de señal, Punto 6): antes ningún costo
@@ -694,7 +721,6 @@ const ASSETS = {
     providerPriority: ['twelveData', 'fmp', 'alphaVantage', 'exchangerate']
   }
 };
-
 let state = {
   currentTF: '15m',
   lastPrice: null, prevPrice: null, klineHistory: {},
@@ -879,6 +905,33 @@ const ACTIVE_SESSION_PROFILES = ['forex', 'gold']; // US500 ya restringido por s
 function getDynamicRefreshIntervalMs() {
   return isKillZoneWindow() ? CONFIG.DYNAMIC_REFRESH.killZoneIntervalMs : CONFIG.DYNAMIC_REFRESH.normalIntervalMs;
 }
+// NUEVO v4.8.7 (T1): duración de cada timeframe y helpers para evaluar solo velas cerradas.
+const TF_MS = { '5m': 5 * 60 * 1000, '15m': 15 * 60 * 1000, '1h': 60 * 60 * 1000 };
+// Devuelve las velas sin la última si esa todavía está abierta (apertura + timeframe > ahora).
+// Supone candle.time = hora de APERTURA en ms UTC (misma suposición que recordCandleAgeDiagnostic).
+// Solo la última vela puede estar abierta. No muta el array original.
+function getClosedCandles(candles, tf, nowMs = Date.now()) {
+  if (!candles || candles.length === 0) return candles || [];
+  const tfMs = TF_MS[tf] || TF_MS['15m'];
+  const last = candles[candles.length - 1];
+  return (last.time + tfMs > nowMs) ? candles.slice(0, -1) : candles;
+}
+// Próximo ciclo: el intervalo dinámico de siempre, pero nunca pasando del próximo cierre de
+// vela + CANDLE_ALIGN_OFFSET_MS. Así siempre hay un ciclo justo después de cada cierre.
+// Si el ciclo que acaba de terminar EMPEZÓ antes del punto alineado del último cierre (típico:
+// arrancó unos segundos antes del cierre y el ciclo de 4 activos duró ~45 s), los primeros
+// activos se evaluaron sobre la vela anterior: se repite enseguida en vez de esperar al próximo
+// sondeo (que en Kill Zone son 4 min). El ciclo repetido ya arranca después del punto alineado,
+// así que no se encadena.
+function getAlignedRefreshDelayMs(nowMs = Date.now(), cycleStartMs = null) {
+  const base = getDynamicRefreshIntervalMs();
+  const tfMs = TF_MS[state.currentTF] || TF_MS['15m'];
+  const lastClose = Math.floor(nowMs / tfMs) * tfMs;
+  if (cycleStartMs != null && cycleStartMs < lastClose + CONFIG.CANDLE_ALIGN_OFFSET_MS - 1000) return 5000;
+  const nextClose = (Math.floor(nowMs / tfMs) + 1) * tfMs;
+  const untilAligned = nextClose + CONFIG.CANDLE_ALIGN_OFFSET_MS - nowMs;
+  return Math.max(5000, Math.min(base, untilAligned));
+}
 
 function saveAutoTuneState() {
   localStorage.setItem('pt_auto_threshold_v2', JSON.stringify(state.autoConfidenceThreshold));
@@ -910,6 +963,8 @@ const TD_LIMIT_ENV = process.env.TWELVEDATA_DAILY_LIMIT;
 const TWELVEDATA_DAILY_LIMIT = (TD_LIMIT_ENV === undefined || TD_LIMIT_ENV === '') ? 800
   : (String(TD_LIMIT_ENV).toLowerCase() === 'none' ? null : (parseInt(TD_LIMIT_ENV, 10) || 800));
 const PROVIDER_DAILY_LIMITS = { twelveData: TWELVEDATA_DAILY_LIMIT, finnhub: null, alphaVantage: 25, fmp: 250 };
+
+const htfFetchedAt = {}; // v4.8.7: última vez que se pidió cada symbol_tf al proveedor (cache HTF)
 
 const RequestTracker = {
   todayKey() { return 'pt_req_count_' + new Date().toISOString().slice(0, 10); },
@@ -1524,7 +1579,6 @@ const ProviderAdapters = {
     }
   }
 };
-
 const MarketDataProvider = {
   async getQuote(symbol, forceRefresh = false) {
     const asset = ASSETS[symbol];
@@ -1594,6 +1648,15 @@ const MarketDataProvider = {
     if (!isMarketOpenForAsset(symbol)) {
       return (state.klineHistory[symbol] && state.klineHistory[symbol][tf]) || new OHLCVData([]);
     }
+    // v4.8.7: cache de velas HTF (1h) — solo cambian una vez por hora, no hace falta repedirlas
+    // en cada ciclo. Se saltea con forceRefresh y si no hay velas cacheadas.
+    const isHtfRequest = Object.values(CONFIG.HTF_MAP).includes(tf);
+    const htfKey = `${symbol}_${tf}`;
+    if (isHtfRequest && !forceRefresh) {
+      const cachedHtf = state.klineHistory[symbol] && state.klineHistory[symbol][tf];
+      const at = htfFetchedAt[htfKey];
+      if (cachedHtf && cachedHtf.candles.length > 0 && at && (Date.now() - at) < CONFIG.HTF_CACHE_TTL_MS) return cachedHtf;
+    }
     const providerList = asset.providerPriority || CONFIG.PROVIDER_PRIORITY;
     const eligible = providerList.filter(providerName => {
       const adapter = ProviderAdapters[providerName];
@@ -1633,6 +1696,7 @@ const MarketDataProvider = {
           }
           if (!state.klineHistory[symbol]) state.klineHistory[symbol] = {};
           state.klineHistory[symbol][tf] = data;
+          htfFetchedAt[htfKey] = Date.now();
           return data;
         } catch (error) {
           markProviderCooldown(providerName, error.message, symbol);
@@ -2319,7 +2383,6 @@ function checkCircuitBreaker(symbol, key, result) {
   if (state.consecutiveLosses[ckey] < threshold) return;
   disableCombinationByCircuitBreaker(symbol, key, state.consecutiveLosses[ckey]);
 }
-
 function seedStrategyStatsFromBacktest(resultsBySymbol) {
   Object.entries(resultsBySymbol).forEach(([symbol, r]) => {
     state.strategyStatsBySymbol[symbol] = state.strategyStatsBySymbol[symbol] || {};
@@ -3008,7 +3071,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.1-E0',
+    engineVersion: '4.8.7-T1',
     generatedAt: Date.now()
   };
 }
@@ -3068,6 +3131,23 @@ async function refreshAsset(symbol, forceRefresh = false) {
     state.htfDiagnostics = state.htfDiagnostics || {};
     state.htfDiagnostics[symbol] = { tf: htfTF, count: htfCandles ? htfCandles.length : 0, at: Date.now() };
     checkHistoryOutcomes(symbol, quote.last, ohlcv.candles);
+    // v4.8.7 (T1): las estrategias se evalúan solo sobre velas CERRADAS. Las velas completas
+    // (con la abierta) siguen alimentando SL/TP, quote, feed stale y diagnósticos.
+    const closedCandles = getClosedCandles(ohlcv.candles, state.currentTF);
+    const closedHtfCandles = htfCandles ? getClosedCandles(htfCandles, htfTF) : null;
+    try {
+      state.diagnostics = state.diagnostics || { candleAge: {}, quote: {}, costGate: {} };
+      state.diagnostics.closedCandle = state.diagnostics.closedCandle || {};
+      const lastClosed = closedCandles.length ? closedCandles[closedCandles.length - 1] : null;
+      state.diagnostics.closedCandle[symbol] = {
+        tf: state.currentTF,
+        lastClosedOpenUtc: lastClosed ? new Date(lastClosed.time).toISOString() : null,
+        droppedOpenCandle: closedCandles.length < ohlcv.candles.length,
+        candlesEvaluated: closedCandles.length,
+        htfCandlesEvaluated: closedHtfCandles ? closedHtfCandles.length : 0,
+        at: Date.now()
+      };
+    } catch (e) {}
 
     const feed = getFeedStatus(ohlcv.candles, state.currentTF);
     const signalBlockReason = !mkt.signalsAllowed ? mkt.reason
@@ -3089,7 +3169,7 @@ async function refreshAsset(symbol, forceRefresh = false) {
       // el mismo score informativo que ya existe, no agrega campos nuevos a la señal
       // ni se muestra en la UI (decisión explícita de Soy).
        const newsContext = await NewsCalendar.getNearbyHighImpact(NEWS_CURRENCIES_BY_SYMBOL[symbol] || ['USD'], 60);
-      const rawSignals = CustomStrategies.evaluateAll(ohlcv.candles, symbol, asset, htfCandles, state.strategyStatsBySymbol[symbol] || null, newsContext, CONFIG.MIN_CONFIDENCE_SCORE);
+      const rawSignals = CustomStrategies.evaluateAll(closedCandles, symbol, asset, closedHtfCandles, state.strategyStatsBySymbol[symbol] || null, newsContext, CONFIG.MIN_CONFIDENCE_SCORE);
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
       const filteredSignals = rawSignals.filter(sig => {
         if (!CONFIG.ENABLED_STRATEGIES.includes(sig.strategy)) {
@@ -3138,16 +3218,16 @@ async function refreshAllData(forceRefresh = false) {
 async function requestWakeLock() {}
 // (20/9) Retirado el chequeo liviano de precio para BTC/ETH (quickPriceCheck / cryptoQuickCheck*):
 // era solo para crypto, que salió de la app.
-
 let autoRefreshTimer = null;
 async function autoRefreshTick() {
+  const cycleStartedAt = Date.now(); // v4.8.7: para detectar ciclos que cruzaron un cierre de vela
   try {
     await refreshAllData(false);
   } catch (e) {
     console.warn('autoRefreshTick: error en refreshAllData', e.message);
   } finally {
-    const delay = getDynamicRefreshIntervalMs();
-    addLog('scheduler', `Próximo refresco en ${Math.round(delay / 1000)}s (${isKillZoneWindow() ? 'Kill Zone NY activa' : 'horario normal'})`, 'ALL');
+    const delay = getAlignedRefreshDelayMs(Date.now(), cycleStartedAt); // v4.8.7: alineado al cierre de vela
+    addLog('scheduler', `Próximo refresco en ${Math.round(delay / 1000)}s (${isKillZoneWindow() ? 'Kill Zone NY activa' : 'horario normal'}, alineado al cierre de vela)`, 'ALL');
     autoRefreshTimer = setTimeout(autoRefreshTick, delay);
   }
 }
