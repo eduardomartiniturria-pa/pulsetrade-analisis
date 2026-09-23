@@ -1,4 +1,20 @@
 // ============================================================
+// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.16 (23/9, auditoría punto E: S1 y B2)
+// ============================================================
+// Cambios v4.16 (23/9, hallazgos S1 y B2 de la auditoría del punto E — decisiones de diseño
+// aprobadas por el usuario):
+// - S1, supply_demand (findImpulseZones): la "vela base (cuerpo chico)" solo exigía cuerpo <= 50%
+//   del cuerpo del impulso; con impulsos grandes eso dejaba pasar bases de más de 1 ATR. Ahora además
+//   exige cuerpo de la base <= SD_BASE_MAX_BODY_ATR (0.5) x ATR (mismo timeframe donde se buscan las
+//   zonas). Genera menos zonas, todas de base realmente chica.
+// - B2, session_breakout_vwap Modo B (vwap_reversion): operaba contra la corriente aunque la
+//   tendencia H1 fuera fuerte. Ahora, si getH1Bias() da tendencia clara (precio, EMA20 y EMA50
+//   alineadas), NO se toma la reversión en contra: LONG bloqueado con H1 bajista, SHORT bloqueado
+//   con H1 alcista. H1 lateral, EMAs cruzadas o htfCandles insuficientes/ausentes NO bloquean (mismo
+//   criterio permisivo que el filtro H1 de supply_demand). El Modo A (breakout) no cambia.
+//   detectSessionBreakoutVwap ahora recibe htfCandles como 2º parámetro (evaluateAll ya lo tenía).
+// - Sin cambios en engine.js ni en kill_zone_ny.
+// ============================================================
 // ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.15 (23/9, auditoría punto E: B1)
 // ============================================================
 // Cambios v4.15 (23/9, hallazgo B1 de la auditoría del punto E):
@@ -375,7 +391,7 @@ function isCordobaSessionWindow(parts) {
 // Piso de tamaño para la vela de rechazo del Modo B (rango >= este múltiplo del ATR14). Ajustable.
 const SBV_REJECTION_MIN_RANGE_ATR = 0.5;
 
-function detectSessionBreakoutVwap(candles) {
+function detectSessionBreakoutVwap(candles, htfCandles = null) {
   const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, mode: null };
   if (!candles || candles.length < 30) return result;
 
@@ -443,7 +459,14 @@ function detectSessionBreakoutVwap(candles) {
       // (-3.03R, terminó apagado por circuit breaker), un activo con mechas ruidosas
       // frente al broker real (por eso ya existe TP_CONFIRMATION_BUFFER_PIPS_BY_SYMBOL
       // en engine.js). Mismo colchón que ya usa el Modo A de esta estrategia: 0.25x ATR14.
-      if (lastRsi < 30 && isRejectionBull) {
+      // v4.16 (B2): la reversión no se toma contra una tendencia H1 clara (ver cabecera v4.16).
+      // Sin datos H1 suficientes, getH1Bias devuelve 'no_trade' y no bloquea nada.
+      const h1Bias = getH1Bias(htfCandles);
+      if (lastRsi < 30 && isRejectionBull && h1Bias.bias === 'short') {
+        console.log(`[session_breakout_vwap] Modo B LONG bloqueado por filtro H1 (${h1Bias.reason})`);
+      } else if (lastRsi > 70 && isRejectionBear && h1Bias.bias === 'long') {
+        console.log(`[session_breakout_vwap] Modo B SHORT bloqueado por filtro H1 (${h1Bias.reason})`);
+      } else if (lastRsi < 30 && isRejectionBull) {
         result.bullish = true; result.entry = last.close; result.sl = last.low - atr * 0.25; result.mode = 'vwap_reversion';
         result.details.push(`RSI en sobreventa (${lastRsi.toFixed(1)}) con vela de rechazo, buscando reversión hacia VWAP (${lastVwap.toFixed(5)})`);
       } else if (lastRsi > 70 && isRejectionBear) {
@@ -833,6 +856,9 @@ function detectPriceActionRsiEma(candles) {
 //   - SL detrás de la zona (+/- 0.2 ATR) / TP en la zona opuesta más cercana
 //   - Filtro duro: se descarta la señal si el RR resultante es menor a 1:2
 
+// Tope del cuerpo de la vela base de una zona, en múltiplos de ATR (mismo timeframe). Ajustable.
+const SD_BASE_MAX_BODY_ATR = 0.5;
+
 function findImpulseZones(candles, atr) {
   const zones = [];
   if (!candles || candles.length < 10 || !atr) return zones;
@@ -843,6 +869,8 @@ function findImpulseZones(candles, atr) {
     const impulseBody = Math.abs(impulse.close - impulse.open);
     if (impulseBody < atr * 1.5) continue; // no hubo impulso real
     if (baseBody > impulseBody * 0.5) continue; // la "base" no es lo bastante chica
+    // v4.16 (S1): tope absoluto — con un impulso grande el 50% relativo dejaba pasar bases de >1 ATR.
+    if (baseBody > atr * SD_BASE_MAX_BODY_ATR) continue;
 
     const zoneLow = Math.min(base.open, base.close, base.low);
     const zoneHigh = Math.max(base.open, base.close, base.high);
@@ -1582,7 +1610,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
   // Filtro por símbolo (mismo patrón que eth_vwap_scalp/eth_momentum_breakout arriba):
   // SESSION_BREAKOUT_VWAP_SYMBOLS (EURUSD, XAUUSD, GBPUSD).
   if (SESSION_BREAKOUT_VWAP_ENABLED && SESSION_BREAKOUT_VWAP_SYMBOLS.includes(symbol)) {
-    const sbv = safeRun('session_breakout_vwap', detectSessionBreakoutVwap, candles);
+    const sbv = safeRun('session_breakout_vwap', detectSessionBreakoutVwap, candles, htfCandles);
     if (sbv.bullish || sbv.bearish) {
       signals.push({
         strategy: 'session_breakout_vwap', label: 'Session Breakout + VWAP Reversion',
