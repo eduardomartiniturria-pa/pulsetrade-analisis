@@ -1042,6 +1042,26 @@ function getFeedStatus(candles, tf) {
 
 function calculateSpread(bid, ask, pipSize = 0.0001) { if (!bid || !ask || bid <= 0 || ask <= 0) return null; return (ask - bid) / pipSize; }
 
+// FIX (24/9, hallazgo real confirmado con logs de Render del 23/9 — punto G del respaldo):
+// cuando el proveedor no trae bid/ask real (Twelve Data en su plan free: /quote no devuelve
+// bid/ask, así que el código cae a bid=ask=close), calculateSpread() da 0 pips siempre, aunque
+// quote.estimatedSpread quede correctamente marcado como true. La compuerta de costo (Gate 2b,
+// decide si descartar una señal por spread alto respecto al stop) usaba ese quote.spread=0
+// directo — nunca bloqueaba ninguna señal en ningún activo, sin importar el spread real del
+// momento. Esta función centraliza el criterio correcto: si el spread es estimado (no vino
+// real del proveedor), usar la tabla CONFIG.ESTIMATED_SPREAD_PIPS_BY_SYMBOL (valores reales de
+// Exness por activo) en vez del 0 calculado — mismo criterio que YA se usaba bien en el
+// descuento de spread al cerrar una operación (rMultiple neto, más abajo en este archivo), pero
+// que faltaba aplicar acá, en el punto donde más importa: antes de decidir si tomar la señal.
+function getEffectiveSpreadPips(quote, symbol) {
+  if (!quote) return null;
+  if (quote.estimatedSpread) {
+    const tablePips = CONFIG.ESTIMATED_SPREAD_PIPS_BY_SYMBOL[symbol];
+    if (tablePips != null) return tablePips;
+  }
+  return quote.spread;
+}
+
 function addLog(provider, action, symbol) {
   const entry = { time: new Date().toLocaleTimeString('es-ES'), provider, action, symbol };
   state.logs.unshift(entry); if (state.logs.length > 20) state.logs.pop();
@@ -2734,22 +2754,26 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
     const tp2Pips = toPips(tp2, entry, asset);
 
     // GATE 2b — compuerta de costo (ver CONFIG.QUALITY_GATES): descarta la señal si
-    // el spread (real si el proveedor lo trae, estimado si no — quote.spread ya viene
-    // en pips, ver calculateSpread) supera maxSpreadPctOfStop del stop en pips. Mismo
-    // patrón que riskGuardBlockedDisplay/profitabilityBlockedDisplay: no se cuenta
-    // como operación real (no entra a activeCustomSignals/signalHistory, no dispara
-    // push), pero sí se manda a renderCustomSignal como informativa. En XAUUSD corre
+    // el spread (real si el proveedor lo trae, estimado si no) supera maxSpreadPctOfStop
+    // del stop en pips. Mismo patrón que riskGuardBlockedDisplay/profitabilityBlockedDisplay:
+    // no se cuenta como operación real (no entra a activeCustomSignals/signalHistory, no
+    // dispara push), pero sí se manda a renderCustomSignal como informativa. En XAUUSD corre
     // ya con slPips post-ensanche (arriba), así que mide el riesgo real de la operación.
+    // FIX (24/9, punto G del respaldo 23/9): usa getEffectiveSpreadPips() en vez de
+    // quote.spread directo — antes, con un spread estimado (Twelve Data no trae bid/ask real),
+    // quote.spread daba 0 pips siempre y esta compuerta nunca bloqueaba nada. Ver comentario
+    // completo junto a la función, cerca de calculateSpread().
     const qGates = CONFIG.QUALITY_GATES;
-    if (qGates && qGates.enabled && quote.spread != null && slPips) {
-      const spreadPctOfStop = quote.spread / slPips;
+    const effectiveSpreadPips = getEffectiveSpreadPips(quote, symbol);
+    if (qGates && qGates.enabled && effectiveSpreadPips != null && slPips) {
+      const spreadPctOfStop = effectiveSpreadPips / slPips;
       state.diagnostics = state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }; // E0 (solo lectura)
-      state.diagnostics.costGate[symbol] = { strategy: customSig.strategy, spreadUsedPips: +Number(quote.spread).toFixed(2), stopPips: +Number(slPips).toFixed(1), spreadPctOfStop: +(spreadPctOfStop * 100).toFixed(0), wouldBlock: spreadPctOfStop > qGates.maxSpreadPctOfStop, provider: quote.source || null, at: Date.now() };
-      console.log(`[E0-costo] ${symbol} ${customSig.strategy}: spread ${Number(quote.spread).toFixed(2)} pips / stop ${Number(slPips).toFixed(1)} pips = ${(spreadPctOfStop * 100).toFixed(0)}% (limite ${(qGates.maxSpreadPctOfStop * 100).toFixed(0)}%, via ${quote.source})`);
+      state.diagnostics.costGate[symbol] = { strategy: customSig.strategy, spreadUsedPips: +Number(effectiveSpreadPips).toFixed(2), stopPips: +Number(slPips).toFixed(1), spreadPctOfStop: +(spreadPctOfStop * 100).toFixed(0), wouldBlock: spreadPctOfStop > qGates.maxSpreadPctOfStop, provider: quote.source || null, at: Date.now() };
+      console.log(`[E0-costo] ${symbol} ${customSig.strategy}: spread ${Number(effectiveSpreadPips).toFixed(2)} pips / stop ${Number(slPips).toFixed(1)} pips = ${(spreadPctOfStop * 100).toFixed(0)}% (limite ${(qGates.maxSpreadPctOfStop * 100).toFixed(0)}%, via ${quote.source})`);
       if (spreadPctOfStop > qGates.maxSpreadPctOfStop) {
         costGateBlockedDisplay = {
           type: customSig.direction, symbol, costGateBlocked: true,
-          costGateReason: `spread ${quote.spread.toFixed(1)} pips = ${(spreadPctOfStop * 100).toFixed(0)}% del stop (${slPips.toFixed(1)} pips) — supera el ${(qGates.maxSpreadPctOfStop * 100).toFixed(0)}% permitido`,
+          costGateReason: `spread ${effectiveSpreadPips.toFixed(1)} pips = ${(spreadPctOfStop * 100).toFixed(0)}% del stop (${slPips.toFixed(1)} pips) — supera el ${(qGates.maxSpreadPctOfStop * 100).toFixed(0)}% permitido`,
           confidence: customSig.confidence,
           strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
           detectedAt: Date.now()
@@ -2898,14 +2922,22 @@ function recordQuoteDiagnostic(symbol, quote) {
     state.diagnostics = state.diagnostics || { candleAge: {}, quote: {}, costGate: {} };
     const asset = ASSETS[symbol];
     const bidEqAsk = quote.bid != null && quote.ask != null && quote.bid === quote.ask;
+    // FIX (24/9, punto G del respaldo 23/9): "spreadPips" (crudo del proveedor) se conserva
+    // tal cual para transparencia, pero se agrega "effectiveSpreadPips" — el valor que la
+    // compuerta de costo REALMENTE usa desde este fix (cae a la tabla Exness cuando el spread
+    // es estimado). Antes el log decía "spread usado por la compuerta" mostrando en realidad
+    // el crudo (casi siempre 0 con Twelve Data), no el que se usaba de verdad.
+    const rawSpreadPips = quote.spread != null ? +Number(quote.spread).toFixed(2) : null;
+    const effectiveSpreadPips = getEffectiveSpreadPips(quote, symbol);
     state.diagnostics.quote[symbol] = {
       source: quote.source || null, last: quote.last, bid: quote.bid, ask: quote.ask,
-      spreadPips: quote.spread != null ? +Number(quote.spread).toFixed(2) : null,
+      spreadPips: rawSpreadPips,
+      effectiveSpreadPips: effectiveSpreadPips != null ? +Number(effectiveSpreadPips).toFixed(2) : null,
       estimatedSpread: !!quote.estimatedSpread, bidEqualsAsk: bidEqAsk,
       estimatedTablePips: (CONFIG.ESTIMATED_SPREAD_PIPS_BY_SYMBOL && CONFIG.ESTIMATED_SPREAD_PIPS_BY_SYMBOL[symbol]) || null,
       pipSize: asset ? asset.pipSize : null, at: Date.now()
     };
-    console.log(`[E0-quote] ${symbol} via ${quote.source}: spread usado por la compuerta = ${state.diagnostics.quote[symbol].spreadPips} pips (bid==ask: ${bidEqAsk}, estimado: ${!!quote.estimatedSpread}, tabla Exness: ${state.diagnostics.quote[symbol].estimatedTablePips})`);
+    console.log(`[E0-quote] ${symbol} via ${quote.source}: spread crudo = ${rawSpreadPips} pips, spread usado por la compuerta = ${state.diagnostics.quote[symbol].effectiveSpreadPips} pips (bid==ask: ${bidEqAsk}, estimado: ${!!quote.estimatedSpread}, tabla Exness: ${state.diagnostics.quote[symbol].estimatedTablePips})`);
   } catch (e) {}
 }
 function getDiagnostics() {
