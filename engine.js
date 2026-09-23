@@ -1,5 +1,33 @@
 // ============================================================
-// PULSE TRADE v4.8.4 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.6 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.8.6 (23/9, punto B de la auditoría: keys legacy de auto-tune de símbolos retirados):
+// - CAUSA RAÍZ (confirmada en /api/state del 23/9: autoTune.threshold mostraba BTCUSD=74 y
+//   ETHUSD=70, y autoTune.stats las keys 'BTCUSD'/'ETHUSD' con datos congelados desde el
+//   11/9): cleanupLegacyAutoTuneKeys() (v4.8.3) solo borra una key legacy si ASSETS[key]
+//   existe, y BTCUSD/ETHUSD ya no están en ASSETS desde el 20/9, así que nunca las detectó.
+// - FIX: nueva cleanupRetiredSymbolAutoTuneKeys(), una sola vez al arrancar (marca propia
+//   'pt_autotune_retired_cleanup_v1', independiente de la v1 ya consumida), que borra SOLO las
+//   keys de símbolo puro (sin '_estrategia') de los símbolos en RETIRED_SYMBOLS, en
+//   autoTuneStats y autoConfidenceThreshold. runAutoTune() nunca las recrea (arma siempre
+//   'SIMBOLO_estrategia'). NO toca el historial de operaciones ni las keys con estrategia
+//   (el historial por período de BTC/ETH se conserva, decisión del 20/9).
+// - Al retirar otro activo en el futuro, agregarlo a RETIRED_SYMBOLS y cambiar el número de
+//   la marca (v2, v3...) para que la limpieza corra de nuevo.
+// ============================================================
+// Cambios v4.8.5 (23/9, punto H de la auditoría: backoff de NewsCalendar):
+// - CAUSA RAÍZ (confirmada en el log de Render del 23/9): NewsCalendar.getEvents() solo
+//   respetaba el backoff si ya existía this._cache de un fetch exitoso previo. Si el proceso
+//   nunca logró traer el calendario (caso actual: proxy allorigins sin respuesta + feed directo
+//   con HTTP 429 desde la IP de Render), _cache queda null y CADA símbolo reintentaba el fetch
+//   completo en cada ciclo (4 intentos por ciclo, ~8s de timeout del proxy cada uno, demorando
+//   el ciclo de precios y perpetuando el 429).
+// - FIX: el backoff ahora se guarda aparte (_lastFailAt) y se respeta AUNQUE no haya cache;
+//   además los pedidos simultáneos comparten un único fetch en curso (_inflight). Resultado:
+//   como máximo 1 intento (proxy+directo) cada BACKOFF_MS (30min), no 4 por ciclo.
+// - NO cambia el feed, el proxy, CACHE_MS/BACKOFF_MS ni cómo se usa el calendario en el score.
+//   Nota: mientras el feed siga bloqueado, el ajuste por noticias sigue sin datos (array vacío),
+//   igual que hoy; este fix solo elimina el desperdicio y las demoras.
 // ============================================================
 // Cambios v4.8.4 (23/9, punto I de la auditoría: velas sin proveedor en GBPUSD/US500):
 // - CAUSA RAÍZ (confirmada con /api/state y log de Render del 23/9): (a) Twelve Data llegó a
@@ -1198,6 +1226,8 @@ const NewsCalendar = {
   BACKOFF_MS: 30 * 60 * 1000,
   _cache: null,
   _cacheAt: 0,
+  _lastFailAt: 0,   // v4.8.5: momento del último fallo total (proxy y directo); 0 = sin fallo vigente
+  _inflight: null,  // v4.8.5: promesa del fetch en curso, compartida entre símbolos simultáneos
 
   async _fetchJson(url) {
     const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, {
@@ -1210,26 +1240,33 @@ const NewsCalendar = {
   },
 
   async getEvents() {
-    if (this._cache && (Date.now() - this._cacheAt) < this.CACHE_MS) return this._cache;
+    const now = Date.now();
+    if (this._cache && (now - this._cacheAt) < this.CACHE_MS) return this._cache;
+    // v4.8.5: backoff independiente del cache. Antes solo aplicaba si ya había un fetch exitoso
+    // guardado; sin él, cada símbolo reintentaba en cada ciclo (ver cabecera v4.8.5).
+    if (this._lastFailAt && (now - this._lastFailAt) < this.BACKOFF_MS) return this._cache || [];
+    if (this._inflight) return this._inflight;
+    this._inflight = this._refresh().finally(() => { this._inflight = null; });
+    return this._inflight;
+  },
+
+  async _refresh() {
     try {
       const data = await this._fetchJson(this.PROXY_URL + encodeURIComponent(this.FEED_URL));
-      this._cache = data;
-      this._cacheAt = Date.now();
+      this._cache = data; this._cacheAt = Date.now(); this._lastFailAt = 0;
       return data;
     } catch (proxyError) {
       console.warn('[NewsCalendar] fallo vía proxy, reintentando directo:', proxyError.message);
       try {
         const data = await this._fetchJson(this.FEED_URL);
-        this._cache = data;
-        this._cacheAt = Date.now();
+        this._cache = data; this._cacheAt = Date.now(); this._lastFailAt = 0;
         return data;
       } catch (directError) {
         console.warn('[NewsCalendar] fallo al traer calendario económico (proxy y directo):', directError.message);
         // Si falla, se sigue usando el cache viejo si existe (mejor un calendario un poco
         // desactualizado que dejar de scorear por completo), o array vacío si nunca hubo éxito.
-        // Se marca _cacheAt igual en el fallo, con backoff, para no reintentar de inmediato
-        // y evitar ráfagas (ver FIX 27/8 más arriba).
-        this._cacheAt = Date.now() - this.CACHE_MS + this.BACKOFF_MS;
+        // El backoff se registra en _lastFailAt (v4.8.5), sin tocar _cacheAt.
+        this._lastFailAt = Date.now();
         return this._cache || [];
       }
     }
@@ -3262,11 +3299,32 @@ function cleanupLegacyAutoTuneKeys() {
   try { localStorage.setItem(FLAG, '1'); } catch (e) {}
 }
 
+// NUEVO v4.8.6 (23/9, punto B): ver cabecera. Complementa cleanupLegacyAutoTuneKeys(), que solo
+// detecta keys legacy de símbolos que siguen en ASSETS.
+const RETIRED_SYMBOLS = ['BTCUSD', 'ETHUSD']; // retirados de la app el 20/9
+function cleanupRetiredSymbolAutoTuneKeys() {
+  const FLAG = 'pt_autotune_retired_cleanup_v1';
+  if (localStorage.getItem(FLAG)) return;
+  let removed = 0;
+  [state.autoTuneStats, state.autoConfidenceThreshold].forEach(obj => {
+    Object.keys(obj || {}).forEach(key => {
+      if (RETIRED_SYMBOLS.includes(key)) { delete obj[key]; removed++; } // symbol puro, sin '_estrategia'
+    });
+  });
+  if (removed) {
+    try { localStorage.setItem('pt_auto_stats_v2', JSON.stringify(state.autoTuneStats)); } catch (e) {}
+    try { localStorage.setItem('pt_auto_threshold_v2', JSON.stringify(state.autoConfidenceThreshold)); } catch (e) {}
+    console.log(`[cleanup] ${removed} keys legacy de auto-tune de símbolos retirados (${RETIRED_SYMBOLS.join('/')}) borradas`);
+  }
+  try { localStorage.setItem(FLAG, '1'); } catch (e) {}
+}
+
 retireRemovedSymbols();
 assertStrategyFlagsSync();
 migrateRenamedStrategyKeys();
 seedLiveStatsFromClosedHistory(); // v4.8.2
 cleanupLegacyAutoTuneKeys(); // v4.8.3
+cleanupRetiredSymbolAutoTuneKeys(); // v4.8.6
 applyRetroactiveCircuitBreaker();
 
 module.exports = {
