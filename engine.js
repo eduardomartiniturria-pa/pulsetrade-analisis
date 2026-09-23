@@ -596,7 +596,14 @@ const ASSETS = {
     // v4.6.3: exchangerate (open.er-api.com) pasado a último recurso — su tasa se
     // actualiza 1x/día, no sirve como fuente primaria para seguimiento de SL/TP en vivo.
     // Ver detección de congelamiento en ProviderAdapters.exchangerate.fetchQuote.
-    providerPriority: ['twelveData', 'alphaVantage', 'exchangerate']
+    // FIX (23/9): agregado fmp antes de alphaVantage. Causa raíz confirmada en logs de
+    // Render (23/9): alphaVantage tiene solo 25 pedidos/día compartidos entre XAUUSD,
+    // EURUSD y GBPUSD — se agota temprano y queda excluido casi todo el día, dejando a
+    // EURUSD solo con twelveData (también con cupo limitado) y exchangerate (se congela
+    // tras 15min por ser una tasa que open.er-api actualiza 1x/día). fmp tiene 250
+    // pedidos/día (ya usado por XAUUSD) y da un respaldo real de precio en vivo antes de
+    // caer a la tasa congelada.
+    providerPriority: ['twelveData', 'fmp', 'alphaVantage', 'exchangerate']
   },
   US500: {
     // (20/9) Índice S&P 500. Twelve Data lo publica como 'SPX' y en el plan gratis NO está
@@ -632,7 +639,12 @@ const ASSETS = {
     name: 'GBP/USD', market: 'forex', type: 'forex',
     symbols: { twelveData: 'GBP/USD', finnhub: 'OANDA:GBP_USD', alphaVantage: 'GBPUSD', fmp: 'GBPUSD', exchangerate: 'GBP' },
     decimals: 5, pipSize: 0.0001, is24h: false, timezone: 'UTC', scheduleProfile: 'forex',
-    providerPriority: ['twelveData', 'alphaVantage', 'exchangerate']
+    // FIX (23/9): mismo problema y mismo arreglo que EURUSD (ver nota completa ahí) —
+    // alphaVantage se agota temprano por el cupo de 25/día compartido entre 3 símbolos;
+    // fmp (250/día) agregado como respaldo real antes de caer a exchangerate congelada.
+    // Root cause confirmado en logs de Render del 23/9: GBPUSD llegó a quedar 125min
+    // seguidos con "todos los proveedores fallaron".
+    providerPriority: ['twelveData', 'fmp', 'alphaVantage', 'exchangerate']
   }
 };
 
