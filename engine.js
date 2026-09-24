@@ -977,7 +977,37 @@ const RequestTracker = {
   getUsage(providerName) { const counts = this.load(); const used = counts[providerName] || 0; const limit = PROVIDER_DAILY_LIMITS[providerName]; return { used, limit, pct: limit ? used / limit : 0 }; }
 };
 
+// FIX (24/9): antes del 429 de GBPUSD confirmado en logs de Render, el único control de
+// cupo por minuto era REACTIVO (cooldown de 90s recién después de recibir el 429). El plan
+// Basic de Twelve Data permite 8 créditos/minuto (confirmado en su doc oficial) y el ciclo
+// pide, por símbolo, 1 crédito de cotización + 1 de velas base (+1 de velas HTF cuando no
+// está cacheada) — con 4 símbolos eso ya toca o supera 8 créditos en el mismo minuto. Como
+// GBPUSD siempre se evalúa último en el loop, era sistemáticamente el que se quedaba sin
+// cupo y caía a datos viejos (velas congeladas ~60min). Ahora se espacian los pedidos ANTES
+// de dispararlos en vez de perderlos: si ya se usaron 8 créditos del proveedor en los
+// últimos 60s, se espera lo que falta para que el más viejo salga de la ventana.
+const RATE_LIMIT_PER_MINUTE = { twelveData: 8 };
+const requestTimestamps = {};
+async function waitForRateLimit(providerName) {
+  const limit = RATE_LIMIT_PER_MINUTE[providerName];
+  if (!limit) return;
+  const windowMs = 60 * 1000;
+  const now = Date.now();
+  requestTimestamps[providerName] = (requestTimestamps[providerName] || []).filter(t => now - t < windowMs);
+  const timestamps = requestTimestamps[providerName];
+  if (timestamps.length >= limit) {
+    const waitMs = windowMs - (now - timestamps[0]) + 250;
+    if (waitMs > 0) {
+      console.log(`[rate-limit] ${providerName}: ${timestamps.length}/${limit} creditos usados en el ultimo minuto, esperando ${Math.round(waitMs / 1000)}s antes del proximo pedido`);
+      await sleep(waitMs);
+    }
+    const now2 = Date.now();
+    requestTimestamps[providerName] = requestTimestamps[providerName].filter(t => now2 - t < windowMs);
+  }
+  requestTimestamps[providerName].push(Date.now());
+}
 async function fetchWithTimeout(url, timeout = CONFIG.REQUEST_TIMEOUT, options = {}, providerName = null) {
+  if (providerName) await waitForRateLimit(providerName);
   RequestTracker.record(providerName);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
