@@ -3098,6 +3098,14 @@ async function refreshAsset(symbol, forceRefresh = false) {
     return;
   }
   clearMarketClosedDisplays(symbol);
+  // FIX (24/9): renderSignal() antes solo se llamaba en las ramas de cierre/error
+  // (mercado cerrado, fuera de sesión Londres+NY, MERCADO_CERRADO, fallo de proveedores).
+  // En el camino exitoso nunca se reseteaba state.lastDisplay[symbol], así que el bloque
+  // "signals" de /api/state quedaba congelado con el último mensaje de cierre (ej. de la
+  // madrugada, antes de las 3am NY) aunque el mercado siguiera abierto y el ciclo corriera
+  // normal durante horas. clearMarketClosedDisplays() solo limpia lastCustomDisplay
+  // (customSignals), nunca lastDisplay (signals) — por eso no alcanzaba.
+  renderSignal(symbol, { type: 'no-signal' });
   try {
     // FIX (09/9): getQuote ahora también cae a un fallback (último quote exitoso
     // cacheado en state.lastQuote) en vez de rechazar el Promise.all entero y
