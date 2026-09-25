@@ -100,6 +100,8 @@
   .period-item-top{display:flex;justify-content:space-between;align-items:center}
   .period-item-label{font-size:0.85rem;font-weight:700;color:#f8fafc}
   .period-item-wr{font-size:0.78rem;font-weight:700}
+  .positive{color:#4ade80}
+  .negative{color:#f87171}
   .period-item-wr.positive{color:#4ade80}
   .period-item-wr.negative{color:#f87171}
   .period-item-sub{font-size:0.72rem;color:#64748b;margin-top:2px}
@@ -582,10 +584,15 @@ function pieChartSvg(wins, losses) {
 function strategyBarRow(r) {
   const winPct = r.count ? +((r.wins / r.count) * 100).toFixed(1) : 0;
   const lossPct = 100 - winPct;
+  // FIX (25/9): winrate solo no dice si la estrategia rinde — se agrega el R total
+  // (rentabilidad real, ya calculado en el backend) al lado del %.
+  const rClass = (r.totalR ?? 0) >= 0 ? 'positive' : 'negative';
+  const rText = r.totalR !== null && r.totalR !== undefined
+    ? ` · <span class="${rClass}">${r.totalR > 0 ? '+' : ''}${r.totalR}R</span>` : '';
   return `<div class="strategy-bar-row">
     <div class="strategy-bar-top">
       <span class="strategy-bar-label">${strategyLabel(r.key)}</span>
-      <span class="strategy-bar-value">${r.wins}G/${r.losses}P · ${r.winRate}%</span>
+      <span class="strategy-bar-value">${r.wins}G/${r.losses}P · ${r.winRate}%${rText}</span>
     </div>
     <div class="strategy-bar-track">
       <div class="strategy-bar-win" style="width:${winPct}%"></div>
@@ -601,10 +608,14 @@ function strategyBarRow(r) {
 function renderPeriodAssetBlock(sym, assetSummary) {
   const rows = [...assetSummary.strategyBreakdown].sort((a, b) => b.count - a.count);
   const wrClass = assetSummary.winRate >= 50 ? 'positive' : 'negative';
+  // FIX (25/9): rentabilidad real del activo en el período, no solo winrate.
+  const rClass = (assetSummary.totalR ?? 0) >= 0 ? 'positive' : 'negative';
+  const rText = assetSummary.totalR !== null && assetSummary.totalR !== undefined
+    ? ` · <span class="${rClass}">${assetSummary.totalR > 0 ? '+' : ''}${assetSummary.totalR}R</span>` : '';
   return `<div class="asset-block">
     <div class="asset-block-header">
       <span class="asset-block-name">${sym}</span>
-      <span class="asset-block-wr ${wrClass}">Winrate ${assetSummary.winRate}%</span>
+      <span class="asset-block-wr ${wrClass}">Winrate ${assetSummary.winRate}%${rText}</span>
     </div>
     <div class="asset-block-summary">✅ ${assetSummary.wins} ganadas · 🛑 ${assetSummary.losses} perdidas · ${assetSummary.total} op.</div>
     ${rows.map(strategyBarRow).join('')}
@@ -630,12 +641,18 @@ function renderPeriodDetail() {
     .sort((a, b) => bySymbol[b].total - bySymbol[a].total);
 
   const wrClass = summary.winRate >= 50 ? 'positive' : 'negative';
+  // FIX (25/9): rentabilidad real del período completo (todos los activos), la pieza
+  // que faltaba junto al winrate.
+  const rClass = (summary.totalR ?? 0) >= 0 ? 'positive' : 'negative';
+  const rText = summary.totalR !== null && summary.totalR !== undefined
+    ? `${summary.totalR > 0 ? '+' : ''}${summary.totalR}R` : '—';
   el.innerHTML = `<div class="period-detail">
     <div class="pie-block">
       ${pieChartSvg(summary.wins, summary.losses)}
       <div>
         <div class="pie-summary-total">${summary.total} operaciones</div>
         <div class="pie-summary-wr ${wrClass}">Winrate ${summary.winRate}%</div>
+        <div class="pie-summary-wr ${rClass}">Rentabilidad ${rText} <span style="opacity:.7;font-weight:400">(${summary.avgR !== null && summary.avgR !== undefined ? (summary.avgR > 0 ? '+' : '') + summary.avgR : '—'}R prom./operación)</span></div>
         <div class="pie-summary-legend">
           <span><span class="pie-legend-dot win"></span>${summary.wins} ganadas</span>
           <span><span class="pie-legend-dot loss"></span>${summary.losses} perdidas</span>
