@@ -217,24 +217,35 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     const losses = entries.filter(e => e.result === 'loss').length;
     const total = wins + losses;
     const winRate = total ? +((wins / total) * 100).toFixed(1) : null;
+    // FIX (25/9): winrate no es rentabilidad — una estrategia puede tener buen % de
+    // aciertos y perder plata (SL grandes, TP chicos) o al revés. Se suma rMultiple real
+    // sobre TODAS las entries que lo tengan numérico (incluye 'expired', que también
+    // impacta el resultado real aunque no cuente para winrate), no solo win/loss.
+    const withR = entries.filter(e => typeof e.rMultiple === 'number');
+    const totalR = +withR.reduce((sum, e) => sum + e.rMultiple, 0).toFixed(2);
+    const avgR = withR.length ? +(totalR / withR.length).toFixed(2) : null;
     const byStrategy = {};
     entries.forEach(e => {
       const key = e.source || 'smc';
-      if (!byStrategy[key]) byStrategy[key] = { wins: 0, losses: 0 };
+      if (!byStrategy[key]) byStrategy[key] = { wins: 0, losses: 0, totalR: 0, rCount: 0 };
       if (e.result === 'win') byStrategy[key].wins++;
       else if (e.result === 'loss') byStrategy[key].losses++;
+      if (typeof e.rMultiple === 'number') { byStrategy[key].totalR += e.rMultiple; byStrategy[key].rCount++; }
     });
     const strategyBreakdown = Object.entries(byStrategy)
       .map(([key, s]) => {
         const stotal = s.wins + s.losses;
+        const sTotalR = +s.totalR.toFixed(2);
         return {
           key, wins: s.wins, losses: s.losses, count: stotal,
           winRate: stotal ? +((s.wins / stotal) * 100).toFixed(1) : null,
-          pct: total ? +((stotal / total) * 100).toFixed(1) : 0
+          pct: total ? +((stotal / total) * 100).toFixed(1) : 0,
+          totalR: sTotalR,
+          avgR: s.rCount ? +(sTotalR / s.rCount).toFixed(2) : null
         };
       })
       .sort((a, b) => b.count - a.count);
-    return { wins, losses, total, winRate, strategyBreakdown };
+    return { wins, losses, total, winRate, totalR, avgR, strategyBreakdown };
   }
 
   // Mismo resumen que arriba, pero separado por activo (incluye BTCUSD/ETHUSD ya retirados,
