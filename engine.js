@@ -1,5 +1,25 @@
 // ============================================================
-// PULSE TRADE v4.8.7 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.8-S2 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.8.8-S2 (25-26/9, auditoría de rentabilidad — S2 porque engineVersion ya
+// traía el string 4.8.8-S2 sin el bloque de changelog correspondiente; se documenta acá
+// para que el header quede coherente con lo que corre):
+// - FIX 1 (25/9): getCircuitBreakerThreshold() leía state.strategyStatsBySymbol (mezcla
+//   seed histórico + real en vivo) para decidir si una combinación calificaba para el
+//   umbral tolerante (qualifiedThreshold). Ahora lee state.liveStrategyStatsBySymbol
+//   (solo real, excluye shadow), para no calificar con expectancy vieja que ya no
+//   representa el desempeño real reciente.
+// - FIX 2 (26/9): mismo problema en computeContextualScore() — el factor de historial
+//   (+10/-15 de confianza) recibía state.strategyStatsBySymbol como symbolStats desde
+//   el llamado a CustomStrategies.evaluateAll(). Ahora recibe
+//   state.liveStrategyStatsBySymbol[symbol].
+// - FIX 3 (25/9): SHADOW_MODE.symbols pasó de ['US500','GBPUSD'] a [] — los 4 símbolos
+//   operan en vivo con push y riesgo real, sin la espera de 12 operaciones sombra.
+// - FIX 4 (26/9): assertStrategyFlagsSync() no cubría SESSION_BREAKOUT_VWAP_ENABLED, la
+//   única estrategia ACTIVA con flag propio en custom-strategies.js. Se agregó el check
+//   y se exportó el flag (faltaba, hubiera tirado el servidor abajo al arrancar).
+// - NO cambia ningún parámetro de estrategia, SL/TP ni umbral de confianza en sí —
+//   solo la FUENTE de datos que alimenta el circuit breaker y el score.
 // ============================================================
 // Cambios v4.8.7 (23/9, hallazgo T1 de la auditoría del punto E: velas en formación):
 // - CAUSA RAÍZ (confirmada con /api/state: candleAge.inProgressPct=100 en todos los activos):
