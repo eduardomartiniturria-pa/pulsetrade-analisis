@@ -1697,6 +1697,11 @@ module.exports = {
   SESSION_FALSE_BREAKOUT_ENABLED,
   PRICE_ACTION_RSI_EMA_ENABLED,
   RSI_DIVERGENCE_ENABLED,
+  // NUEVO (26/9): faltaba exportar este flag — SESSION_BREAKOUT_VWAP_SYMBOLS ya se
+  // exportaba, pero no ENABLED. Sin esto, el nuevo check de assertStrategyFlagsSync()
+  // en engine.js (26/9) hubiera comparado contra undefined y tirado el servidor abajo
+  // al arrancar.
+  SESSION_BREAKOUT_VWAP_ENABLED,
   SESSION_BREAKOUT_VWAP_SYMBOLS
 };
 
