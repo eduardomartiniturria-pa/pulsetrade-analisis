@@ -2351,9 +2351,16 @@ function checkCircuitBreakerAggregate(key, result) {
 // positiva -> defaultThreshold (estricto). Con historial real y expectancy positiva
 // -> qualifiedThreshold (más tolerante, para no apagar una estrategia buena por una
 // racha normal de varianza).
+// FIX (25/9): antes leía state.strategyStatsBySymbol, que mezcla el seed histórico/
+// backtest con lo real en vivo. Eso podía calificar una combinación para el umbral
+// tolerante (5) usando expectancy vieja, aunque el desempeño real reciente
+// (state.liveStrategyStatsBySymbol, que ya excluye señales shadow) fuera negativo.
+// Ahora decide solo con datos reales en vivo — sin trades reales todavía, cae a
+// defaultThreshold (mismo comportamiento conservador que antes para combos sin
+// historial).
 function getCircuitBreakerThreshold(symbol, key) {
   const cb = CONFIG.CIRCUIT_BREAKER;
-  const stats = state.strategyStatsBySymbol[symbol] && state.strategyStatsBySymbol[symbol][key];
+  const stats = state.liveStrategyStatsBySymbol[symbol] && state.liveStrategyStatsBySymbol[symbol][key];
   if (stats) {
     const total = (stats.wins || 0) + (stats.losses || 0);
     const avgR = stats.avgR != null ? stats.avgR : (total > 0 ? (stats.totalR || 0) / total : 0);
