@@ -310,6 +310,61 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     res.json({ period, anchor: date, days: dayKeys, ...summary, bySymbol });
   });
 
+  // ---------------------------------------------------------
+  // Rentabilidad real por combinación símbolo+estrategia (P0, 25/9). Solo lectura,
+  // no toca engine.js ni custom-strategies.js. Recorre TODO el historial cerrado vía
+  // getClosedSignalsForDay (ya filtra !e.shadow, igual que /api/history), agrupa por
+  // symbol_key y aplica el mismo piso de muestra que usa el circuit breaker
+  // (CONFIG.CIRCUIT_BREAKER.qualifiedMinSample) para no mostrar una racha corta como
+  // si fuera un patrón real. Devuelve ordenado de mejor a peor avgR, separando lo que
+  // tiene muestra suficiente de lo que todavía no.
+  app.get('/api/profitability', (req, res) => {
+    let days;
+    try { days = JSON.parse(localStorage.getItem('closed_signals_days') || '[]'); }
+    catch (e) { days = []; }
+    const entries = days.flatMap(getClosedSignalsForDay);
+
+    const byCombo = {};
+    entries.forEach(e => {
+      const symbol = e.symbol || 'unknown';
+      const key = e.source || 'smc';
+      const comboKey = `${symbol}_${key}`;
+      if (!byCombo[comboKey]) byCombo[comboKey] = { symbol, key, wins: 0, losses: 0, totalR: 0, rCount: 0 };
+      const c = byCombo[comboKey];
+      if (e.result === 'win') c.wins++;
+      else if (e.result === 'loss') c.losses++;
+      if (typeof e.rMultiple === 'number') { c.totalR += e.rMultiple; c.rCount++; }
+    });
+
+    const minSample = (CONFIG.CIRCUIT_BREAKER && CONFIG.CIRCUIT_BREAKER.qualifiedMinSample) || 15;
+    const combos = Object.values(byCombo).map(c => {
+      const total = c.wins + c.losses;
+      const totalR = +c.totalR.toFixed(2);
+      return {
+        symbol: c.symbol,
+        strategy: c.key,
+        wins: c.wins,
+        losses: c.losses,
+        total,
+        winRate: total ? +((c.wins / total) * 100).toFixed(1) : null,
+        totalR,
+        avgR: c.rCount ? +(totalR / c.rCount).toFixed(2) : null,
+        sampleSufficient: total >= minSample
+      };
+    });
+
+    const qualified = combos.filter(c => c.sampleSufficient).sort((a, b) => (b.avgR || 0) - (a.avgR || 0));
+    const unqualified = combos.filter(c => !c.sampleSufficient).sort((a, b) => (b.total || 0) - (a.total || 0));
+
+    res.json({
+      minSample,
+      best: qualified[0] || null,
+      worst: qualified.length ? qualified[qualified.length - 1] : null,
+      qualified,
+      unqualified
+    });
+  });
+
   // Usado por el "pinger" externo (cron-job.org) para mantener despierto el server gratuito
   // Y como probe de salud.
   app.get('/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }));
