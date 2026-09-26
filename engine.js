@@ -3378,7 +3378,12 @@ function assertStrategyFlagsSync() {
     // ni ensuciar logs con señales que la whitelist descarta igual.
     { flag: 'SESSION_FALSE_BREAKOUT_ENABLED', key: 'session_false_breakout', value: CustomStrategies.SESSION_FALSE_BREAKOUT_ENABLED },
     { flag: 'PRICE_ACTION_RSI_EMA_ENABLED', key: 'price_action_rsi_ema', value: CustomStrategies.PRICE_ACTION_RSI_EMA_ENABLED },
-    { flag: 'RSI_DIVERGENCE_ENABLED', key: 'rsi_divergence', value: CustomStrategies.RSI_DIVERGENCE_ENABLED }
+    { flag: 'RSI_DIVERGENCE_ENABLED', key: 'rsi_divergence', value: CustomStrategies.RSI_DIVERGENCE_ENABLED },
+    // NUEVO (26/9, punto 2 del respaldo del 25/9): faltaba cubrir la única estrategia
+    // ACTIVA que depende de un flag booleano en custom-strategies.js. Sin este check,
+    // apagar SESSION_BREAKOUT_VWAP_ENABLED de un lado sin sacar 'session_breakout_vwap'
+    // de ENABLED_STRATEGIES (o viceversa) quedaba desincronizado en silencio.
+    { flag: 'SESSION_BREAKOUT_VWAP_ENABLED', key: 'session_breakout_vwap', value: CustomStrategies.SESSION_BREAKOUT_VWAP_ENABLED }
   ];
   checks.forEach(({ flag, key, value }) => {
     const inWhitelist = CONFIG.ENABLED_STRATEGIES.includes(key);
