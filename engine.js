@@ -584,9 +584,15 @@ const CONFIG = {
   // XAUUSD/EURUSD salen de sombra y el "círculo cerrado" se rompe de otra forma: siembra de su
   // historial real cerrado (ver PROFITABILITY_ENGINE_V1.seedFromClosedHistory y
   // seedLiveStatsFromClosedHistory()).
+  // DECISIÓN (25/9): se saca a US500/GBPUSD del modo sombra. Motivo: con la app
+  // hecha para mandar señales, tener 2 de 4 activos sin push ni riesgo real durante
+  // semanas (mientras juntan las 12 operaciones de PROFITABILITY_ENGINE_V1.minLiveSample)
+  // contradice el propósito de la app — no genera ganancia, solo evita una pérdida
+  // hipotética, y ese costo de oportunidad ya no se justifica. Pasan a operar igual
+  // que XAUUSD/EURUSD: señal real, push, riskWeight normal, desde ya.
   SHADOW_MODE: {
     enabled: true,
-    symbols: ['US500', 'GBPUSD']
+    symbols: []
   },
   // NUEVO (16/9, plan de rentabilidad, punto 5): modo probation/sombra para
   // estrategias nuevas — corren y guardan historial normalmente, pero sin
@@ -3217,8 +3223,15 @@ async function refreshAsset(symbol, forceRefresh = false) {
       // dentro de ±60min, si lo hay. Uso exclusivo de computeContextualScore(): ajusta
       // el mismo score informativo que ya existe, no agrega campos nuevos a la señal
       // ni se muestra en la UI (decisión explícita de Soy).
+      // FIX (26/9): antes se pasaba state.strategyStatsBySymbol[symbol], que mezcla
+      // seed histórico/backtest con lo real en vivo — mismo problema ya corregido en
+      // getCircuitBreakerThreshold() (25/9). El factor de historial de
+      // computeContextualScore() podía sumar/restar puntos de confianza (+10/-15) según
+      // un winrate viejo que ya no representa el desempeño real reciente. Ahora usa
+      // state.liveStrategyStatsBySymbol[symbol] (solo real, excluye shadow), igual que
+      // el circuit breaker.
        const newsContext = await NewsCalendar.getNearbyHighImpact(NEWS_CURRENCIES_BY_SYMBOL[symbol] || ['USD'], 60);
-      const rawSignals = CustomStrategies.evaluateAll(closedCandles, symbol, asset, closedHtfCandles, state.strategyStatsBySymbol[symbol] || null, newsContext, CONFIG.MIN_CONFIDENCE_SCORE);
+      const rawSignals = CustomStrategies.evaluateAll(closedCandles, symbol, asset, closedHtfCandles, state.liveStrategyStatsBySymbol[symbol] || null, newsContext, CONFIG.MIN_CONFIDENCE_SCORE);
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
       const filteredSignals = rawSignals.filter(sig => {
         if (!CONFIG.ENABLED_STRATEGIES.includes(sig.strategy)) {
