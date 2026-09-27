@@ -1,5 +1,26 @@
 // ============================================================
-// PULSE TRADE v4.8.8-S2 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.9 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.8.9 (27/9, plan de rentabilidad punto 8 — reactivación inteligente):
+// - Hasta esta versión, disableCombinationByCircuitBreaker() apagaba una combinación
+//   símbolo+estrategia para siempre: nada la volvía a prender (confirmado revisando
+//   todo el archivo, el único `delete state.autoDisabledStrategies[...]` que existía
+//   era el de la migración de nombres de estrategia, no una reactivación real).
+// - NUEVO: CONFIG.CIRCUIT_BREAKER_REACTIVATION, 3 capas, mismo patrón que
+//   PROFITABILITY_ENGINE_V1.PROBATION (riesgo reducido + sin push mientras junta
+//   muestra nueva, sin mezclarla con la racha que la apagó):
+//   1) cooldown (7 días por defecto) desde que se auto-desactivó.
+//   2) al cumplirse, checkReactivationEligibility() (corre 1 vez por ciclo completo,
+//      ver refreshAllData) la saca de DISABLED_STRATEGIES_BY_SYMBOL y la mete en
+//      state.reactivationTesting — vuelve a operar con testRiskMultiplier (0.5x) y
+//      sin push.
+//   3) checkReactivationOutcome() (mismo punto que actualiza stats en
+//      checkHistoryOutcomes) decide al llegar a testSampleSize (5) operaciones:
+//      totalR > 0 => reactivación completa (push avisando); si no, o si el circuit
+//      breaker normal ya la volvió a apagar durante la prueba, vuelve a apagarse y
+//      el cooldown arranca de nuevo.
+// - NO cambia ningún parámetro de estrategia, SL/TP, umbral de confianza ni ninguna
+//   de las reglas existentes del circuit breaker o del Motor de Rentabilidad V1.
 // ============================================================
 // Cambios v4.8.8-S2 (25-26/9, auditoría de rentabilidad — S2 porque engineVersion ya
 // traía el string 4.8.8-S2 sin el bloque de changelog correspondiente; se documenta acá
@@ -483,6 +504,16 @@ const CONFIG = {
     defaultThreshold: 2,
     consecutiveLossThresholdAggregate: 8
   },
+  // NUEVO (27/9, plan de rentabilidad, punto 8 — reactivación inteligente): ver
+  // changelog v4.8.9 en el header. Solo aplica a combinaciones que autoDisabledStrategies
+  // registró (apagado AUTOMÁTICO del circuit breaker); una entrada puesta a mano por
+  // Soy en DISABLED_STRATEGIES_BY_SYMBOL nunca pasa por acá.
+  CIRCUIT_BREAKER_REACTIVATION: {
+    enabled: true,
+    cooldownMs: 7 * 24 * 60 * 60 * 1000, // 7 días
+    testSampleSize: 5,
+    testRiskMultiplier: 0.5
+  },
   // FIX (auditoría 18/9 v2, bug confirmado con /api/state real): 'kill_zone_ny' es un
   // rename de 'ny_open_kill_zone' (30/8), pero el rename nunca migró
   // state.strategyStatsBySymbol/consecutiveLosses/autoDisabledStrategies de la key
@@ -783,6 +814,11 @@ let state = {
   // decisiones tomadas a mano por Soy ni perder el motivo de cada apagado automático.
   consecutiveLosses: (() => { try { return JSON.parse(localStorage.getItem('pt_consecutive_losses') || '{}'); } catch (e) { return {}; } })(),
   autoDisabledStrategies: (() => { try { return JSON.parse(localStorage.getItem('pt_auto_disabled_strategies') || '{}'); } catch (e) { return {}; } })(),
+  // NUEVO (27/9, reactivación inteligente): combinaciones actualmente en fase de
+  // prueba tras cumplir el cooldown — ver CONFIG.CIRCUIT_BREAKER_REACTIVATION,
+  // checkReactivationEligibility() y checkReactivationOutcome(). Su propio contador
+  // (wins/losses/totalR), separado del historial que las apagó.
+  reactivationTesting: (() => { try { return JSON.parse(localStorage.getItem('pt_reactivation_testing') || '{}'); } catch (e) { return {}; } })(),
   // v4.9 (sección 14, 27/8): circuit breaker agregado por estrategia sola (suma los 4
   // símbolos). El breaker original (arriba) es por combinación símbolo+estrategia — una
   // racha mala repartida entre BTC/ETH/EUR/XAU nunca concentra 5 seguidas en ninguna
@@ -2446,6 +2482,84 @@ function checkCircuitBreaker(symbol, key, result) {
   if (state.consecutiveLosses[ckey] < threshold) return;
   disableCombinationByCircuitBreaker(symbol, key, state.consecutiveLosses[ckey]);
 }
+// NUEVO (27/9, reactivación inteligente): corre 1 vez por ciclo completo (ver
+// refreshAllData). Para cada combinación en autoDisabledStrategies que todavía no
+// está en reactivationTesting, si ya pasó cooldownMs desde disabledAt, sale de
+// DISABLED_STRATEGIES_BY_SYMBOL (vuelve a generar señales) y arranca su fase de
+// prueba. No toca autoDisabledStrategiesAggregate (breaker agregado) ni nada puesto
+// a mano por Soy en DISABLED_STRATEGIES_BY_SYMBOL — ver nota en el config.
+function checkReactivationEligibility() {
+  const cfg = CONFIG.CIRCUIT_BREAKER_REACTIVATION;
+  if (!cfg || !cfg.enabled) return;
+  const now = Date.now();
+  Object.entries(state.autoDisabledStrategies).forEach(([ckey, info]) => {
+    if (state.reactivationTesting[ckey]) return; // ya en prueba
+    if (now - info.disabledAt < cfg.cooldownMs) return; // cooldown no cumplido
+    const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[info.symbol] || [];
+    const idx = disabledForSymbol.indexOf(info.key);
+    if (idx !== -1) disabledForSymbol.splice(idx, 1);
+    state.reactivationTesting[ckey] = { symbol: info.symbol, key: info.key, startedAt: now, wins: 0, losses: 0, totalR: 0 };
+    localStorage.setItem('pt_reactivation_testing', JSON.stringify(state.reactivationTesting));
+    console.log(`[REACTIVACIÓN] ${ckey}: cooldown cumplido (${Math.round((now - info.disabledAt) / 86400000)} días) — entra en fase de prueba (${cfg.testSampleSize} operaciones, riesgo x${cfg.testRiskMultiplier}, sin push)`);
+    addLog('reactivation', `${info.key} entra en fase de prueba tras cooldown de circuit breaker`, info.symbol);
+  });
+}
+// NUEVO (27/9, reactivación inteligente): se llama junto al resto de updates de
+// resultado (mismo forEach que updateStrategyStatsBySymbol/updateLiveProfitabilityStats,
+// ver checkHistoryOutcomes) para cualquier combinación en state.reactivationTesting.
+// Corre DESPUÉS de updateStrategyStatsBySymbol (que ya llamó a checkCircuitBreaker):
+// si esta misma pérdida volvió a apagar la combinación, la prueba se corta acá sin
+// esperar a juntar testSampleSize completo — "fail fast".
+function checkReactivationOutcome(entry) {
+  if (entry.result !== 'win' && entry.result !== 'loss') return;
+  const symbol = entry.symbol, key = entry.source || 'legacy_untagged';
+  const ckey = `${symbol}_${key}`;
+  const test = state.reactivationTesting[ckey];
+  if (!test) return;
+
+  if (state.autoDisabledStrategies[ckey] && state.autoDisabledStrategies[ckey].disabledAt >= test.startedAt) {
+    delete state.reactivationTesting[ckey];
+    localStorage.setItem('pt_reactivation_testing', JSON.stringify(state.reactivationTesting));
+    console.log(`[REACTIVACIÓN] ${ckey}: el circuit breaker la volvió a apagar durante la prueba (${test.wins}G/${test.losses}P) — cooldown reinicia`);
+    return;
+  }
+
+  if (entry.result === 'win') test.wins++; else test.losses++;
+  const r = entry.rMultiple != null ? entry.rMultiple : (entry.result === 'win' ? 2 : -1);
+  test.totalR = +((test.totalR || 0) + r).toFixed(2);
+  const sample = test.wins + test.losses;
+
+  const cfg = CONFIG.CIRCUIT_BREAKER_REACTIVATION;
+  if (sample < cfg.testSampleSize) {
+    localStorage.setItem('pt_reactivation_testing', JSON.stringify(state.reactivationTesting));
+    return;
+  }
+
+  if (test.totalR > 0) {
+    delete state.reactivationTesting[ckey];
+    delete state.autoDisabledStrategies[ckey];
+    state.consecutiveLosses[ckey] = 0;
+    localStorage.setItem('pt_auto_disabled_strategies', JSON.stringify(state.autoDisabledStrategies));
+    localStorage.setItem('pt_consecutive_losses', JSON.stringify(state.consecutiveLosses));
+    localStorage.setItem('pt_reactivation_testing', JSON.stringify(state.reactivationTesting));
+    console.log(`[REACTIVACIÓN] ${ckey} graduada tras ${sample} operaciones de prueba (${test.totalR}R) — reactivación completa, riesgo normal`);
+    sendPushToAll({
+      title: '🔄 Estrategia reactivada',
+      body: `${key} en ${symbol} pasó la fase de prueba (${sample} operaciones, ${test.totalR > 0 ? '+' : ''}${test.totalR}R) — vuelve a operar con tamaño normal.`,
+      signal: { strategy: key, symbol, reactivated: true }
+    }).catch(err => console.error('Error enviando push de reactivación:', err.message));
+  } else {
+    delete state.reactivationTesting[ckey];
+    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol]) CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] = [];
+    if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
+      CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].push(key);
+    }
+    state.autoDisabledStrategies[ckey] = { symbol, key, disabledAt: Date.now(), lossStreak: state.consecutiveLosses[ckey] || 0, reactivationFailed: true };
+    localStorage.setItem('pt_auto_disabled_strategies', JSON.stringify(state.autoDisabledStrategies));
+    localStorage.setItem('pt_reactivation_testing', JSON.stringify(state.reactivationTesting));
+    console.log(`[REACTIVACIÓN] ${ckey} no pasó la prueba (${sample} operaciones, ${test.totalR}R) — vuelve a apagarse, cooldown reinicia`);
+  }
+}
 function seedStrategyStatsFromBacktest(resultsBySymbol) {
   Object.entries(resultsBySymbol).forEach(([symbol, r]) => {
     state.strategyStatsBySymbol[symbol] = state.strategyStatsBySymbol[symbol] || {};
@@ -2651,7 +2765,7 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
   });
   if (changed) {
     localStorage.setItem('pt_v4_signals', JSON.stringify(state.signalHistory));
-    resolvedEntries.forEach(entry => { updatePatternStats(entry); updateStrategyStatsBySymbol(entry); updateLiveProfitabilityStats(entry); appendClosedSignal(entry); });
+    resolvedEntries.forEach(entry => { updatePatternStats(entry); updateStrategyStatsBySymbol(entry); updateLiveProfitabilityStats(entry); checkReactivationOutcome(entry); appendClosedSignal(entry); });
     runAutoTune(symbol);
   }
 }
@@ -2989,10 +3103,16 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
       // multiplicador de riesgo original (STRATEGY_RISK_WEIGHT) se reduce además por
       // probationRiskMultiplier — no lo reemplaza, se combinan (ej. 1.5x * 0.5 = 0.75x).
       // (20/9) en modo sombra el tamaño sugerido es 0 (no operar con dinero real).
+      // NUEVO (27/9, reactivación inteligente): si esta combinación está en
+      // state.reactivationTesting (cooldown del circuit breaker cumplido, juntando
+      // muestra nueva), el multiplicador se combina con los ya existentes — mismo
+      // patrón que probationRiskMultiplier.
       riskWeight: (profitabilityDecision && profitabilityDecision.decision === 'SHADOW') ? 0 :
         ((CONFIG.STRATEGY_RISK_WEIGHT && CONFIG.STRATEGY_RISK_WEIGHT[customSig.strategy]) || 1) *
-        ((profitabilityDecision && profitabilityDecision.decision === 'PROBATION') ? profitabilityDecision.riskMultiplier : 1),
+        ((profitabilityDecision && profitabilityDecision.decision === 'PROBATION') ? profitabilityDecision.riskMultiplier : 1) *
+        (state.reactivationTesting[key] ? CONFIG.CIRCUIT_BREAKER_REACTIVATION.testRiskMultiplier : 1),
       shadow: !!(profitabilityDecision && profitabilityDecision.decision === 'SHADOW'),
+      reactivationTesting: !!state.reactivationTesting[key],
       profitabilityMode: (profitabilityDecision && profitabilityDecision.decision === 'SHADOW') ? 'shadow' :
         ((profitabilityDecision && profitabilityDecision.decision === 'PROBATION') ? 'probation' : 'ok'),
       profitabilityReason: profitabilityDecision ? profitabilityDecision.reason : null,
@@ -3021,6 +3141,8 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
       addLog(quote.source, `[${customSig.label}] señal ${customSig.direction === 'long' ? 'LONG' : 'SHORT'} registrada en MODO SOMBRA (sin push, tamaño 0) — ${symbol} juntando muestra LIVE`, symbol);
     } else if (inProbation) {
       addLog(quote.source, `[${customSig.label}] señal ${customSig.direction === 'long' ? 'LONG' : 'SHORT'} registrada en modo probation (sin push) — estrategia nueva, esperando muestra mínima`, symbol);
+    } else if (frozen.reactivationTesting) {
+      addLog(quote.source, `[${customSig.label}] señal ${customSig.direction === 'long' ? 'LONG' : 'SHORT'} registrada en fase de prueba de reactivación (sin push, riesgo x${CONFIG.CIRCUIT_BREAKER_REACTIVATION.testRiskMultiplier}) — ${symbol}`, symbol);
     } else {
       notifyNewSignal(frozen);
     }
@@ -3134,7 +3256,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.8-S2',
+    engineVersion: '4.8.9',
     generatedAt: Date.now()
   };
 }
@@ -3287,6 +3409,7 @@ async function refreshAsset(symbol, forceRefresh = false) {
 }
 async function refreshAllData(forceRefresh = false) {
   renderTradingHoursBar();
+  checkReactivationEligibility(); // 27/9: 1 vez por ciclo completo, antes de evaluar cualquier símbolo
   if (forceRefresh) setLoading(true, 'Consultando proveedores de datos...');
   try {
     for (const symbol of Object.keys(ASSETS)) {
