@@ -370,6 +370,121 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
     });
   });
 
+  // ---------------------------------------------------------
+  // NUEVO (27/9, plan de rentabilidad punto 13 — "IA como analista"): reusa EXACTAMENTE
+  // el mismo cálculo de /api/profitability (mismo piso de muestra qualifiedMinSample,
+  // misma fuente 100% LIVE vía getClosedSignalsForDay, que ya excluye shadow) — se
+  // factoriza acá para no duplicar la lógica entre los dos endpoints.
+  // La IA es analista, no decide operaciones: el prompt se lo prohíbe explícitamente
+  // (regla del propio plan, punto 13). Nunca se le pasan señales activas ni se usa su
+  // respuesta para generar ni bloquear ninguna señal — es de solo lectura, un texto
+  // que Soy lee, exactamente como pidió el plan.
+  function computeProfitabilityCombos() {
+    let days;
+    try { days = JSON.parse(localStorage.getItem('closed_signals_days') || '[]'); }
+    catch (e) { days = []; }
+    const entries = days.flatMap(getClosedSignalsForDay);
+
+    const byCombo = {};
+    entries.forEach(e => {
+      const symbol = e.symbol || 'unknown';
+      const key = e.source || 'smc';
+      const comboKey = `${symbol}_${key}`;
+      if (!byCombo[comboKey]) byCombo[comboKey] = { symbol, key, wins: 0, losses: 0, totalR: 0, rCount: 0 };
+      const c = byCombo[comboKey];
+      if (e.result === 'win') c.wins++;
+      else if (e.result === 'loss') c.losses++;
+      if (typeof e.rMultiple === 'number') { c.totalR += e.rMultiple; c.rCount++; }
+    });
+
+    const minSample = (CONFIG.CIRCUIT_BREAKER && CONFIG.CIRCUIT_BREAKER.qualifiedMinSample) || 15;
+    const combos = Object.values(byCombo).map(c => {
+      const total = c.wins + c.losses;
+      const totalR = +c.totalR.toFixed(2);
+      return {
+        symbol: c.symbol, strategy: c.key, wins: c.wins, losses: c.losses, total,
+        winRate: total ? +((c.wins / total) * 100).toFixed(1) : null,
+        totalR, avgR: c.rCount ? +(totalR / c.rCount).toFixed(2) : null,
+        sampleSufficient: total >= minSample
+      };
+    });
+    return {
+      minSample,
+      qualified: combos.filter(c => c.sampleSufficient).sort((a, b) => (b.avgR || 0) - (a.avgR || 0)),
+      unqualified: combos.filter(c => !c.sampleSufficient).sort((a, b) => (b.total || 0) - (a.total || 0))
+    };
+  }
+
+  // DeepSeek: API compatible con el formato de OpenAI (POST /chat/completions), precio
+  // por token muy bajo — apropiado para un análisis puntual de un puñado de filas de
+  // stats, no para tráfico por señal. Se agrega DEEPSEEK_API_KEY en las variables de
+  // entorno de Render (no confundir con ninguna cuenta de la app de chat: las apps de
+  // chat con plan gratuito NO dan una API key server-side utilizable acá — la key sale
+  // del panel de developer de la plataforma, platform.deepseek.com).
+  async function callDeepSeekAnalysis(qualified, unqualified, minSample) {
+    const apiKey = process.env.DEEPSEEK_API_KEY;
+    if (!apiKey) {
+      const err = new Error('DEEPSEEK_API_KEY no configurada en las variables de entorno de Render');
+      err.code = 'NO_API_KEY';
+      throw err;
+    }
+    const tableLine = c => `${c.symbol} | ${c.strategy} | ${c.total} ops | ${c.winRate}% winrate | ${c.avgR}R promedio | ${c.totalR}R total`;
+    const prompt = [
+      `Datos REALES de operaciones LIVE de PulseTrade PRO (nunca shadow/backtest), agrupados por símbolo+estrategia.`,
+      `Combinaciones con muestra suficiente (>=${minSample} operaciones cerradas, el mismo piso que usa el circuit breaker):`,
+      qualified.length ? qualified.map(tableLine).join('\n') : '(ninguna combinación llegó todavía a la muestra mínima)',
+      ``,
+      `Combinaciones con muestra insuficiente (informativo, no sacar conclusiones fuertes todavía):`,
+      unqualified.length ? unqualified.map(tableLine).join('\n') : '(ninguna)'
+    ].join('\n');
+
+    const res = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        messages: [
+          {
+            role: 'system',
+            content: 'Sos un analista cuantitativo de trading. Se te da una tabla de resultados REALES ' +
+              '(ya cerrados, LIVE) de un motor de señales, agrupados por símbolo+estrategia. Tu única tarea ' +
+              'es detectar patrones: qué combinación rinde, cuál no, si hay algo inusual (ej. una estrategia ' +
+              'que solo funciona en un símbolo, un horario, o que empeoró con el tiempo). ' +
+              'NUNCA sugieras abrir una operación, NUNCA inventes una señal, NUNCA dictamines "comprar/vender ' +
+              'ahora" — no tenés precio en vivo ni contexto de mercado actual, solo el historial cerrado. ' +
+              'Si la muestra es chica, decilo explícitamente en vez de sacar una conclusión fuerte. Respondé ' +
+              'en español, en prosa corta, sin inventar números que no están en la tabla.'
+          },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.3
+      })
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      const err = new Error(`DeepSeek respondió ${res.status}: ${body.slice(0, 300)}`);
+      err.code = 'API_ERROR';
+      throw err;
+    }
+    const data = await res.json();
+    return data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || null;
+  }
+
+  // Bajo demanda (etapa 1, regla del proyecto: una modificación por vez). Si funciona
+  // bien acá, el siguiente paso natural es programarlo 1x/día y avisar por push —
+  // deliberadamente NO se agrega automático todavía, para verificar esta parte sola
+  // primero.
+  app.get('/api/ai-analysis', async (req, res) => {
+    const { qualified, unqualified, minSample } = computeProfitabilityCombos();
+    try {
+      const analysis = await callDeepSeekAnalysis(qualified, unqualified, minSample);
+      res.json({ minSample, analysis, basedOn: { qualified, unqualified }, generatedAt: Date.now() });
+    } catch (e) {
+      const status = e.code === 'NO_API_KEY' ? 501 : 502;
+      res.status(status).json({ error: e.message, code: e.code || 'UNKNOWN' });
+    }
+  });
+
   // Usado por el "pinger" externo (cron-job.org) para mantener despierto el server gratuito
   // Y como probe de salud.
   app.get('/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }));
