@@ -84,6 +84,11 @@ const Subscriptions = require('./subscriptions'); // también async: ahora persi
       // nunca al umbral, sin esperar a que Render conserve logs viejos.
       consecutiveLosses: state.consecutiveLosses || {},
       autoDisabledStrategies: state.autoDisabledStrategies || {},
+      // NUEVO (27/9, reactivación inteligente): combinaciones que ya cumplieron el
+      // cooldown de CIRCUIT_BREAKER_REACTIVATION y están juntando muestra nueva
+      // (wins/losses/totalR propios, riesgo reducido, sin push) antes del veredicto
+      // final — ver engine.js:checkReactivationEligibility/checkReactivationOutcome.
+      reactivationTesting: state.reactivationTesting || {},
       // v4.9 (sección 14, 27/8): estado del circuit breaker agregado por estrategia
       consecutiveLossesAggregate: state.consecutiveLossesAggregate || {},
       autoDisabledStrategiesAggregate: state.autoDisabledStrategiesAggregate || {},
