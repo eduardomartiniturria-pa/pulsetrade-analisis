@@ -526,6 +526,11 @@ function detectSessionBreakoutVwap(candles, htfCandles = null) {
 //      de mercado lateral sin necesidad de ningún filtro adicional).
 //   7. Si la ruptura ya ocurrió en una vela anterior, no se repite la
 //      señal (solo dispara en la vela exacta de la confirmación).
+//   8. NUEVO (28/9): filtro de VWAP — la ruptura solo es válida si el cierre
+//      de la vela de confirmación queda del lado correcto del VWAP del día
+//      (arriba para compra, abajo para venta). Ver comentario en el cuerpo
+//      de la función. Agregado a partir de investigación externa (ORB
+//      simple pierde edge con el tiempo sin filtros adicionales).
 // Gestión de riesgo sugerida por la infografía (no está en el código,
 // es decisión de tamaño de posición): 0.5%-1% del capital por operación.
 
@@ -571,13 +576,28 @@ function detectKillZoneNY(candles) {
   if (!confirmCandles.length) return result;
 
   // Primera vela que cierra fuera del rango
-  let breakoutCandle = null, direction = null;
-  for (const c of confirmCandles) {
-    if (c.close > rangeHigh) { breakoutCandle = c; direction = 'bull'; break; }
-    if (c.close < rangeLow) { breakoutCandle = c; direction = 'bear'; break; }
+  let breakoutCandle = null, direction = null, breakoutIdx = -1;
+  for (let i = 0; i < confirmCandles.length; i++) {
+    const c = confirmCandles[i];
+    if (c.close > rangeHigh) { breakoutCandle = c; direction = 'bull'; breakoutIdx = i; break; }
+    if (c.close < rangeLow) { breakoutCandle = c; direction = 'bear'; breakoutIdx = i; break; }
   }
   if (!breakoutCandle) return result; // sin ruptura confirmada todavía (mercado lateral)
   if (breakoutCandle !== last) return result; // la ruptura ya pasó antes, no repetir señal
+
+  // FILTRO VWAP (28/9, investigación externa sobre ORB — ver auditoría): la ruptura
+  // simple sin filtros pierde consistencia con el tiempo. Se exige que el cierre de
+  // la vela de confirmación esté del lado correcto del VWAP del día (arriba para
+  // compra, abajo para venta) — mismo cálculo que ya usa session_breakout_vwap
+  // (calculateVWAPSeries, con su fallback a precio típico si el proveedor no trae
+  // volumen real). Reduce falsos breakouts, a costa de menos señales.
+  const candlesUpToBreakout = candles.slice(0, candles.length - confirmCandles.length + breakoutIdx + 1);
+  const { vwap } = calculateVWAPSeries(candlesUpToBreakout);
+  const vwapAtBreakout = vwap[vwap.length - 1];
+  if (vwapAtBreakout != null) {
+    if (direction === 'bull' && breakoutCandle.close <= vwapAtBreakout) return result;
+    if (direction === 'bear' && breakoutCandle.close >= vwapAtBreakout) return result;
+  }
 
   const entry = last.close;
   if (direction === 'bull') {
