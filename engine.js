@@ -1,5 +1,21 @@
 // ============================================================
-// PULSE TRADE v4.8.9 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.10 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.8.10 (28/9, plan de rentabilidad — decisiones de Soy tras auditar
+// PROFITABILITY_ENGINE_V1, que existía desde el 18/9 y no había sido documentado
+// en las auditorías previas):
+// - FIX 1: PROFITABILITY_ENGINE_V1.probationMinConfidence bajó de 80% a 65%. Con
+//   80%, una combinación sin muestra LIVE (GBPUSD, EURUSD_session_breakout_vwap)
+//   quedaba bloqueada para siempre — sin señales no junta muestra, sin muestra
+//   sigue exigiendo 80%, círculo cerrado. 65% sigue por encima del piso base de
+//   confianza (55%) pero es alcanzable por estas estrategias en operación normal.
+//   Sigue operando con la mitad del riesgo (probationRiskMultiplier) y la regla D
+//   (deterioro reciente) corta igual si el resultado real viene mal.
+// - FIX 2: seedLiveStatsFromClosedHistory() no excluía entradas shadow (riesgo 0,
+//   simuladas). No cambia el seed ya consumido (solo XAUUSD/EURUSD, que nunca
+//   estuvieron en shadow), pero corrige la función para cualquier reseed futuro.
+// - NUEVO (custom-strategies.js): filtro de VWAP en kill_zone_ny — ver changelog
+//   de ese archivo.
 // ============================================================
 // Cambios v4.8.9 (27/9, plan de rentabilidad punto 8 — reactivación inteligente):
 // - Hasta esta versión, disableCombinationByCircuitBreaker() apagaba una combinación
@@ -677,7 +693,14 @@ const CONFIG = {
     robustMinExpectancyR: 0.10,
     recentWindow: 8,
     maxRecentLosses: 5,
-    probationMinConfidence: 80,
+    // FIX (28/9, decisión de Soy): 80% de confianza técnica era casi inalcanzable —
+    // kill_zone_ny/session_breakout_vwap operan típicamente en el rango 55-75%. Con
+    // ese piso, una combinación sin muestra LIVE (GBPUSD, EURUSD_session_breakout_vwap)
+    // quedaba bloqueada para siempre: sin señales no junta muestra, sin muestra sigue
+    // exigiendo 80%. Bajado a 65% (por encima del piso base de 55% pero alcanzable) —
+    // sigue operando con la mitad del riesgo (probationRiskMultiplier) y la regla D
+    // (deterioro reciente) sigue cortando igual si viene mal.
+    probationMinConfidence: 65,
     probationRiskMultiplier: 0.50,
     // NUEVO v4.8.2 (21/9): una sola vez, reconstruye las stats LIVE de estos símbolos a partir de
     // sus operaciones REALES ya cerradas (closed_signals:YYYY-MM-DD en Supabase — nunca del
@@ -2191,7 +2214,13 @@ function seedLiveStatsFromClosedHistory() {
     let list;
     try { list = JSON.parse(localStorage.getItem(`closed_signals:${day}`) || '[]'); } catch (e) { list = []; }
     list.forEach(e => {
-      if (!e || (e.result !== 'win' && e.result !== 'loss') || !seedSymbols.has(e.symbol)) return;
+      // FIX (28/9): faltaba excluir entradas shadow (riesgo 0, simuladas) — sin este
+      // filtro, un símbolo con historial mayormente shadow (GBPUSD/US500 antes del
+      // 25/9) contaminaría liveStrategyStatsBySymbol con operaciones que nunca
+      // arriesgaron dinero real. seedFromClosedHistory.symbols solo trae XAUUSD/EURUSD
+      // hoy (nunca estuvieron en shadow), así que esto no cambia el resultado del seed
+      // ya consumido — pero deja la función correcta para cualquier reseed futuro.
+      if (!e || (e.result !== 'win' && e.result !== 'loss') || e.shadow || !seedSymbols.has(e.symbol)) return;
       const key = oldToNew[e.source] || e.source;
       if (!CONFIG.ENABLED_STRATEGIES.includes(key)) return;
       entries.push({ symbol: e.symbol, key, result: e.result, rMultiple: e.rMultiple, timestamp: e.timestamp || 0 });
@@ -3256,7 +3285,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.9',
+    engineVersion: '4.8.10',
     generatedAt: Date.now()
   };
 }
