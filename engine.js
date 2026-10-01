@@ -1,5 +1,48 @@
 // ============================================================
-// PULSE TRADE v4.8.10 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.11 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.8.11 (30/9, revisión completa de engine.js a partir del /api/state real del
+// 30/9 — todos los puntos confirmados contra el código, ninguno por suposición):
+// - FIX 1 (reactivación se deshacía sola): el bloque de arranque que re-aplica
+//   state.autoDisabledStrategies sobre CONFIG.DISABLED_STRATEGIES_BY_SYMBOL (necesario para
+//   que un redeploy no "olvide" un apagado) también re-apagaba las combinaciones que ya
+//   estaban en state.reactivationTesting, y checkReactivationEligibility() las salteaba por
+//   "ya en prueba": tras el primer redeploy quedaban apagadas Y marcadas "en prueba" para
+//   siempre, con 0 operaciones (caso real: 13 combinaciones en 0/0 desde el 27/9, incluidas
+//   XAUUSD kill_zone_ny y XAUUSD session_breakout_vwap). Ahora el arranque las saltea y
+//   checkReactivationEligibility() es idempotente: cada ciclo vuelve a dejar habilitada
+//   toda combinación que sigue en prueba.
+// - FIX 2 (reactivación sin freno): disableCombinationByCircuitBreaker() salía temprano si la
+//   combinación ya figuraba en autoDisabledStrategies — durante la prueba SIEMPRE figura, así
+//   que el circuit breaker nunca la volvía a apagar y la rama "el breaker la volvió a apagar"
+//   de checkReactivationOutcome() era inalcanzable. Además la racha vieja no se reseteaba al
+//   entrar en prueba (el header v4.8.9 decía lo contrario): la primera pérdida de la prueba
+//   ya cruzaba el umbral. Ahora se resetea la racha al entrar y el breaker puede re-apagar
+//   durante la prueba.
+// - FIX 3 (reactivación de combinaciones muertas): checkReactivationEligibility() ahora ignora
+//   símbolos retirados (BTCUSD/ETHUSD), estrategias fuera de ENABLED_STRATEGIES (las 3
+//   eliminadas el 16/9 y las apagadas por flag) y estrategias apagadas por el breaker AGREGADO.
+//   Al arrancar se limpian de state.reactivationTesting las entradas muertas ya cargadas.
+// - FIX 4 (racha de pérdidas desfasada): checkHistoryOutcomes() procesaba las señales resueltas
+//   en el orden de state.signalHistory (la más nueva primero), así que con 2+ cierres en el
+//   mismo ciclo la racha se contaba al revés. Ahora se procesan de la más vieja a la más
+//   nueva. Además checkCircuitBreaker() contrasta el contador con
+//   liveStrategyStatsBySymbol[..].recentResults (orden cronológico) y lo corrige si se
+//   desfasó (caso real: EURUSD_session_breakout_vwap quedó con racha 2 teniendo una ganada
+//   en el medio). updateLiveProfitabilityStats() ahora corre ANTES que
+//   updateStrategyStatsBySymbol() para que el breaker ya vea el resultado nuevo.
+// - FIX 5 (apagado indebido por racha desfasada): una sola vez al arrancar
+//   ('pt_false_disable_fix_v1'), se vuelve a habilitar toda combinación que el breaker apagó
+//   por una racha EN VIVO que el historial real no respalda (EURUSD session_breakout_vwap).
+//   No toca las apagadas por seed/retroactivo/reactivación fallida ni las que sí se
+//   sostienen con recentResults.
+// - FIX 6 (documentación): los comentarios decían que liveStrategyStatsBySymbol "excluye
+//   shadow". Es al revés y es a propósito (ver SHADOW_MODE): las operaciones en modo sombra
+//   cuentan como muestra LIVE y para el breaker de la combinación. Hoy SHADOW_MODE.symbols
+//   está vacío, así que solo afecta al historial del 20-25/9. Comentarios corregidos, sin
+//   cambio de comportamiento.
+// - NO cambia ningún parámetro de estrategia, SL/TP ni umbral de confianza. Requiere subir
+//   solo engine.js (custom-strategies.js sin cambios).
 // ============================================================
 // Cambios v4.8.10 (28/9, plan de rentabilidad — decisiones de Soy tras auditar
 // PROFITABILITY_ENGINE_V1, que existía desde el 18/9 y no había sido documentado
@@ -733,7 +776,6 @@ class MarketData {
 class OHLCVData {
   constructor(candles) { this.candles = candles || []; this.isValid = candles && candles.length >= 30; }
 }
-
 const ASSETS = {
   // (20/9) Activos de la app: XAUUSD, EURUSD, US500, GBPUSD. BTCUSD/ETHUSD salieron.
   // scheduleProfile enlaza con SCHEDULE_PROFILES (horarios Exness por instrumento, más abajo).
@@ -883,8 +925,18 @@ let state = {
 // cada combinación que sigue registrada en autoDisabledStrategies, sin tocar ni duplicar
 // las entradas manuales que ya estuvieran ahí.
 (() => {
+  // FIX (30/9): las combinaciones en fase de prueba de reactivación NO se re-apagan acá
+  // (antes sí, y la prueba quedaba trabada en 0 operaciones tras cada redeploy). Las
+  // entradas de prueba muertas (símbolo retirado / estrategia fuera de ENABLED) se limpian.
+  const _testing = state.reactivationTesting || {};
+  Object.keys(_testing).forEach(ck => {
+    const t = _testing[ck];
+    if (!t || !ASSETS[t.symbol] || !CONFIG.ENABLED_STRATEGIES.includes(t.key)) delete _testing[ck];
+  });
+  try { localStorage.setItem('pt_reactivation_testing', JSON.stringify(_testing)); } catch (e) {}
   Object.values(state.autoDisabledStrategies || {}).forEach(({ symbol, key }) => {
     if (!symbol || !key) return;
+    if (_testing[`${symbol}_${key}`]) return;
     if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol]) CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] = [];
     if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
       CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].push(key);
@@ -1838,7 +1890,6 @@ const MarketDataProvider = {
   }
 };
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
-
 const BacktestEngine = {
   async fetchCandles(symbol, interval) {
     return this.fetchCandlesTwelveData(symbol, interval);
@@ -2445,7 +2496,8 @@ function checkCircuitBreakerAggregate(key, result) {
 // FIX (25/9): antes leía state.strategyStatsBySymbol, que mezcla el seed histórico/
 // backtest con lo real en vivo. Eso podía calificar una combinación para el umbral
 // tolerante (5) usando expectancy vieja, aunque el desempeño real reciente
-// (state.liveStrategyStatsBySymbol, que ya excluye señales shadow) fuera negativo.
+// (state.liveStrategyStatsBySymbol — OJO: esta fuente SÍ incluye las operaciones en modo
+// sombra, a propósito, ver SHADOW_MODE; solo excluye el seed/backtest) fuera negativo.
 // Ahora decide solo con datos reales en vivo — sin trades reales todavía, cae a
 // defaultThreshold (mismo comportamiento conservador que antes para combos sin
 // historial).
@@ -2470,7 +2522,11 @@ function getCircuitBreakerThreshold(symbol, key) {
 // original: es solo aplicar al arrancar una regla vigente sobre estado ya conocido).
 function disableCombinationByCircuitBreaker(symbol, key, streak, extra = {}) {
   const ckey = `${symbol}_${key}`;
-  if (state.autoDisabledStrategies[ckey]) return; // ya estaba apagada, no repetir aviso
+  // FIX (30/9): durante la fase de prueba de reactivación la combinación SIGUE figurando en
+  // autoDisabledStrategies (con el disabledAt viejo), así que este return temprano impedía que
+  // el breaker la volviera a apagar. En prueba se permite re-apagar y se actualiza disabledAt
+  // (checkReactivationOutcome usa eso para cortar la prueba).
+  if (state.autoDisabledStrategies[ckey] && !state.reactivationTesting[ckey]) return; // ya estaba apagada, no repetir aviso
 
   if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol]) CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] = [];
   if (!CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol].includes(key)) {
@@ -2505,11 +2561,39 @@ function checkCircuitBreaker(symbol, key, result) {
   if (result !== 'loss') return;
 
   state.consecutiveLosses[ckey] = (state.consecutiveLosses[ckey] || 0) + 1;
+  // NUEVO (30/9): contraste con el orden cronológico real (recentResults). Si el contador
+  // se desfasó (cierres procesados en otro orden, restart, seed), manda el historial.
+  // Durante una fase de prueba de reactivación la racha es propia de la prueba (arranca en 0):
+  // el historial en vivo todavía trae las pérdidas que la apagaron, así que no se contrasta.
+  const live = state.reactivationTesting[ckey] ? null : getLiveLossStreak(symbol, key);
+  if (live && !live.saturated && live.streak !== state.consecutiveLosses[ckey]) {
+    console.log(`[CIRCUIT BREAKER] ${ckey}: contador de racha desfasado (${state.consecutiveLosses[ckey]}), el historial real indica ${live.streak} — se corrige`);
+    state.consecutiveLosses[ckey] = live.streak;
+  } else if (live && live.saturated && live.streak > state.consecutiveLosses[ckey]) {
+    state.consecutiveLosses[ckey] = live.streak;
+  }
   localStorage.setItem('pt_consecutive_losses', JSON.stringify(state.consecutiveLosses));
 
   const threshold = getCircuitBreakerThreshold(symbol, key);
   if (state.consecutiveLosses[ckey] < threshold) return;
   disableCombinationByCircuitBreaker(symbol, key, state.consecutiveLosses[ckey]);
+}
+// NUEVO (30/9): racha de pérdidas EN VIVO de una combinación, leída de recentResults (más
+// reciente primero, guardado en orden cronológico). saturated=true significa que TODA la
+// ventana guardada son pérdidas: la racha real puede ser mayor y no se puede acotar.
+function getLiveLossStreak(symbol, key) {
+  const b = state.liveStrategyStatsBySymbol[symbol] && state.liveStrategyStatsBySymbol[symbol][key];
+  if (!b || !Array.isArray(b.recentResults) || !b.recentResults.length) return null;
+  let n = 0;
+  for (const r of b.recentResults) { if (r.result === 'loss') n++; else break; }
+  return { streak: n, saturated: n === b.recentResults.length };
+}
+// NUEVO (30/9): una combinación solo es candidata a reactivación si todavía puede operar.
+function isCombinationOperable(symbol, key) {
+  if (!ASSETS || !ASSETS[symbol]) return false;                              // símbolo retirado
+  if (!CONFIG.ENABLED_STRATEGIES.includes(key)) return false;                // estrategia eliminada/apagada
+  if (state.autoDisabledStrategiesAggregate && state.autoDisabledStrategiesAggregate[key]) return false; // breaker agregado
+  return true;
 }
 // NUEVO (27/9, reactivación inteligente): corre 1 vez por ciclo completo (ver
 // refreshAllData). Para cada combinación en autoDisabledStrategies que todavía no
@@ -2522,11 +2606,24 @@ function checkReactivationEligibility() {
   if (!cfg || !cfg.enabled) return;
   const now = Date.now();
   Object.entries(state.autoDisabledStrategies).forEach(([ckey, info]) => {
-    if (state.reactivationTesting[ckey]) return; // ya en prueba
+    if (!isCombinationOperable(info.symbol, info.key)) return; // FIX (30/9): símbolo retirado, estrategia fuera de ENABLED o breaker agregado
+    const testing = state.reactivationTesting[ckey];
+    if (testing) {
+      // FIX (30/9): idempotente. Si el breaker la volvió a apagar durante la prueba
+      // (disabledAt posterior al inicio) se respeta; si no, se garantiza que siga habilitada
+      // (un redeploy re-aplicaba el apagado y la prueba quedaba trabada en 0 operaciones).
+      if (info.disabledAt >= testing.startedAt) return;
+      const dl = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[info.symbol] || [];
+      const di = dl.indexOf(info.key);
+      if (di !== -1) { dl.splice(di, 1); console.log(`[REACTIVACIÓN] ${ckey}: seguía apagada pese a estar en prueba — se vuelve a habilitar`); }
+      return;
+    }
     if (now - info.disabledAt < cfg.cooldownMs) return; // cooldown no cumplido
     const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[info.symbol] || [];
     const idx = disabledForSymbol.indexOf(info.key);
     if (idx !== -1) disabledForSymbol.splice(idx, 1);
+    state.consecutiveLosses[ckey] = 0; // FIX (30/9): la prueba arranca sin la racha que la apagó (como decía el header v4.8.9)
+    localStorage.setItem('pt_consecutive_losses', JSON.stringify(state.consecutiveLosses));
     state.reactivationTesting[ckey] = { symbol: info.symbol, key: info.key, startedAt: now, wins: 0, losses: 0, totalR: 0 };
     localStorage.setItem('pt_reactivation_testing', JSON.stringify(state.reactivationTesting));
     console.log(`[REACTIVACIÓN] ${ckey}: cooldown cumplido (${Math.round((now - info.disabledAt) / 86400000)} días) — entra en fase de prueba (${cfg.testSampleSize} operaciones, riesgo x${cfg.testRiskMultiplier}, sin push)`);
@@ -2680,7 +2777,6 @@ function reconcileStaleActiveCustomSignals(symbol) {
     }
   });
 }
-
 function checkHistoryOutcomes(symbol, currentPrice, candles) {
   reconcileStaleActiveCustomSignals(symbol);
   let changed = false;
@@ -2794,7 +2890,12 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
   });
   if (changed) {
     localStorage.setItem('pt_v4_signals', JSON.stringify(state.signalHistory));
-    resolvedEntries.forEach(entry => { updatePatternStats(entry); updateStrategyStatsBySymbol(entry); updateLiveProfitabilityStats(entry); checkReactivationOutcome(entry); appendClosedSignal(entry); });
+    // FIX (30/9): signalHistory va de la más nueva a la más vieja, así que con 2+ cierres en
+    // el mismo ciclo las rachas y recentResults se armaban al revés. Se procesa de la más
+    // vieja a la más nueva. updateLiveProfitabilityStats() va primero para que
+    // checkCircuitBreaker() (dentro de updateStrategyStatsBySymbol) ya vea el resultado nuevo.
+    resolvedEntries.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    resolvedEntries.forEach(entry => { updatePatternStats(entry); updateLiveProfitabilityStats(entry); updateStrategyStatsBySymbol(entry); checkReactivationOutcome(entry); appendClosedSignal(entry); });
     runAutoTune(symbol);
   }
 }
@@ -3285,7 +3386,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.10',
+    engineVersion: '4.8.11',
     generatedAt: Date.now()
   };
 }
@@ -3399,8 +3500,9 @@ async function refreshAsset(symbol, forceRefresh = false) {
       // getCircuitBreakerThreshold() (25/9). El factor de historial de
       // computeContextualScore() podía sumar/restar puntos de confianza (+10/-15) según
       // un winrate viejo que ya no representa el desempeño real reciente. Ahora usa
-      // state.liveStrategyStatsBySymbol[symbol] (solo real, excluye shadow), igual que
-      // el circuit breaker.
+      // state.liveStrategyStatsBySymbol[symbol] (solo operaciones reales cerradas; incluye
+      // las de modo sombra, que cuentan como muestra LIVE por diseño), igual que el
+      // circuit breaker.
        const newsContext = await NewsCalendar.getNearbyHighImpact(NEWS_CURRENCIES_BY_SYMBOL[symbol] || ['USD'], 60);
       const rawSignals = CustomStrategies.evaluateAll(closedCandles, symbol, asset, closedHtfCandles, state.liveStrategyStatsBySymbol[symbol] || null, newsContext, CONFIG.MIN_CONFIDENCE_SCORE);
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
@@ -3638,12 +3740,62 @@ function cleanupRetiredSymbolAutoTuneKeys() {
   try { localStorage.setItem(FLAG, '1'); } catch (e) {}
 }
 
+// NUEVO (30/9): al arrancar, (a) alinea state.consecutiveLosses con el orden cronológico real
+// (liveStrategyStatsBySymbol[..].recentResults) cuando la ventana contiene alguna ganada, y
+// (b) UNA SOLA VEZ ('pt_false_disable_fix_v1') vuelve a habilitar las combinaciones que el
+// breaker apagó por una racha EN VIVO que el historial real no respalda (caso real:
+// EURUSD_session_breakout_vwap, apagada con racha 2 teniendo una ganada en el medio).
+// No toca las apagadas por seed, retroactivo ni reactivación fallida, ni las que no tienen
+// historial en vivo, ni las que sí se sostienen con recentResults.
+function reconcileLossStreaksFromLiveStats() {
+  let fixed = 0;
+  Object.entries(state.liveStrategyStatsBySymbol || {}).forEach(([symbol, byKey]) => {
+    Object.keys(byKey || {}).forEach(key => {
+      const live = getLiveLossStreak(symbol, key);
+      if (!live || live.saturated) return;
+      const ckey = `${symbol}_${key}`;
+      if (state.reactivationTesting[ckey]) return; // en prueba, la racha se maneja aparte (abajo)
+      if ((state.consecutiveLosses[ckey] || 0) !== live.streak) { state.consecutiveLosses[ckey] = live.streak; fixed++; }
+    });
+  });
+  // Las que ya estaban en prueba antes de este fix (desde el 27/9) conservaban la racha que las
+  // apagó: la primera pérdida de la prueba las volvería a cortar. Si todavía no sumaron
+  // ninguna operación de prueba, arrancan limpias.
+  Object.entries(state.reactivationTesting || {}).forEach(([ckey, t]) => {
+    if (t && (t.wins || 0) + (t.losses || 0) === 0 && state.consecutiveLosses[ckey]) { state.consecutiveLosses[ckey] = 0; fixed++; }
+  });
+  if (fixed) {
+    localStorage.setItem('pt_consecutive_losses', JSON.stringify(state.consecutiveLosses));
+    console.log(`[streak-fix] ${fixed} contadores de racha alineados con el historial real`);
+  }
+  const FLAG = 'pt_false_disable_fix_v1';
+  if (localStorage.getItem(FLAG)) return;
+  let reenabled = 0;
+  Object.entries(state.autoDisabledStrategies || {}).forEach(([ckey, info]) => {
+    if (!info || info.seeded || info.retroactive || info.reactivationFailed) return;
+    if (state.reactivationTesting[ckey]) return;
+    if (!isCombinationOperable(info.symbol, info.key)) return;
+    const live = getLiveLossStreak(info.symbol, info.key);
+    if (!live || live.saturated) return;
+    if (live.streak >= getCircuitBreakerThreshold(info.symbol, info.key)) return; // sí se sostiene
+    delete state.autoDisabledStrategies[ckey];
+    const dl = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[info.symbol] || [];
+    const di = dl.indexOf(info.key);
+    if (di !== -1) dl.splice(di, 1);
+    reenabled++;
+    console.log(`[streak-fix] ${ckey}: apagado indebido (racha registrada ${info.lossStreak}, historial real ${live.streak}) — se vuelve a habilitar`);
+  });
+  if (reenabled) localStorage.setItem('pt_auto_disabled_strategies', JSON.stringify(state.autoDisabledStrategies));
+  try { localStorage.setItem(FLAG, JSON.stringify({ at: Date.now(), reenabled })); } catch (e) {}
+}
+
 retireRemovedSymbols();
 assertStrategyFlagsSync();
 migrateRenamedStrategyKeys();
 seedLiveStatsFromClosedHistory(); // v4.8.2
 cleanupLegacyAutoTuneKeys(); // v4.8.3
 cleanupRetiredSymbolAutoTuneKeys(); // v4.8.6
+reconcileLossStreaksFromLiveStats(); // v4.8.11
 applyRetroactiveCircuitBreaker();
 
 module.exports = {
