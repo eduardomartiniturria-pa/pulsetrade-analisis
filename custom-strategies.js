@@ -1,4 +1,19 @@
 // ============================================================
+// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.17 (1/10, kill_zone_ny: ruptura rechazada por VWAP)
+// ============================================================
+// Cambios v4.17 (1/10): único cambio, en detectKillZoneNY (kill_zone_ny).
+// - Problema (confirmado con simulación y con los gráficos del 1/10): la función tomaba la
+//   primera vela que cerraba fuera del rango 9:30-9:45 NY y recién después le aplicaba el filtro
+//   de VWAP (agregado el 28/9). Si esa primera ruptura era rechazada por el VWAP, la función
+//   devolvía "sin señal" y el resto del día quedaba muerto aunque después el precio rompiera
+//   para el otro lado, a favor del VWAP. El 1/10 pasó en EURUSD y GBPUSD (tirón alcista corto
+//   a las 9:45 NY, luego caída de ~60 pips sin ninguna señal de Kill Zone).
+// - Ahora el filtro de VWAP se aplica DENTRO de la búsqueda: la ruptura válida es la primera
+//   vela que cierra fuera del rango y además pasa el filtro. Sigue disparando una sola vez, solo
+//   en la vela exacta de la confirmación; SL, TP y rango de referencia no cambian.
+// - Sin cambios en engine.js (los flags de assertStrategyFlagsSync no se tocan), ni en
+//   supply_demand ni en session_breakout_vwap.
+// ============================================================
 // ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.16 (23/9, auditoría punto E: S1 y B2)
 // ============================================================
 // Cambios v4.16 (23/9, hallazgos S1 y B2 de la auditoría del punto E — decisiones de diseño
@@ -575,29 +590,43 @@ function detectKillZoneNY(candles) {
   const confirmCandles = candles.slice(windowEndIdx + 1).filter(c => getNYTimeParts(c.time).dateKey === lastNY.dateKey);
   if (!confirmCandles.length) return result;
 
-  // Primera vela que cierra fuera del rango
-  let breakoutCandle = null, direction = null, breakoutIdx = -1;
-  for (let i = 0; i < confirmCandles.length; i++) {
-    const c = confirmCandles[i];
-    if (c.close > rangeHigh) { breakoutCandle = c; direction = 'bull'; breakoutIdx = i; break; }
-    if (c.close < rangeLow) { breakoutCandle = c; direction = 'bear'; breakoutIdx = i; break; }
-  }
-  if (!breakoutCandle) return result; // sin ruptura confirmada todavía (mercado lateral)
-  if (breakoutCandle !== last) return result; // la ruptura ya pasó antes, no repetir señal
-
   // FILTRO VWAP (28/9, investigación externa sobre ORB — ver auditoría): la ruptura
   // simple sin filtros pierde consistencia con el tiempo. Se exige que el cierre de
   // la vela de confirmación esté del lado correcto del VWAP del día (arriba para
   // compra, abajo para venta) — mismo cálculo que ya usa session_breakout_vwap
   // (calculateVWAPSeries, con su fallback a precio típico si el proveedor no trae
   // volumen real). Reduce falsos breakouts, a costa de menos señales.
-  const candlesUpToBreakout = candles.slice(0, candles.length - confirmCandles.length + breakoutIdx + 1);
-  const { vwap } = calculateVWAPSeries(candlesUpToBreakout);
-  const vwapAtBreakout = vwap[vwap.length - 1];
-  if (vwapAtBreakout != null) {
-    if (direction === 'bull' && breakoutCandle.close <= vwapAtBreakout) return result;
-    if (direction === 'bear' && breakoutCandle.close >= vwapAtBreakout) return result;
+  //
+  // FIX v4.17 (1/10, confirmado con simulación y con 3 casos reales del 1/10 — EURUSD,
+  // GBPUSD y la misma mecánica en XAUUSD): antes se tomaba como "la" ruptura a la PRIMERA
+  // vela que cerraba fuera del rango y DESPUÉS se le aplicaba el filtro de VWAP. Si esa
+  // primera ruptura era rechazada por el VWAP (típico en un día bajista: un tirón alcista
+  // corto a las 9:45 que cierra sobre el máximo pero bajo el VWAP), la función devolvía
+  // "sin señal" y, como la búsqueda siempre volvía a encontrar esa misma primera vela, el
+  // resto del día quedaba muerto: ni la ruptura bajista posterior, a favor del VWAP, podía
+  // disparar. Ahora una ruptura rechazada por el VWAP NO gasta la oportunidad del día: la
+  // "primera ruptura" es la primera vela que cierra fuera del rango Y pasa el filtro de
+  // VWAP. Lo demás no cambia: sigue disparando solo en la vela exacta de la confirmación
+  // (si esa vela ya pasó, no se repite) y el SL/TP se calcula igual.
+  const vwapSeries = calculateVWAPSeries(candles).vwap;
+  const firstConfirmIdxInCandles = candles.length - confirmCandles.length;
+  let breakoutCandle = null, direction = null;
+  for (let i = 0; i < confirmCandles.length; i++) {
+    const c = confirmCandles[i];
+    let dir = null;
+    if (c.close > rangeHigh) dir = 'bull';
+    else if (c.close < rangeLow) dir = 'bear';
+    if (!dir) continue;
+    const vwapHere = vwapSeries[firstConfirmIdxInCandles + i];
+    if (vwapHere != null) {
+      if (dir === 'bull' && c.close <= vwapHere) continue; // rechazada por VWAP: no gasta la oportunidad
+      if (dir === 'bear' && c.close >= vwapHere) continue;
+    }
+    breakoutCandle = c; direction = dir;
+    break;
   }
+  if (!breakoutCandle) return result; // sin ruptura confirmada (y válida) todavía
+  if (breakoutCandle !== last) return result; // la ruptura ya pasó antes, no repetir señal
 
   const entry = last.close;
   if (direction === 'bull') {
