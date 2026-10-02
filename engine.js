@@ -1,5 +1,24 @@
 // ============================================================
-// PULSE TRADE v4.8.11 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.12 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.8.12 (2/10, a partir del /api/state del 2/10 — confirmado contra el código):
+// - FIX (rachas de pérdidas que "resucitan" tras un reinicio): checkCircuitBreaker() y
+//   checkCircuitBreakerAggregate() reseteaban el contador a 0 cuando entraba una ganada, pero
+//   SOLO en memoria: nunca lo guardaban en disco (localStorage.setItem). Cualquier reinicio del
+//   servidor (un deploy, o Render free que duerme y reinicia) volvía a leer la racha vieja, de
+//   antes de la ganada, y la siguiente pérdida la sumaba encima. Prueba real: session_breakout_vwap
+//   mostraba consecutiveLossesAggregate = 5 con una ganada en el medio (máximo posible = 2), y el
+//   umbral del breaker agregado es 8: ese contador inflado podía apagar la estrategia en los 4
+//   activos por pérdidas que ya habían sido "perdonadas" por una ganada. Es también la causa
+//   probable del apagado indebido de EURUSD session_breakout_vwap (29/9) que se corrigió el 30/9.
+//   Ahora ambas funciones guardan el reseteo en disco.
+// - NUEVO: reconcileAggregateLossStreaks() al arrancar. Recalcula el contador agregado de cada
+//   estrategia habilitada a partir de signalHistory (solo operaciones reales, sin sombra, de la
+//   más nueva a la más vieja) cuando el historial contiene al menos una ganada que acota la
+//   racha. Corrige de una vez el 5 actual de session_breakout_vwap. Si todo el historial
+//   guardado son pérdidas no se toca (no se puede acotar). No toca estrategias eliminadas.
+// - Sin cambios de parámetros de estrategia, SL/TP ni umbrales. Solo engine.js
+//   (custom-strategies.js sin cambios, la v4.17 del 1/10 sigue vigente).
 // ============================================================
 // Cambios v4.8.11 (30/9, revisión completa de engine.js a partir del /api/state real del
 // 30/9 — todos los puntos confirmados contra el código, ninguno por suposición):
@@ -2473,7 +2492,11 @@ function disableAggregateByCircuitBreaker(key, streak, extra = {}) {
 function checkCircuitBreakerAggregate(key, result) {
   if (!CONFIG.CIRCUIT_BREAKER || !CONFIG.CIRCUIT_BREAKER.enabled) return;
   if (result === 'win') {
-    if (state.consecutiveLossesAggregate[key]) { state.consecutiveLossesAggregate[key] = 0; }
+    if (state.consecutiveLossesAggregate[key]) {
+      state.consecutiveLossesAggregate[key] = 0;
+      // FIX (2/10): antes el reseteo quedaba solo en memoria y un reinicio traía de vuelta la racha vieja.
+      localStorage.setItem('pt_consecutive_losses_aggregate', JSON.stringify(state.consecutiveLossesAggregate));
+    }
     return;
   }
   if (result !== 'loss') return;
@@ -2555,7 +2578,11 @@ function checkCircuitBreaker(symbol, key, result) {
   if (!CONFIG.CIRCUIT_BREAKER || !CONFIG.CIRCUIT_BREAKER.enabled) return;
   const ckey = `${symbol}_${key}`;
   if (result === 'win') {
-    if (state.consecutiveLosses[ckey]) { state.consecutiveLosses[ckey] = 0; }
+    if (state.consecutiveLosses[ckey]) {
+      state.consecutiveLosses[ckey] = 0;
+      // FIX (2/10): antes el reseteo quedaba solo en memoria y un reinicio traía de vuelta la racha vieja.
+      localStorage.setItem('pt_consecutive_losses', JSON.stringify(state.consecutiveLosses));
+    }
     return;
   }
   if (result !== 'loss') return;
@@ -3386,7 +3413,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.11',
+    engineVersion: '4.8.12',
     generatedAt: Date.now()
   };
 }
@@ -3789,6 +3816,31 @@ function reconcileLossStreaksFromLiveStats() {
   try { localStorage.setItem(FLAG, JSON.stringify({ at: Date.now(), reenabled })); } catch (e) {}
 }
 
+// NUEVO (2/10): alinea el contador AGREGADO de pérdidas seguidas (cruza símbolos) con el historial
+// real. Usa signalHistory (sin sombra, resultado win/loss, de la más nueva a la más vieja, por
+// timestamp de la señal). Solo se corrige si hay al menos una ganada en el historial que acote la
+// racha; si todo son pérdidas no se puede saber cuánto vale de verdad y no se toca. Solo para
+// estrategias habilitadas (las eliminadas conservan su contador histórico).
+function reconcileAggregateLossStreaks() {
+  let fixed = 0;
+  (CONFIG.ENABLED_STRATEGIES || []).forEach(key => {
+    if (state.autoDisabledStrategiesAggregate && state.autoDisabledStrategiesAggregate[key]) return;
+    const rows = (state.signalHistory || [])
+      .filter(h => h && !h.shadow && (h.result === 'win' || h.result === 'loss') &&
+        (h.source === key || (Array.isArray(h.strategyKeys) && h.strategyKeys.includes(key))))
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    if (!rows.length) return;
+    let streak = 0, bounded = false;
+    for (const r of rows) { if (r.result === 'loss') streak++; else { bounded = true; break; } }
+    if (!bounded) return;
+    if ((state.consecutiveLossesAggregate[key] || 0) !== streak) {
+      console.log(`[streak-fix] racha agregada de ${key}: contador ${state.consecutiveLossesAggregate[key] || 0}, historial real ${streak} — se corrige`);
+      state.consecutiveLossesAggregate[key] = streak; fixed++;
+    }
+  });
+  if (fixed) localStorage.setItem('pt_consecutive_losses_aggregate', JSON.stringify(state.consecutiveLossesAggregate));
+}
+
 retireRemovedSymbols();
 assertStrategyFlagsSync();
 migrateRenamedStrategyKeys();
@@ -3796,6 +3848,7 @@ seedLiveStatsFromClosedHistory(); // v4.8.2
 cleanupLegacyAutoTuneKeys(); // v4.8.3
 cleanupRetiredSymbolAutoTuneKeys(); // v4.8.6
 reconcileLossStreaksFromLiveStats(); // v4.8.11
+reconcileAggregateLossStreaks(); // v4.8.12
 applyRetroactiveCircuitBreaker();
 
 module.exports = {
