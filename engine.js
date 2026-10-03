@@ -1,5 +1,20 @@
 // ============================================================
-// PULSE TRADE v4.8.12 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.13 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.8.13 (2/10, a partir de los gráficos del 2/10 + código — confirmado, ver abajo):
+// - FIX (la prueba de reactivación no podía operar): una combinación en state.reactivationTesting
+//   se vuelve a habilitar (v4.8.11), pero la señal igual pasa por evaluateProfitability(), que
+//   NO tenía ninguna excepción para ellas. XAUUSD kill_zone_ny tiene muestra LIVE 13 (4G/9P,
+//   expectancy -0.16R, 5 pérdidas en las últimas 8): la regla D (deterioro reciente) y la B
+//   (expectancy no positiva) la bloquean SIEMPRE, así que su prueba de reactivación quedaba en
+//   0/0 para siempre y nunca podía graduarse ni fallar. Evidencia: prueba en 0/0 desde el 27/9 y
+//   el 2/10 el oro cerró bajo el rango 9:30-9:45 NY (ruptura bajista, a favor de la tendencia)
+//   sin señal. Ahora, si la combinación está en prueba de reactivación, el motor de rentabilidad
+//   la deja operar (decisión TRADE, modo REACTIVATION_TEST) siempre que su confianza técnica
+//   alcance probationMinConfidence (65%); el riesgo ya se reduce por separado con
+//   testRiskMultiplier (0.5x) en resolveCustomSignal, y la graduación/corte lo decide
+//   checkReactivationOutcome() (5 operaciones, totalR > 0). No cambia nada para combinaciones
+//   que NO están en prueba (siguen bloqueadas por las reglas D, A, B y C como antes).
 // ============================================================
 // Cambios v4.8.12 (2/10, a partir del /api/state del 2/10 — confirmado contra el código):
 // - FIX (rachas de pérdidas que "resucitan" tras un reinicio): checkCircuitBreaker() y
@@ -2343,6 +2358,19 @@ function evaluateProfitability(symbol, strategyKey, confidence) {
   const recentLosses = recentSlice.filter(r => r.result === 'loss').length;
   const base = { sample, expectancyR, winRate, recentLosses };
 
+  // R. PRUEBA DE REACTIVACIÓN (v4.8.13): la combinación cumplió el cooldown del circuit breaker y
+  // está juntando 5 operaciones nuevas con riesgo reducido. Su historial LIVE viejo (el que la
+  // hizo apagar) no debe volver a bloquearla acá, o la prueba nunca arranca. La calidad mínima
+  // sigue exigiéndose vía confianza técnica.
+  if (state.reactivationTesting && state.reactivationTesting[`${symbol}_${strategyKey}`]) {
+    if (confidence != null && confidence >= cfg.probationMinConfidence) {
+      return { decision: 'TRADE', mode: 'REACTIVATION_TEST', ...base,
+        reason: `prueba de reactivación — confianza técnica ${confidence}% >= ${cfg.probationMinConfidence}%, opera con riesgo reducido x${CONFIG.CIRCUIT_BREAKER_REACTIVATION.testRiskMultiplier}` };
+    }
+    return { decision: 'NO_TRADE', mode: 'REACTIVATION_TEST_LOW_CONFIDENCE', ...base,
+      reason: `prueba de reactivación y confianza técnica ${confidence != null ? confidence + '%' : 'n/d'} < ${cfg.probationMinConfidence}% requerido` };
+  }
+
   // D. Deterioro reciente
   if (recentSlice.length >= cfg.recentWindow && recentLosses >= cfg.maxRecentLosses) {
     return { decision: 'NO_TRADE', mode: 'RECENT_DETERIORATION', ...base,
@@ -3413,7 +3441,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.12',
+    engineVersion: '4.8.13',
     generatedAt: Date.now()
   };
 }
