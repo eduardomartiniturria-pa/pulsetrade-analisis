@@ -628,14 +628,27 @@ function detectKillZoneNY(candles) {
   if (!breakoutCandle) return result; // sin ruptura confirmada (y válida) todavía
   if (breakoutCandle !== last) return result; // la ruptura ya pasó antes, no repetir señal
 
+  // FIX (5/10, auditoría de rentabilidad): el SL quedaba exactamente en rangeLow/rangeHigh
+  // — el extremo de UNA sola vela de 15 minutos (la de 9:30-9:45 NY), sin ningún colchón.
+  // Mismo síntoma que ya se corrigió en session_breakout_vwap Modo B el 18/9 ("SL pegado a
+  // la mecha de la vela, candidato fuerte al mal resultado histórico") y que supply_demand
+  // nunca tuvo (siempre usó atr*0.2 de colchón). kill_zone_ny había quedado afuera de esa
+  // corrección porque el hallazgo del 18/9 se centró en session_breakout_vwap. Resultado real
+  // verificado en /api/state: XAUUSD kill_zone_ny (la estrategia con más historial del
+  // sistema) acumulaba -2.05R en 13 operaciones LIVE, con XAUUSD como único símbolo con
+  // mechas de feed ya documentadas (ver TP_CONFIRMATION_BUFFER_PIPS_BY_SYMBOL, que protege
+  // el TP contra ese ruido pero nunca protegió el SL). Mismo colchón que las otras dos
+  // estrategias activas: 0.25x ATR14 del lado del SL. No toca el gatillo de entrada ni el
+  // rango de referencia — solo dónde se corta la pérdida.
+  const atr = calculateATR(candles) || 0;
   const entry = last.close;
   if (direction === 'bull') {
     result.bullish = true;
-    result.sl = rangeLow;
+    result.sl = rangeLow - atr * 0.25;
     result.details.push('Ruptura confirmada del máximo de la vela 9:30-9:45 NY');
   } else {
     result.bearish = true;
-    result.sl = rangeHigh;
+    result.sl = rangeHigh + atr * 0.25;
     result.details.push('Ruptura confirmada del mínimo de la vela 9:30-9:45 NY');
   }
   result.entry = entry;
