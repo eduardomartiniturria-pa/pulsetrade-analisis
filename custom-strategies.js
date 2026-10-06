@@ -249,6 +249,18 @@ const SESSION_FALSE_BREAKOUT_SYMBOLS = [];
 // confiable el VWAP cae a fallback de precio y las ventanas no coinciden con la apertura del
 // cash de EE.UU.
 const SESSION_BREAKOUT_VWAP_SYMBOLS = ['EURUSD', 'XAUUSD', 'GBPUSD'];
+// DECISIÓN (5/10, auditoría de rentabilidad — app en neto negativo, decisión de trading del
+// usuario, no bug de código): kill_zone_ny sale de EURUSD y GBPUSD, queda solo en XAUUSD y
+// US500. Motivo: el concepto de "opening range breakout" en la apertura de NY (9:30 ET) tiene
+// sustento documentado para el open real de Wall Street (US500) y para XAUUSD (sistemas reales
+// de NY ORB en oro con estadística pública). Para pares EUR/GBP la evidencia externa ubica el
+// edge de ORB en la apertura de LONDRES, no en la de NY — para las 9:30 ET, Londres ya lleva
+// ~4.5hs operando, el "rango de apertura" de esas 9:30-9:45 ya no captura una apertura real de
+// liquidez para estos pares. Mismo patrón que SESSION_BREAKOUT_VWAP_SYMBOLS (restricción por
+// símbolo, sin tocar la lógica de detección). Si con muestra nueva XAUUSD/US500 sostienen
+// expectancy positiva y en algún momento se quiere reevaluar EURUSD/GBPUSD con un ORB anclado
+// al open de Londres en vez de NY, sería una estrategia nueva, no reactivar esta acá.
+const KILL_ZONE_NY_SYMBOLS = ['XAUUSD', 'US500'];
 
 // NOTA (limpieza, esta revisión): existían acá 3 funciones de ventana de
 // sesión (isLondonSession, isLondonNYOverlap, isNYOpenWindow) que definían
@@ -405,6 +417,12 @@ function isCordobaSessionWindow(parts) {
 
 // Piso de tamaño para la vela de rechazo del Modo B (rango >= este múltiplo del ATR14). Ajustable.
 const SBV_REJECTION_MIN_RANGE_ATR = 0.5;
+// FIX (5/10, filtro de cuerpo mínimo en detectKillZoneNY): ver comentario en el punto donde
+// se usan. 0.6 en ambos casos, valor medio del rango 0.6-0.8x ATR que reportan los sistemas
+// reales de NY ORB encontrados en la investigación (ajustable si con datos propios conviene
+// otro número).
+const KZ_MIN_BODY_RATIO_ATR = 0.6;
+const KZ_MIN_BODY_RATIO_RANGE = 0.6;
 
 function detectSessionBreakoutVwap(candles, htfCandles = null) {
   const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, mode: null };
@@ -608,6 +626,16 @@ function detectKillZoneNY(candles) {
   // "primera ruptura" es la primera vela que cierra fuera del rango Y pasa el filtro de
   // VWAP. Lo demás no cambia: sigue disparando solo en la vela exacta de la confirmación
   // (si esa vela ya pasó, no se repite) y el SL/TP se calcula igual.
+  // FILTRO DE CUERPO MÍNIMO (5/10, auditoría de rentabilidad — investigación externa):
+  // sistemas reales de NY Open Range Breakout con estadística documentada (XAUUSD, 58-68%
+  // winrate) coinciden en exigir que la vela de ruptura tenga cuerpo real, no solo un cierre
+  // que roza el rango: cuerpo >= KZ_MIN_BODY_RATIO_ATR (0.6) x ATR14 Y cuerpo >= KZ_MIN_BODY_RATIO_RANGE
+  // (0.6) del rango total de la vela (descarta velas de mecha larga con cuerpo chico — misma
+  // idea que bigEnough/isPinBar ya usa el Modo B de session_breakout_vwap más arriba en este
+  // archivo). Sin este filtro, una vela que apenas roza el rango con un cuerpo diminuto
+  // confirma ruptura igual que una vela de convicción real — justo el tipo de falso breakout
+  // que la literatura de ORB en gold/forex señala como la causa principal de resultados
+  // pobres sin filtro de calidad de vela.
   const vwapSeries = calculateVWAPSeries(candles).vwap;
   const firstConfirmIdxInCandles = candles.length - confirmCandles.length;
   let breakoutCandle = null, direction = null;
@@ -622,6 +650,12 @@ function detectKillZoneNY(candles) {
       if (dir === 'bull' && c.close <= vwapHere) continue; // rechazada por VWAP: no gasta la oportunidad
       if (dir === 'bear' && c.close >= vwapHere) continue;
     }
+    const cAtr = calculateATR(candles.slice(0, firstConfirmIdxInCandles + i + 1)) || 0;
+    const bodySize = Math.abs(c.close - c.open);
+    const candleRange = c.high - c.low;
+    const bodyOkAtr = !(cAtr > 0) || bodySize >= cAtr * KZ_MIN_BODY_RATIO_ATR;
+    const bodyOkRange = !(candleRange > 0) || (bodySize / candleRange) >= KZ_MIN_BODY_RATIO_RANGE;
+    if (!bodyOkAtr || !bodyOkRange) continue; // ruptura débil (mecha, sin cuerpo real): no gasta la oportunidad
     breakoutCandle = c; direction = dir;
     break;
   }
@@ -1591,13 +1625,15 @@ const DEFAULT_MIN_CONFIDENCE_SCORE = 55;
 function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = null, newsContext = null, minConfidenceScore = null) {
   const signals = [];
 
-  const kz = safeRun('kill_zone_ny', detectKillZoneNY, candles);
-  if (kz.bullish || kz.bearish) {
-    signals.push({
-      strategy: 'kill_zone_ny', label: 'Kill Zone Apertura NY (9:30 AM)',
-      direction: kz.bullish ? 'long' : 'short', entry: kz.entry, sl: kz.sl, tp1: kz.tp1, tp2: kz.tp2,
-      details: kz.details, independent: true
-    });
+  if (KILL_ZONE_NY_SYMBOLS.includes(symbol)) {
+    const kz = safeRun('kill_zone_ny', detectKillZoneNY, candles);
+    if (kz.bullish || kz.bearish) {
+      signals.push({
+        strategy: 'kill_zone_ny', label: 'Kill Zone Apertura NY (9:30 AM)',
+        direction: kz.bullish ? 'long' : 'short', entry: kz.entry, sl: kz.sl, tp1: kz.tp1, tp2: kz.tp2,
+        details: kz.details, independent: true
+      });
+    }
   }
 
   // Pivots Breakout & Reversal eliminada del código (16/9, plan de rentabilidad) —
