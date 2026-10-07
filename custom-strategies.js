@@ -1528,7 +1528,10 @@ function computeContextualScore({ direction, entry, sl, tp1, candles, htfCandles
     const risk = Math.abs(entry - sl);
     const reward = Math.abs(tp1 - entry);
     if (risk > 0) {
-      const rr = reward / risk;
+      // FIX (7/10): tolerancia de redondeo decimal. Con tp1 = entry ± risk*1.5, el cociente
+      // reward/risk da 1.4999999999999998 en ~26% de los casos y caía en 'RR ajustado' (-10)
+      // aunque el RR fuera exactamente 1.5. Se suma 1e-9 solo para la comparación.
+      const rr = reward / risk + 1e-9;
       if (rr >= 2) { score += 10; details.push(`Score: RR favorable (1:${rr.toFixed(1)})`); }
       else if (rr < 1.5) { score -= 10; details.push(`Score: RR ajustado (1:${rr.toFixed(1)})`); }
     }
@@ -1763,7 +1766,8 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
   const passed = [];
   signals.forEach(sig => {
     if (sig.confidence < minConfidence) {
-      console.log(`[CONFIANZA] ${sig.strategy} en ${symbol} descartada — confianza ${sig.confidence}% < piso ${minConfidence}%`);
+      const factores = (sig.details || []).filter(d => typeof d === 'string' && d.startsWith('Score:')).join(' | ');
+      console.log(`[CONFIANZA] ${sig.strategy} en ${symbol} descartada — confianza ${sig.confidence}% < piso ${minConfidence}%${factores ? ' — ' + factores : ' — sin factores de ajuste (base 50)'}`);
     } else {
       passed.push(sig);
     }
@@ -1806,6 +1810,7 @@ module.exports = {
   SESSION_BREAKOUT_VWAP_ENABLED,
   SESSION_BREAKOUT_VWAP_SYMBOLS
 };
+
 
 // ============================================================
 // CHANGELOG DE ESTA REVISIÓN
