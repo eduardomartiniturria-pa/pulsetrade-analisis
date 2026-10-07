@@ -1,5 +1,32 @@
 // ============================================================
-// PULSE TRADE v4.8.13 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.14 - MOTOR DE SEÑALES PROFESIONAL
+// ============================================================
+// Cambios v4.8.14 (7/10, gasto de llamadas Twelve Data — sesión 7/10, hallazgo del
+// respaldo PulseTrade_Respaldo_Sesion_07-10-2026_v3.md, sección 5):
+// - CAUSA RAÍZ: el caché de velas HTF (1h) en getOHLCV usaba CONFIG.HTF_CACHE_TTL_MS
+//   (timer fijo de 15min) en vez de mirar si la vela de 1h realmente cambió. Con el
+//   intervalo normal de refresco en 15min y el de Kill Zone en 4min, eso repetía el
+//   mismo pedido de H1 hasta 4 veces por hora cuando solo cambia una vez — cálculo con
+//   la config real de la app (isLondonNYSession 14h forex/oro + horario NYSE 6.5h de
+//   US500 + Kill Zone a 4min) da ~846 créditos/día contra el tope de 800 del plan
+//   gratis, explica el "[rate-limit] 8/8 creditos... esperando" recurrente en los logs
+//   y el "[supply_demand] sin htfCandles" (htfOhlcv falla y cae a null cuando el cupo
+//   se agota) — no es un bug de supply_demand, es síntoma del mismo gasto evitable.
+// - FIX: el caché HTF ahora es válido mientras Date.now() y la hora del último pedido
+//   caigan en el mismo bucket de 1h (ver el cambio junto a `isHtfRequest` en getOHLCV),
+//   no un timer ciego. 1 pedido de H1 por hora en vez de hasta 4. No toca
+//   CONFIG.DYNAMIC_REFRESH ni el intervalo de precio/señal — el usuario pidió
+//   explícitamente no espaciar esas llamadas.
+// - CONFIG.HTF_CACHE_TTL_MS queda sin uso (no se borra la config por si se necesita
+//   revertir; nada la lee más).
+// - CONFIRMADO (sin cambio de código, aclaración para la sesión): kill_zone_ny NO usa
+//   htfCandles (evaluateAll en custom-strategies.js llama a detectKillZoneNY solo con
+//   `candles`) — este fix no lo afecta, solo a supply_demand y session_breakout_vwap.
+// - CONFIRMADO (sin cambio de código): el contador `cycles` de diagnostics.candleAge
+//   (recordCandleAgeDiagnostic) nunca se resetea, acumula desde que arrancó el proceso
+//   — la diferencia "US500 141 ciclos vs forex 74" de la auditoría del 26/9 era un
+//   artefacto de reinicios de Render en momentos distintos, no sobre-consulta real de
+//   US500. No requiere fix.
 // ============================================================
 // Cambios v4.8.13 (2/10, a partir de los gráficos del 2/10 + código — confirmado, ver abajo):
 // - FIX (la prueba de reactivación no podía operar): una combinación en state.reactivationTesting
@@ -1853,10 +1880,26 @@ const MarketDataProvider = {
     // en cada ciclo. Se saltea con forceRefresh y si no hay velas cacheadas.
     const isHtfRequest = Object.values(CONFIG.HTF_MAP).includes(tf);
     const htfKey = `${symbol}_${tf}`;
+    // v4.8.14 (7/10, gasto de llamadas Twelve Data — sesión 7/10): el TTL fijo de 15min
+    // (CONFIG.HTF_CACHE_TTL_MS, ahora sin uso acá) repetía el mismo pedido de HTF hasta 4
+    // veces por hora aunque la vela de 1h solo cambia una vez por hora — 3 de cada 4
+    // pedidos HTF traían exactamente lo mismo que ya estaba cacheado. Confirmado con
+    // cálculo de cupo diario (~846 créditos/día contra el tope de 800) que esto era la
+    // principal fuente de gasto evitable, y que el "[supply_demand] sin htfCandles" de los
+    // logs es síntoma del mismo agotamiento de cupo (htfOhlcv falla y cae a null en
+    // refreshAsset más abajo), no un bug aparte de supply_demand/session_breakout_vwap.
+    // kill_zone_ny no usa htfCandles (confirmado en custom-strategies.js evaluateAll:
+    // detectKillZoneNY recibe solo `candles`), así que este cambio no lo afecta.
+    // FIX: el caché ahora es válido mientras no se haya cruzado un cierre de hora real
+    // desde el último pedido (mismo bucket de 1h que Date.now()), no un timer ciego —
+    // 1 pedido HTF por hora en vez de hasta 4, sin perder frescura real (la vela no
+    // cambia dentro de la hora) y sin tocar CONFIG.DYNAMIC_REFRESH (cadencia de
+    // precio/señal intacta, como pidió el usuario).
     if (isHtfRequest && !forceRefresh) {
       const cachedHtf = state.klineHistory[symbol] && state.klineHistory[symbol][tf];
       const at = htfFetchedAt[htfKey];
-      if (cachedHtf && cachedHtf.candles.length > 0 && at && (Date.now() - at) < CONFIG.HTF_CACHE_TTL_MS) return cachedHtf;
+      const tfMs = TF_MS[tf] || TF_MS['1h'];
+      if (cachedHtf && cachedHtf.candles.length > 0 && at && Math.floor(Date.now() / tfMs) === Math.floor(at / tfMs)) return cachedHtf;
     }
     const providerList = asset.providerPriority || CONFIG.PROVIDER_PRIORITY;
     const eligible = providerList.filter(providerName => {
@@ -3441,7 +3484,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.13',
+    engineVersion: '4.8.14',
     generatedAt: Date.now()
   };
 }
