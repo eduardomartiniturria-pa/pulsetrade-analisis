@@ -104,6 +104,51 @@ async function loadAll() {
   for (const row of res.rows) store[row.key] = row.value;
 }
 
+
+// MIGRACIÓN A OTRA BASE (una sola vez, no destructiva): si existe la variable de entorno
+// DATABASE_URL_NUEVA, después de cargar todo desde DATABASE_URL se copian todas las claves
+// a esa base nueva. Usa ON CONFLICT DO NOTHING: nunca pisa lo que ya exista en el destino,
+// así que se puede repetir sin riesgo. NO modifica ni borra nada en la base de origen.
+// Si la copia falla, solo se loguea el error: la app sigue arrancando normalmente.
+// Cuando el log diga "[migracion] OK", se cambia DATABASE_URL por la URL nueva y se borra
+// DATABASE_URL_NUEVA.
+async function copiarABaseNueva() {
+  const destino = process.env.DATABASE_URL_NUEVA;
+  if (!destino) return;
+  const poolNuevo = new Pool({
+    connectionString: destino,
+    ssl: { rejectUnauthorized: false },
+    max: 2,
+    connectionTimeoutMillis: 15000
+  });
+  poolNuevo.on('error', (err) => {
+    console.error('[migracion] error en cliente idle de la base nueva (contenido):', err.message);
+  });
+  try {
+    await poolNuevo.query(`
+      CREATE TABLE IF NOT EXISTS kv_store (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      )
+    `);
+    // Sin políticas: la API pública de Supabase no puede leer esta tabla.
+    // La app entra como usuario postgres, que ignora RLS.
+    await poolNuevo.query('ALTER TABLE kv_store ENABLE ROW LEVEL SECURITY');
+    const keys = Object.keys(store);
+    const values = keys.map(k => store[k]);
+    await poolNuevo.query(
+      'INSERT INTO kv_store (key, value) SELECT * FROM unnest($1::text[], $2::text[]) ON CONFLICT (key) DO NOTHING',
+      [keys, values]
+    );
+    const r = await poolNuevo.query('SELECT count(*)::int AS n FROM kv_store');
+    console.log(`[migracion] OK — origen: ${keys.length} claves, destino ahora tiene ${r.rows[0].n} claves.`);
+  } catch (e) {
+    console.error('[migracion] FALLÓ (la app sigue funcionando con la base actual):', e.message);
+  } finally {
+    await poolNuevo.end().catch(() => {});
+  }
+}
+
 function persistKey(key, value) {
   if (!pool) return;
   // Antes: se armaba y lanzaba la query acá mismo, con el `value` de ESTE momento
@@ -218,6 +263,7 @@ async function init() {
   await ensureTable();
   await loadAll();
   console.log(`Supabase conectado — ${Object.keys(store).length} claves cargadas.`);
+  await copiarABaseNueva();
 }
 
 module.exports = { init, onBeforeShutdown };
