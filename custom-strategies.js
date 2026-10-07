@@ -252,15 +252,19 @@ const SESSION_BREAKOUT_VWAP_SYMBOLS = ['EURUSD', 'XAUUSD', 'GBPUSD'];
 // DECISIÓN (5/10, auditoría de rentabilidad — app en neto negativo, decisión de trading del
 // usuario, no bug de código): kill_zone_ny sale de EURUSD y GBPUSD, queda solo en XAUUSD y
 // US500. Motivo: el concepto de "opening range breakout" en la apertura de NY (9:30 ET) tiene
-// sustento documentado para el open real de Wall Street (US500) y para XAUUSD (sistemas reales
-// de NY ORB en oro con estadística pública). Para pares EUR/GBP la evidencia externa ubica el
-// edge de ORB en la apertura de LONDRES, no en la de NY — para las 9:30 ET, Londres ya lleva
-// ~4.5hs operando, el "rango de apertura" de esas 9:30-9:45 ya no captura una apertura real de
-// liquidez para estos pares. Mismo patrón que SESSION_BREAKOUT_VWAP_SYMBOLS (restricción por
-// símbolo, sin tocar la lógica de detección). Si con muestra nueva XAUUSD/US500 sostienen
-// expectancy positiva y en algún momento se quiere reevaluar EURUSD/GBPUSD con un ORB anclado
-// al open de Londres en vez de NY, sería una estrategia nueva, no reactivar esta acá.
-const KILL_ZONE_NY_SYMBOLS = ['XAUUSD', 'US500'];
+// REVERTIDO (7/10, decisión de Soy, cruce de dos respaldos paralelos del 6/10): la
+// restricción a XAUUSD/US500 duró 2 días (5/10-7/10). Motivo de la reversión: contradice
+// los propios resultados reales de la app — EURUSD era, de los 4 activos, el de MEJOR
+// registro en kill_zone_ny (4G/4P, +3.00R total, +0.38R promedio), y XAUUSD el PEOR
+// (4G/9P, -2.05R, -0.16R promedio, encima en prueba de reactivación del circuit
+// breaker). La restricción sacó el activo que mejor venía rindiendo y dejó el que peor
+// rinde, basada en una hipótesis externa (ventaja de ORB en la apertura de Londres para
+// EUR/GBP) nunca contrastada contra la evidencia propia. Con 7-13 operaciones nada está
+// demostrado en ningún sentido — pero entre evidencia propia e hipótesis externa sin
+// contrastar, gana la propia. Vuelve a correr en los 4 activos. Si en el futuro se
+// quiere explorar un ORB anclado al open de Londres para EUR/GBP, debe ser una
+// estrategia nueva y separada, no una restricción de esta.
+const KILL_ZONE_NY_SYMBOLS = ['XAUUSD', 'EURUSD', 'GBPUSD', 'US500'];
 
 // NOTA (limpieza, esta revisión): existían acá 3 funciones de ventana de
 // sesión (isLondonSession, isLondonNYOverlap, isNYOpenWindow) que definían
