@@ -1,4 +1,24 @@
 // ============================================================
+// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.18 (7/10, kill_zone_ny: filtro H1 + SL al 50% del rango)
+// ============================================================
+// Cambios v4.18 (7/10, sesión Claude — decisión de Soy tras comparar kill_zone_ny contra
+// sistemas de ORB documentados en la web, dos puntos pendientes de esa sesión):
+// 1) FILTRO H1: detectKillZoneNY ahora recibe htfCandles (2º parámetro) y usa el mismo
+//    getH1Bias() que ya usan session_breakout_vwap y supply_demand — sin costo de cupo
+//    extra (engine.js ya pedía htfCandles cada ciclo para esas dos). Una ruptura que va
+//    clara y explícitamente en contra de la tendencia H1 se descarta (H1 'no_trade' no
+//    bloquea nada, mismo criterio que B2 del 23/9). evaluateAll() ahora pasa htfCandles a
+//    detectKillZoneNY en la llamada a safeRun.
+// 2) SL AL 50% DEL RANGO: el fix del 5/10 seguía usando el rango completo (rangeLow/
+//    rangeHigh) como base del SL. La literatura de ORB documentada usa el punto medio del
+//    rango (50%), no el extremo opuesto completo — el rango completo arriesgaba ~el doble
+//    por operación de lo que reportan esos sistemas. Mismo colchón de 0.25x ATR14, ahora
+//    aplicado desde rangeMid en vez de rangeLow/rangeHigh.
+// Motivación de ambos cambios: XAUUSD_kill_zone_ny venía en -2.05R/13 operaciones LIVE sin
+// filtro H1 y con el doble de riesgo por operación del estándar documentado — ningún otro
+// parámetro de la estrategia cambió (ventana 9:30-9:45, confirmación por cierre, filtro
+// VWAP, filtro de cuerpo mínimo, TP en 1.5R/2R sobre el nuevo riesgo).
+// ============================================================
 // ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.17 (1/10, kill_zone_ny: ruptura rechazada por VWAP)
 // ============================================================
 // Cambios v4.17 (1/10): único cambio, en detectKillZoneNY (kill_zone_ny).
@@ -571,9 +591,23 @@ function detectSessionBreakoutVwap(candles, htfCandles = null) {
 // Gestión de riesgo sugerida por la infografía (no está en el código,
 // es decisión de tamaño de posición): 0.5%-1% del capital por operación.
 
-function detectKillZoneNY(candles) {
+function detectKillZoneNY(candles, htfCandles = null) {
   const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, mode: null };
   if (!candles || candles.length < 5) return result;
+
+  // FILTRO H1 (7/10, sesión Claude — decisión de Soy, punto 1 pendiente): mismo
+  // getH1Bias() que ya usan session_breakout_vwap y supply_demand, sin costo de cupo
+  // extra — engine.js ya pide htfCandles cada ciclo para esas dos, kill_zone_ny solo
+  // pasa a leer un dato que el motor ya tenía en memoria. Mismo criterio que B2
+  // (v4.16): H1 'no_trade' (lateral, EMAs cruzadas o HTF insuficiente) NO bloquea
+  // nada, solo bloquea una ruptura que va clara y explícitamente en contra de la
+  // tendencia H1. Aplicado DENTRO del loop de búsqueda (como el filtro de VWAP y el
+  // de cuerpo mínimo): una ruptura rechazada por H1 no gasta la oportunidad del día,
+  // sigue buscando si aparece una ruptura más tarde a favor de la tendencia mayor.
+  // Motivación: XAUUSD_kill_zone_ny venía en -2.05R/13 operaciones LIVE sin este
+  // filtro, mientras session_breakout_vwap y supply_demand (ambas con filtro H1)
+  // venían en positivo.
+  const h1Bias = getH1Bias(htfCandles);
 
   const last = candles[candles.length - 1];
   const lastNY = getNYTimeParts(last.time);
@@ -649,6 +683,8 @@ function detectKillZoneNY(candles) {
     if (c.close > rangeHigh) dir = 'bull';
     else if (c.close < rangeLow) dir = 'bear';
     if (!dir) continue;
+    if (h1Bias.bias === 'short' && dir === 'bull') continue; // rechazada por H1: no gasta la oportunidad
+    if (h1Bias.bias === 'long' && dir === 'bear') continue;
     const vwapHere = vwapSeries[firstConfirmIdxInCandles + i];
     if (vwapHere != null) {
       if (dir === 'bull' && c.close <= vwapHere) continue; // rechazada por VWAP: no gasta la oportunidad
@@ -670,23 +706,28 @@ function detectKillZoneNY(candles) {
   // — el extremo de UNA sola vela de 15 minutos (la de 9:30-9:45 NY), sin ningún colchón.
   // Mismo síntoma que ya se corrigió en session_breakout_vwap Modo B el 18/9 ("SL pegado a
   // la mecha de la vela, candidato fuerte al mal resultado histórico") y que supply_demand
-  // nunca tuvo (siempre usó atr*0.2 de colchón). kill_zone_ny había quedado afuera de esa
-  // corrección porque el hallazgo del 18/9 se centró en session_breakout_vwap. Resultado real
-  // verificado en /api/state: XAUUSD kill_zone_ny (la estrategia con más historial del
-  // sistema) acumulaba -2.05R en 13 operaciones LIVE, con XAUUSD como único símbolo con
-  // mechas de feed ya documentadas (ver TP_CONFIRMATION_BUFFER_PIPS_BY_SYMBOL, que protege
-  // el TP contra ese ruido pero nunca protegió el SL). Mismo colchón que las otras dos
-  // estrategias activas: 0.25x ATR14 del lado del SL. No toca el gatillo de entrada ni el
-  // rango de referencia — solo dónde se corta la pérdida.
+  // nunca tuvo (siempre usó atr*0.2 de colchón).
+  // FIX v4.18 (7/10, sesión Claude — decisión de Soy, punto 2 pendiente, investigación
+  // externa de sistemas de NY Open Range Breakout documentados): la corrección del 5/10
+  // seguía usando el rango COMPLETO (rangeLow/rangeHigh) como base del SL, ampliado con el
+  // colchón de 0.25x ATR14. La literatura de ORB documentada usa el PUNTO MEDIO del rango
+  // (50%) como SL, no el extremo opuesto completo — el rango completo + colchón arriesgaba
+  // ~el doble por operación de lo que reportan esos sistemas, lo que explicaba buena parte
+  // del -2.05R/13 operaciones de XAUUSD_kill_zone_ny además de la falta de filtro H1 (ver
+  // arriba). Ahora el SL es el punto medio del rango de referencia + el mismo colchón de
+  // 0.25x ATR14 (mismo criterio de colchón que ya usan las otras dos estrategias activas,
+  // solo cambia el punto de partida del rango completo al 50%). No toca el gatillo de
+  // entrada ni el rango de referencia — solo dónde se corta la pérdida.
   const atr = calculateATR(candles) || 0;
   const entry = last.close;
+  const rangeMid = (rangeHigh + rangeLow) / 2;
   if (direction === 'bull') {
     result.bullish = true;
-    result.sl = rangeLow - atr * 0.25;
+    result.sl = rangeMid - atr * 0.25;
     result.details.push('Ruptura confirmada del máximo de la vela 9:30-9:45 NY');
   } else {
     result.bearish = true;
-    result.sl = rangeHigh + atr * 0.25;
+    result.sl = rangeMid + atr * 0.25;
     result.details.push('Ruptura confirmada del mínimo de la vela 9:30-9:45 NY');
   }
   result.entry = entry;
@@ -1633,7 +1674,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
   const signals = [];
 
   if (KILL_ZONE_NY_SYMBOLS.includes(symbol)) {
-    const kz = safeRun('kill_zone_ny', detectKillZoneNY, candles);
+    const kz = safeRun('kill_zone_ny', detectKillZoneNY, candles, htfCandles);
     if (kz.bullish || kz.bearish) {
       signals.push({
         strategy: 'kill_zone_ny', label: 'Kill Zone Apertura NY (9:30 AM)',
@@ -1733,7 +1774,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
   // función para activos is24h:false (ver más arriba): en FX/oro real, incluso
   // acotando la confirmación a la sesión de Londres/NY, la estrategia sigue sin
   // edge; se saca del todo en vez de seguir parcheando el filtro horario.
-  if (SESSION_FALSE_BREAKOUT_ENABLED && SESSION_FALSE_BREAKOUT_SYMBOLS.includes(symbol)) {
+ if (SESSION_FALSE_BREAKOUT_ENABLED && SESSION_FALSE_BREAKOUT_SYMBOLS.includes(symbol)) {
   const sfb = safeRun('session_false_breakout', detectSessionFalseBreakout, candles, asset);
   if (sfb.bullish || sfb.bearish) {
     signals.push({
