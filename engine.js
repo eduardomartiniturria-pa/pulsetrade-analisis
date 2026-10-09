@@ -2222,6 +2222,7 @@ function pushSignalHistory(signal) {
     entry: signal.entry, sl: signal.sl, tp1: signal.tp1, tp2: signal.tp2,
     slPips: signal.slPips, tp1Pips: signal.tp1Pips, tp2Pips: signal.tp2Pips,
     decimals: signal.decimals, confidence: signal.confidence, result: 'pending', timestamp: signal.timestamp,
+    entryCandleTime: signal.entryCandleTime != null ? signal.entryCandleTime : null, // FIX (9/10): ver checkHistoryOutcomes
     strategyKeys: signal.strategyKeys || [], rMultiple: null, regime: signal.regime || 'unknown',
     // FIX (15/9, auditoría): antes el fallback era 'smc', mezclando en las estadísticas
     // señales viejas sin campo source (de antes de trackear por estrategia) con la
@@ -2899,7 +2900,15 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
     let outcome = null;
     let rHit = rTP1;
     let tp1AlreadyHit = false;
-    const relevantCandles = (candles || []).filter(c => c.time >= h.timestamp);
+    // FIX (9/10, auditoría de rentabilidad): antes se descartaban todas las velas con
+    // apertura anterior a h.timestamp (momento en que el motor detecta la señal, unos
+    // minutos DESPUÉS del cierre de la vela de entrada). Eso dejaba afuera la primera
+    // vela posterior a la entrada: un SL o TP tocado ahí no se registraba (sesgo
+    // optimista, sobre todo con stops cortos). La entrada se asume al cierre de la vela
+    // que disparó la señal (entry = last.close), así que se controla desde la vela
+    // siguiente. Señales viejas sin entryCandleTime mantienen el criterio anterior.
+    const relevantCandles = (candles || []).filter(c =>
+      h.entryCandleTime != null ? c.time > h.entryCandleTime : c.time >= h.timestamp);
     // v4.7 (Etapa 3 — auditoría de cierre de operaciones): antes esta función
     // cerraba en 'win' apenas la vela tocaba TP1, sin mirar h.tp2 para nada —
     // h.tp2/h.tp2Pips se guardaban en el historial pero no se usaban acá. Para
@@ -3162,7 +3171,7 @@ function notifyNewSignal(signal) {
 }
 function toggleSound() {}
 function toggleStrictMode() { state.strictMode = !state.strictMode; }
-function resolveCustomSignal(symbol, quote, customSig, asset) {
+function resolveCustomSignal(symbol, quote, customSig, asset, entryCandleTime = null) {
   const key = `${symbol}_${customSig.strategy}`;
   const existing = state.activeCustomSignals[key];
   const isNewDirection = !existing || existing.type !== customSig.direction;
@@ -3348,6 +3357,10 @@ function resolveCustomSignal(symbol, quote, customSig, asset) {
       profitabilityExpectancyR: profitabilityDecision ? profitabilityDecision.expectancyR : null,
       details: customSig.details, source: customSig.strategy, regime: 'n/a',
       timestamp: Date.now(), decimals: asset.decimals, detectedAt: Date.now(),
+      // FIX (9/10, auditoría de rentabilidad): apertura de la vela cerrada que disparó la
+      // señal. La entrada se asume al CIERRE de esa vela, así que checkHistoryOutcomes
+      // controla SL/TP desde la vela siguiente (ver ahí). Solo informativo para el resto.
+      entryCandleTime: entryCandleTime,
       tp1HitAt: null,
       // NUEVO (auditoría 18/9 v2, plan de rentabilidad — punto A1): etiqueta la señal
       // con el proveedor y si su spread era real o sintético en el momento en que se
@@ -3617,7 +3630,8 @@ async function refreshAsset(symbol, forceRefresh = false) {
       });
       const firedThisCycle = new Set();
       filteredSignals.forEach(sig => {
-        const customDisplay = resolveCustomSignal(symbol, quote, sig, asset);
+        const entryCandleTime = closedCandles.length ? closedCandles[closedCandles.length - 1].time : null;
+        const customDisplay = resolveCustomSignal(symbol, quote, sig, asset, entryCandleTime);
         renderCustomSignal(symbol, sig.strategy, customDisplay);
         firedThisCycle.add(sig.strategy);
         if (customDisplay && !customDisplay.belowConfidenceThreshold) {
