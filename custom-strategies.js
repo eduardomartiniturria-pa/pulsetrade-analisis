@@ -1,4 +1,9 @@
 // ============================================================
+// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.19 (9/10, kill_zone_ny: ventana de ruptura hasta 11:00 NY)
+// ============================================================
+// Cambios v4.19 (9/10): único cambio, en detectKillZoneNY. La ruptura solo es válida si la vela
+// abre antes de las 10:45 NY (KZ_MAX_BREAKOUT_OPEN_MIN). Ver comentario junto a la constante.
+// ============================================================
 // ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.18 (7/10, kill_zone_ny: filtro H1 + SL al 50% del rango)
 // ============================================================
 // Cambios v4.18 (7/10, sesión Claude — decisión de Soy tras comparar kill_zone_ny contra
@@ -447,6 +452,15 @@ const SBV_REJECTION_MIN_RANGE_ATR = 0.5;
 // otro número).
 const KZ_MIN_BODY_RATIO_ATR = 0.6;
 const KZ_MIN_BODY_RATIO_RANGE = 0.6;
+// FIX v4.19 (9/10, auditoría de rentabilidad): última vela de ruptura válida para kill_zone_ny.
+// Desde v4.17 la búsqueda de ruptura no tenía límite de hora, y el 9/10 disparó una señal
+// GBPUSD a las 14:15 NY (4h30 después de la apertura): eso ya no es una ruptura de la
+// apertura y su SL (punto medio del rango de las 9:30) quedaba lejos de la acción. Se
+// restituye la estructura original: solo cuenta una ruptura cuya vela abra antes de las
+// 10:45 NY (cierra a las 11:00 NY, fin de la ventana de apertura). Pasada esa hora, sin señal.
+// Sigue valiendo v4.17: una ruptura rechazada por VWAP/H1/cuerpo NO gasta la oportunidad
+// DENTRO de esta ventana. No cambia rango de referencia, filtros, SL ni TP.
+const KZ_MAX_BREAKOUT_OPEN_MIN = 10 * 60 + 45;
 
 function detectSessionBreakoutVwap(candles, htfCandles = null) {
   const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, mode: null };
@@ -679,6 +693,8 @@ function detectKillZoneNY(candles, htfCandles = null) {
   let breakoutCandle = null, direction = null;
   for (let i = 0; i < confirmCandles.length; i++) {
     const c = confirmCandles[i];
+    const cNY = getNYTimeParts(c.time);
+    if (cNY.hour * 60 + cNY.minute > KZ_MAX_BREAKOUT_OPEN_MIN) break; // fuera de la ventana de apertura (v4.19): velas ordenadas, no hay más candidatas
     let dir = null;
     if (c.close > rangeHigh) dir = 'bull';
     else if (c.close < rangeLow) dir = 'bear';
@@ -1728,7 +1744,7 @@ function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = nu
   // en origen. IMPORTANTE: este flag debe reflejar manualmente si 'eth_vwap_scalp'
   // está en CONFIG.ENABLED_STRATEGIES de engine.js — no se leen entre sí.
   // Si se reincorpora eth_vwap_scalp a la whitelist, cambiar esto a true.
-  if (ETH_VWAP_SCALP_ENABLED && symbol === 'ETHUSD') {
+if (ETH_VWAP_SCALP_ENABLED && symbol === 'ETHUSD') {
     const ethVwap = safeRun('eth_vwap_scalp', detectEthVwapScalp, candles, htfCandles);
     if (ethVwap.bullish || ethVwap.bearish) {
       signals.push({
@@ -1949,3 +1965,4 @@ module.exports = {
 //     implementa Open Market NY como estrategia real, se hace de cero con
 //     su propio nombre — no reflotando funciones huérfanas.
 // ============================================================
+
