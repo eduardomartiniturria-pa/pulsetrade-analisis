@@ -1,6 +1,7 @@
 // ============================================================
-// PULSE TRADE v4.8.16 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.17 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.17 (10/10): solo medición. Cada operación cerrada guarda closedAt, closeCandleTime, mfeR (cuánto fue a favor, en R) y maeR (en contra). No cambia resultados ni señales.
 // Cambios v4.8.16 (10/10): solo visual, en markMarketClosedDisplays. Una señal ya vencida por tiempo
 // seguía mostrándose como abierta mientras el mercado estaba cerrado o fuera de sesión (no hay ciclos
 // con datos que la den de baja). Ahora la tarjeta muestra el cierre de mercado; el resultado real lo
@@ -2943,17 +2944,30 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
     // motor no simula mover el stop a breakeven tras TP1, así que no se inventa
     // ese comportamiento acá. TP1 solo queda registrado como marca informativa
     // (tp1AlreadyHit) para el caso de expiración con TP1 ya tocado (ver abajo).
+    // NUEVO (10/10, diagnóstico de rentabilidad — solo medición, no cambia ningún resultado):
+    // mfeR = cuánto llegó a moverse el precio A FAVOR (en múltiplos de R) antes del cierre;
+    // maeR = cuánto en contra. closeCandleTime = vela en la que se tocó SL/TP. Sirve para saber
+    // si las perdedoras iban ganando antes de tocar el SL y cuánto tarda cada operación.
+    const riskDist = Math.abs(h.entry - h.sl) || 0;
+    let mfeR = 0, maeR = 0, closeCandleTime = null;
     if (relevantCandles.length) {
       for (const c of relevantCandles) {
         const hitSL = isLong ? c.low <= h.sl : c.high >= h.sl;
         const hitTP1 = isLong ? c.high >= tp1Level : c.low <= tp1Level;
         const hitTP2 = hasTp2 && (isLong ? c.high >= tp2Level : c.low <= tp2Level);
-        if (hitSL) { outcome = 'loss'; rHit = -1; break; }
+        if (riskDist > 0) {
+          const fav = (isLong ? c.high - h.entry : h.entry - c.low) / riskDist;
+          // en la vela del SL no se sabe el orden high/low: no se suma al MFE (criterio conservador)
+          if (!hitSL && fav > mfeR) mfeR = fav;
+          const against = (isLong ? h.entry - c.low : c.high - h.entry) / riskDist;
+          if (against > maeR) maeR = against;
+        }
+        if (hitSL) { outcome = 'loss'; rHit = -1; closeCandleTime = c.time; break; }
         if (hasTp2) {
-          if (hitTP2) { outcome = 'win'; rHit = rTP2; break; }
+          if (hitTP2) { outcome = 'win'; rHit = rTP2; closeCandleTime = c.time; break; }
           if (hitTP1) tp1AlreadyHit = true; // sigue pendiente, esperando TP2 o SL
         } else if (hitTP1) {
-          outcome = 'win'; rHit = rTP1; break;
+          outcome = 'win'; rHit = rTP1; closeCandleTime = c.time; break;
         }
       }
     }
@@ -2988,6 +3002,7 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
       const spreadPips = CONFIG.ESTIMATED_SPREAD_PIPS_BY_SYMBOL[symbol] || 0;
       const spreadCostR = h.slPips ? spreadPips / h.slPips : 0;
       h.result = outcome; h.grossRMultiple = rHit; h.rMultiple = +(rHit - spreadCostR).toFixed(2); changed = true; resolvedEntries.push(h);
+      h.closedAt = Date.now(); h.closeCandleTime = closeCandleTime; h.mfeR = +mfeR.toFixed(2); h.maeR = +maeR.toFixed(2);
       // FIX (30/8): esta función resuelve el historial mirando la mecha (high/low)
       // de las velas del proveedor de datos, pero el widget en vivo
       // (activeCustomSignals / evaluateCustomSignalOutcome) solo mira quote.last
@@ -3521,7 +3536,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.16',
+    engineVersion: '4.8.17',
     generatedAt: Date.now()
   };
 }
