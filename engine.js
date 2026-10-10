@@ -1,6 +1,14 @@
 // ============================================================
-// PULSE TRADE v4.8.14 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.16 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.16 (10/10): solo visual, en markMarketClosedDisplays. Una señal ya vencida por tiempo
+// seguía mostrándose como abierta mientras el mercado estaba cerrado o fuera de sesión (no hay ciclos
+// con datos que la den de baja). Ahora la tarjeta muestra el cierre de mercado; el resultado real lo
+// sigue fijando checkHistoryOutcomes con las velas al reanudarse los datos. No toca estrategias.
+// Cambios v4.8.15 (10/10, auditoría de mejoras): único cambio, en el calendario de horarios.
+// US500 figuraba abierto desde el domingo 13:30 UTC (el cash NYSE reabre el lunes), lo que gastaba
+// cupo de Twelve Data durante ~24h por semana y mostraba una reapertura incorrecta. Ver
+// weekOpenDaysAfterFriday en SCHEDULE_PROFILES.us500_cash. No toca estrategias ni parámetros.
 // Cambios v4.8.14 (7/10, gasto de llamadas Twelve Data — sesión 7/10, hallazgo del
 // respaldo PulseTrade_Respaldo_Sesion_07-10-2026_v3.md, sección 5):
 // - CAUSA RAÍZ: el caché de velas HTF (1h) en getOHLCV usaba CONFIG.HTF_CACHE_TTL_MS
@@ -1280,6 +1288,7 @@ const SCHEDULE_PROFILES = {
   us500_cash: {
     label: 'US500 (horario NYSE vía SPY)', estimated: true,
     weekOpen: { h: 13, m: 30 }, weekClose: { h: 20, m: 0 },
+    weekOpenDaysAfterFriday: 3, // FIX (10/10): cash NYSE reabre el LUNES 13:30 UTC, no el domingo
     dailyBreaks: [{ h: 20, m: 0, durMin: 1050 }],
     rollover: null
   }
@@ -1317,7 +1326,11 @@ function getScheduleIntervals(profile, symbol, nowMs) {
     const shift = isExnessSummer(dayMs) ? 0 : 60;
     const at = (hm, addMin = 0) => dayMs + (hm.h * 60 + hm.m + shift + addMin) * MIN;
     if (dow === 5) {
-      const sunMs = dayMs + 2 * DAY;
+      // FIX (10/10, auditoría de mejoras): la reapertura semanal se calculaba siempre el domingo
+      // (+2 días). Para US500 (cash NYSE vía SPY) eso daba "reabre domingo 13:30 UTC": el domingo
+      // el mercado figuraba abierto y se gastaban ~96 ciclos x 3 pedidos de Twelve Data hasta el
+      // lunes. weekOpenDaysAfterFriday: 3 => reabre el lunes. Los demás perfiles no lo definen (2).
+      const sunMs = dayMs + (profile.weekOpenDaysAfterFriday || 2) * DAY;
       const sunShift = isExnessSummer(sunMs) ? 0 : 60;
       closed.push({ start: at(profile.weekClose), end: sunMs + (profile.weekOpen.h * 60 + profile.weekOpen.m + sunShift) * MIN, type: 'weekend' });
     }
@@ -2205,7 +2218,18 @@ function markMarketClosedDisplays(symbol, reason) {
   const disabled = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
   CONFIG.ENABLED_STRATEGIES.forEach(strategyKey => {
     if (disabled.includes(strategyKey)) return;
-    if (state.activeCustomSignals[`${symbol}_${strategyKey}`]) return;
+    const open = state.activeCustomSignals[`${symbol}_${strategyKey}`];
+    if (open) {
+      // FIX (10/10, v4.8.16): la tarjeta de un trade abierto se conservaba SIEMPRE, aun con la
+      // señal ya vencida por tiempo: el vencimiento solo se evalúa en un ciclo con datos
+      // (evaluateCustomSignalOutcome / checkHistoryOutcomes) y con el mercado cerrado o fuera de
+      // sesión no hay ciclos. Caso real: GBPUSD kill_zone_ny salida el viernes 15:15 (hora Argentina),
+      // vence a las 4h, quedó "abierta" todo el fin de semana. Ahora, si ya pasó su plazo, se muestra
+      // el cierre de mercado; la señal NO se da de baja acá: el resultado real (SL/TP/vencida) lo
+      // fija checkHistoryOutcomes con las velas apenas se reanuden los datos. Vigentes: sin cambios.
+      const expMs = (CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY && CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY[open.source]) || CONFIG.SIGNAL_EXPIRATION_MS;
+      if (Date.now() - open.timestamp <= expMs) return;
+    }
     renderCustomSignal(symbol, strategyKey, { type: 'market-closed', reason });
   });
 }
@@ -3497,7 +3521,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.14',
+    engineVersion: '4.8.16',
     generatedAt: Date.now()
   };
 }
