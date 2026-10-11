@@ -1,6 +1,7 @@
 // ============================================================
-// PULSE TRADE v4.8.18 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.19 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.19 (11/10): circuit breaker, umbral por defecto de 2 a 5 pérdidas seguidas (con ~40% de aciertos, 2 seguidas es normal y apagaba estrategias sanas). Una sola vez rehabilita las combinaciones apagadas con el umbral viejo cuya racha real es menor a 5. No toca estrategias ni parámetros de entrada.
 // Cambios v4.8.18 (11/10): calendario de noticias PROPIO (STATIC_NEWS_EVENTS: Fed, NFP, CPI, BCE, Banco de Inglaterra, hasta fin de 2027) porque el feed externo está bloqueado. EURUSD suma EUR. Mismo efecto de siempre: resta puntos al puntaje, no bloquea ni toca estrategias.
 // Cambios v4.8.17 (10/10): solo medición. Cada operación cerrada guarda closedAt, closeCandleTime, mfeR (cuánto fue a favor, en R) y maeR (en contra). No cambia resultados ni señales.
 // Cambios v4.8.16 (10/10): solo visual, en markMarketClosedDisplays. Una señal ya vencida por tiempo
@@ -631,7 +632,11 @@ const CONFIG = {
     // entre los 4 activos, no para una sola combinación con historial propio.
     qualifiedMinSample: 15,
     qualifiedThreshold: 5,
-    defaultThreshold: 2,
+    // v4.8.19 (11/10): defaultThreshold 2 -> 5. Con ~40% de aciertos y TP de 1.5R, 2 pérdidas seguidas
+    // es lo NORMAL (probabilidad ~100% de que ocurra al menos una vez en 20 operaciones; 5 seguidas
+    // solo ~48%). Con 2 el breaker apagaba estrategias sanas por varianza y, apagadas, no podían
+    // juntar muestra para demostrar nada: el 11/10 había 3 combinaciones apagadas con racha 2.
+    defaultThreshold: 5,
     consecutiveLossThresholdAggregate: 8
   },
   // NUEVO (27/9, plan de rentabilidad, punto 8 — reactivación inteligente): ver
@@ -3599,7 +3604,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.18',
+    engineVersion: '4.8.19',
     generatedAt: Date.now()
   };
 }
@@ -4034,7 +4039,32 @@ migrateRenamedStrategyKeys();
 seedLiveStatsFromClosedHistory(); // v4.8.2
 cleanupLegacyAutoTuneKeys(); // v4.8.3
 cleanupRetiredSymbolAutoTuneKeys(); // v4.8.6
+// v4.8.19 (11/10): una sola vez, rehabilita las combinaciones que el breaker apagó con el umbral viejo (2)
+// y cuya racha real NO llega al umbral nuevo. No toca las apagadas por seed, retroactivo ni reactivación
+// fallida, ni las que están en fase de prueba, ni las que sí se sostienen con el historial real.
+function reenableAfterThresholdChange() {
+  const FLAG = 'pt_cb_threshold5_reenable_v1';
+  try { if (localStorage.getItem(FLAG)) return; } catch (e) {}
+  let reenabled = 0;
+  Object.entries(state.autoDisabledStrategies || {}).forEach(([ckey, info]) => {
+    if (!info || info.seeded || info.retroactive || info.reactivationFailed) return;
+    if (state.reactivationTesting[ckey]) return;
+    if (!isCombinationOperable(info.symbol, info.key)) return;
+    const live = getLiveLossStreak(info.symbol, info.key);
+    if (!live || live.saturated) return;
+    if (live.streak >= getCircuitBreakerThreshold(info.symbol, info.key)) return; // sí se sostiene con el umbral nuevo
+    delete state.autoDisabledStrategies[ckey];
+    const dl = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[info.symbol] || [];
+    const di = dl.indexOf(info.key);
+    if (di !== -1) dl.splice(di, 1);
+    reenabled++;
+    console.log(`[streak-fix] ${ckey}: apagada con el umbral viejo (racha ${info.lossStreak}, historial real ${live.streak}) — se rehabilita con el umbral nuevo`);
+  });
+  if (reenabled) localStorage.setItem('pt_auto_disabled_strategies', JSON.stringify(state.autoDisabledStrategies));
+  try { localStorage.setItem(FLAG, JSON.stringify({ at: Date.now(), reenabled })); } catch (e) {}
+}
 reconcileLossStreaksFromLiveStats(); // v4.8.11
+reenableAfterThresholdChange(); // v4.8.19
 reconcileAggregateLossStreaks(); // v4.8.12
 applyRetroactiveCircuitBreaker();
 
