@@ -1,6 +1,7 @@
 // ============================================================
-// PULSE TRADE v4.8.17 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.18 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.18 (11/10): calendario de noticias PROPIO (STATIC_NEWS_EVENTS: Fed, NFP, CPI, BCE, Banco de Inglaterra, hasta fin de 2027) porque el feed externo está bloqueado. EURUSD suma EUR. Mismo efecto de siempre: resta puntos al puntaje, no bloquea ni toca estrategias.
 // Cambios v4.8.17 (10/10): solo medición. Cada operación cerrada guarda closedAt, closeCandleTime, mfeR (cuánto fue a favor, en R) y maeR (en contra). No cambia resultados ni señales.
 // Cambios v4.8.16 (10/10): solo visual, en markMarketClosedDisplays. Una señal ya vencida por tiempo
 // seguía mostrándose como abierta mientras el mercado estaba cerrado o fuera de sesión (no hay ciclos
@@ -1499,7 +1500,50 @@ const ResponseCache = {
 // que es para cotizaciones — un calendario semanal no cambia de un ciclo al siguiente).
 // NUEVO (20/9): divisas cuyas noticias de alto impacto afectan el score de cada activo.
 // GBPUSD suma GBP (decisiones del BoE, IPC UK). EURUSD/XAUUSD/US500 quedan solo en USD, como antes.
-const NEWS_CURRENCIES_BY_SYMBOL = { XAUUSD: ['USD'], EURUSD: ['USD'], US500: ['USD'], GBPUSD: ['USD', 'GBP'] };
+const NEWS_CURRENCIES_BY_SYMBOL = { XAUUSD: ['USD'], EURUSD: ['USD', 'EUR'], US500: ['USD'], GBPUSD: ['USD', 'GBP'] }; // v4.8.18: EURUSD suma EUR (decisiones del BCE)
+// NUEVO (v4.8.18, 11/10): CALENDARIO PROPIO de eventos de alto impacto, sin depender de ningún
+// servidor externo. Motivo: el feed de ForexFactory está bloqueado (429) desde la IP de Render,
+// así que NewsCalendar nunca devolvió una noticia real. Acá se cargan a mano las fechas OFICIALES
+// (publicadas con meses de anticipación) de los eventos que más mueven EURUSD, GBPUSD, XAUUSD y
+// US500: decisión de tasas de la Fed (FOMC), empleo (NFP) e inflación (CPI) de EE.UU., decisión
+// del BCE y decisión del Banco de Inglaterra. Alimenta el MISMO ajuste de puntaje de siempre
+// (computeContextualScore): no bloquea señales ni toca estrategias.
+// FUENTES: federalreserve.gov/monetarypolicy/fomccalendars.htm (las fechas de 2027-2028 son
+// tentativas hasta confirmarse en la reunión previa), bls.gov/schedule (NFP y CPI),
+// ecb.europa.eu (calendario de reuniones de política monetaria), bankofengland.co.uk
+// (fechas confirmadas del MPC). Verificadas el 11/10/2026.
+// COBERTURA: hasta STATIC_NEWS_COVERS_UNTIL. Pasada esa fecha NO hay noticias propias: hay que
+// agregar el año nuevo (ver cómo se actualiza en el Mapa maestro). 60 días antes avisa en los logs.
+// Hora del evento = hora local oficial de cada organismo (se convierte a UTC con su huso horario,
+// con horario de verano incluido): Fed 14:00 Nueva York, BLS 8:30 Nueva York, BCE 14:15 Fráncfort,
+// Banco de Inglaterra 12:00 Londres.
+const STATIC_NEWS_COVERS_UNTIL = '2027-12-31';
+const STATIC_NEWS_EVENTS = [
+  { tz: 'America/New_York', time: '14:00', country: 'USD', title: 'Decisión de tasas FOMC (Fed)',
+    dates: ['2026-10-28', '2026-12-09', '2027-01-27', '2027-03-17', '2027-04-28', '2027-06-09', '2027-07-28', '2027-09-15', '2027-10-27', '2027-12-08'] },
+  { tz: 'America/New_York', time: '08:30', country: 'USD', title: 'Empleo no agrícola EE.UU. (NFP)',
+    dates: ['2026-11-06', '2026-12-04', '2027-01-08', '2027-02-05', '2027-03-05', '2027-04-02', '2027-05-07', '2027-06-04', '2027-07-02', '2027-08-06', '2027-09-03', '2027-10-08', '2027-11-05', '2027-12-03'] },
+  { tz: 'America/New_York', time: '08:30', country: 'USD', title: 'Inflación CPI EE.UU.',
+    dates: ['2026-10-14', '2026-11-10', '2026-12-10', '2027-01-13', '2027-02-11', '2027-03-10', '2027-04-13', '2027-05-12', '2027-06-10', '2027-07-14', '2027-08-11', '2027-09-14', '2027-10-14', '2027-11-10', '2027-12-10'] },
+  { tz: 'Europe/Berlin', time: '14:15', country: 'EUR', title: 'Decisión de tasas BCE',
+    dates: ['2026-10-29', '2026-12-17', '2027-02-04', '2027-03-18', '2027-04-29', '2027-06-10', '2027-07-22', '2027-09-09', '2027-10-28', '2027-12-16'] },
+  { tz: 'Europe/London', time: '12:00', country: 'GBP', title: 'Decisión de tasas Banco de Inglaterra',
+    dates: ['2026-11-05', '2026-12-17', '2027-02-04', '2027-03-18', '2027-04-29', '2027-06-17', '2027-07-29', '2027-09-16', '2027-11-04', '2027-12-16'] }
+];
+// Convierte una fecha y hora LOCAL de un huso horario (con su horario de verano) a milisegundos UTC.
+function zonedTimeToUtcMs(dateStr, timeStr, tz) {
+  const [y, mo, d] = dateStr.split('-').map(Number);
+  const [hh, mm] = timeStr.split(':').map(Number);
+  const wanted = Date.UTC(y, mo - 1, d, hh, mm);
+  const fmt = new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const localAsUtc = (ms) => {
+    const p = {}; fmt.formatToParts(new Date(ms)).forEach(x => { p[x.type] = x.value; });
+    return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute);
+  };
+  let ms = wanted - (localAsUtc(wanted) - wanted);
+  ms = wanted - (localAsUtc(ms) - ms); // segunda pasada: corrige si el cambio de horario cae en medio
+  return ms;
+}
 const NewsCalendar = {
   FEED_URL: 'https://nfs.faireconomy.media/ff_calendar_thisweek.json',
   CACHE_MS: 30 * 60 * 1000,
@@ -1571,8 +1615,27 @@ const NewsCalendar = {
 
   // Devuelve el evento de mayor impacto dentro de ±windowMinutes del momento actual,
   // filtrado por moneda (USD afecta a los 4 activos de esta app). null si no hay ninguno.
+  // v4.8.18: eventos del calendario propio (STATIC_NEWS_EVENTS), convertidos una sola vez a UTC.
+  _staticEvents: null,
+  getStaticEvents() {
+    if (!this._staticEvents) {
+      this._staticEvents = [];
+      STATIC_NEWS_EVENTS.forEach(g => g.dates.forEach(dt => {
+        this._staticEvents.push({ title: g.title, country: g.country, impact: 'High', date: new Date(zonedTimeToUtcMs(dt, g.time, g.tz)).toISOString(), source: 'static' });
+      }));
+    }
+    // Aviso de vencimiento del calendario propio: una vez por día, desde 60 días antes del final.
+    const coversMs = Date.parse(STATIC_NEWS_COVERS_UNTIL + 'T23:59:59Z');
+    const daysLeft = Math.floor((coversMs - Date.now()) / 86400000);
+    if (daysLeft <= 60 && this._lastCoverWarnDay !== new Date().toISOString().slice(0, 10)) {
+      this._lastCoverWarnDay = new Date().toISOString().slice(0, 10);
+      console.warn(`[NewsCalendar] el calendario propio ${daysLeft >= 0 ? 'vence en ' + daysLeft + ' días' : 'VENCIÓ'} (cubre hasta ${STATIC_NEWS_COVERS_UNTIL}): hay que cargar el año nuevo en STATIC_NEWS_EVENTS`);
+    }
+    return this._staticEvents;
+  },
+
   async getNearbyHighImpact(currency = 'USD', windowMinutes = 60) {
-    const events = await this.getEvents();
+    const events = (await this.getEvents()).concat(this.getStaticEvents());
     const now = Date.now();
     const windowMs = windowMinutes * 60 * 1000;
     let closest = null;
@@ -3536,7 +3599,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.17',
+    engineVersion: '4.8.18',
     generatedAt: Date.now()
   };
 }
