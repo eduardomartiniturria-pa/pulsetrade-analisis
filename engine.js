@@ -1,6 +1,10 @@
 // ============================================================
-// PULSE TRADE v4.8.19 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.20 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.20 (11/10): solo medición y cierre de plazos, en checkHistoryOutcomes. No toca estrategias, entradas, SL/TP ni parámetros.
+//  1) Doble cuenta TP1/TP2: cada cierre guarda tp1Touched, rTP1, rTP2 y rIfTP1 (lo que habría dado cerrando todo en TP1). Resumen en /api/state -> diagnostics.tpComparison. La app sigue registrando el resultado como antes (paga TP2).
+//  2) Vencidas a mercado: una señal vencida se valúa con el cierre de la última vela dentro de su plazo (antes 0R fijo). Sigue siendo 'expired': no entra en winrate/expectancy/circuit breaker.
+//  3) Tope de vencimiento: ya no se cuentan SL/TP tocados DESPUÉS del plazo de la señal (ni el precio actual si ya venció).
 // Cambios v4.8.19 (11/10): circuit breaker, umbral por defecto de 2 a 5 pérdidas seguidas (con ~40% de aciertos, 2 seguidas es normal y apagaba estrategias sanas). Una sola vez rehabilita las combinaciones apagadas con el umbral viejo cuya racha real es menor a 5. No toca estrategias ni parámetros de entrada.
 // Cambios v4.8.18 (11/10): calendario de noticias PROPIO (STATIC_NEWS_EVENTS: Fed, NFP, CPI, BCE, Banco de Inglaterra, hasta fin de 2027) porque el feed externo está bloqueado. EURUSD suma EUR. Mismo efecto de siempre: resta puntos al puntaje, no bloquea ni toca estrategias.
 // Cambios v4.8.17 (10/10): solo medición. Cada operación cerrada guarda closedAt, closeCandleTime, mfeR (cuánto fue a favor, en R) y maeR (en contra). No cambia resultados ni señales.
@@ -3000,8 +3004,16 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
     // optimista, sobre todo con stops cortos). La entrada se asume al cierre de la vela
     // que disparó la señal (entry = last.close), así que se controla desde la vela
     // siguiente. Señales viejas sin entryCandleTime mantienen el criterio anterior.
+    // v4.8.20 (11/10): tope de vencimiento. Antes se miraban TODAS las velas posteriores a la
+    // entrada, aun las que ocurrieron después de vencida la señal (caso típico: señal del
+    // viernes con mercado cerrado el fin de semana, que se resuelve el lunes con velas del lunes).
+    // Un SL/TP tocado después del plazo se contaba como resultado real. Ahora solo cuentan las
+    // velas dentro de la ventana de vida de la señal (timestamp + vencimiento).
+    const expirationMs = (CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY && CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY[h.source]) || CONFIG.SIGNAL_EXPIRATION_MS;
+    const pastExpiry = (Date.now() - h.timestamp) > expirationMs;
+    const expiryCutoff = h.timestamp + expirationMs;
     const relevantCandles = (candles || []).filter(c =>
-      h.entryCandleTime != null ? c.time > h.entryCandleTime : c.time >= h.timestamp);
+      (h.entryCandleTime != null ? c.time > h.entryCandleTime : c.time >= h.timestamp) && c.time <= expiryCutoff);
     // v4.7 (Etapa 3 — auditoría de cierre de operaciones): antes esta función
     // cerraba en 'win' apenas la vela tocaba TP1, sin mirar h.tp2 para nada —
     // h.tp2/h.tp2Pips se guardaban en el historial pero no se usaban acá. Para
@@ -3032,14 +3044,15 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
         }
         if (hitSL) { outcome = 'loss'; rHit = -1; closeCandleTime = c.time; break; }
         if (hasTp2) {
-          if (hitTP2) { outcome = 'win'; rHit = rTP2; closeCandleTime = c.time; break; }
+          if (hitTP2) { outcome = 'win'; rHit = rTP2; tp1AlreadyHit = true; closeCandleTime = c.time; break; }
           if (hitTP1) tp1AlreadyHit = true; // sigue pendiente, esperando TP2 o SL
         } else if (hitTP1) {
           outcome = 'win'; rHit = rTP1; closeCandleTime = c.time; break;
         }
       }
     }
-    if (!outcome) {
+    // v4.8.20: si la señal ya venció, el precio de AHORA no cuenta (puede ser de días después).
+    if (!outcome && !pastExpiry) {
       if (isLong && currentPrice <= h.sl) { outcome = 'loss'; rHit = -1; }
       else if (!isLong && currentPrice >= h.sl) { outcome = 'loss'; rHit = -1; }
       else if (hasTp2) {
@@ -3052,13 +3065,25 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
         else if (!isLong && currentPrice <= tp1Level) { outcome = 'win'; rHit = rTP1; }
       }
     }
-    const expirationMs = (CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY && CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY[h.source]) || CONFIG.SIGNAL_EXPIRATION_MS;
-    if (!outcome && (Date.now() - h.timestamp) > expirationMs) {
+    let expiryMarked = false, expiryMarkPrice = null;
+    if (!outcome && pastExpiry) {
       // Si expiró habiendo tocado TP1 en el camino (pero nunca SL ni TP2), se
       // registra como ganada al R real de TP1 en vez de 'expired'/0R — el precio
       // sí llegó a un objetivo real antes de que se acabara el tiempo.
       if (hasTp2 && tp1AlreadyHit) { outcome = 'win'; rHit = rTP1; }
-      else { outcome = 'expired'; rHit = 0; }
+      else {
+        outcome = 'expired'; rHit = 0;
+        // v4.8.20 (11/10): una vencida ya no vale 0R fijo. Se valúa "a mercado" con el cierre de la
+        // última vela dentro de la ventana de vida de la señal: lo que habrías ganado o perdido si
+        // cerrabas la operación al vencer. Sigue siendo 'expired' (NO entra en winrate, expectancy
+        // ni circuit breaker: esas cuentas no cambian); solo se guarda el R real para medirlo.
+        const lastC = relevantCandles.length ? relevantCandles[relevantCandles.length - 1] : null;
+        if (lastC && riskDist > 0 && lastC.close != null) {
+          const rawR = (isLong ? lastC.close - h.entry : h.entry - lastC.close) / riskDist;
+          rHit = +Math.max(-1, Math.min(rTP1, rawR)).toFixed(2);
+          expiryMarked = true; expiryMarkPrice = lastC.close;
+        }
+      }
     }
     if (outcome) {
       // NUEVO (Etapa 3 real, Punto 6 — spread/comisión): rHit hasta acá es el R "en
@@ -3070,6 +3095,15 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
       const spreadPips = CONFIG.ESTIMATED_SPREAD_PIPS_BY_SYMBOL[symbol] || 0;
       const spreadCostR = h.slPips ? spreadPips / h.slPips : 0;
       h.result = outcome; h.grossRMultiple = rHit; h.rMultiple = +(rHit - spreadCostR).toFixed(2); changed = true; resolvedEntries.push(h);
+      // v4.8.20 (11/10): doble cuenta TP1 / TP2. rMultiple (arriba) es lo que la app registra: paga TP2
+      // cuando la estrategia lo define. rIfTP1 es lo que habría dado la MISMA operación si hubieras
+      // cerrado todo en TP1: si el precio tocó TP1 antes de cerrar, vale el R de TP1 (aunque después
+      // volviera al SL); si no lo tocó, vale lo mismo que ya está registrado. Solo medición.
+      const tp1Touched = tp1AlreadyHit || outcome === 'win';
+      const grossIfTP1 = tp1Touched ? rTP1 : rHit;
+      h.tp1Touched = tp1Touched; h.rTP1 = rTP1; h.rTP2 = rTP2;
+      h.rIfTP1 = +(grossIfTP1 - spreadCostR).toFixed(2);
+      if (outcome === 'expired') { h.expiryMarked = expiryMarked; h.expiryMarkPrice = expiryMarkPrice; }
       h.closedAt = Date.now(); h.closeCandleTime = closeCandleTime; h.mfeR = +mfeR.toFixed(2); h.maeR = +maeR.toFixed(2);
       // FIX (30/8): esta función resuelve el historial mirando la mecha (high/low)
       // de las velas del proveedor de datos, pero el widget en vivo
@@ -3604,9 +3638,30 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.19',
+    engineVersion: '4.8.20',
+    tpComparison: getTPComparison(),
     generatedAt: Date.now()
   };
+}
+// v4.8.20 (11/10): resumen para ver las dos cuentas lado a lado. Solo cuenta operaciones cerradas
+// con esta versión o posterior (las anteriores no guardaron rIfTP1). "live" = las que sí se operan,
+// "shadow" = las que solo se registran. recordedR = como las registra la app (paga TP2);
+// ifTP1R = lo mismo si se hubiera cerrado todo en TP1. expired = vencidas valuadas a mercado.
+function getTPComparison() {
+  const bucket = () => ({ n: 0, recordedR: 0, ifTP1R: 0 });
+  const out = { since: '4.8.20', live: bucket(), shadow: bucket(), expired: { n: 0, markedToMarketR: 0 } };
+  (state.signalHistory || []).forEach(h => {
+    if (h.rIfTP1 == null || h.rMultiple == null) return;
+    if (h.result === 'win' || h.result === 'loss') {
+      const b = h.shadow ? out.shadow : out.live;
+      b.n++; b.recordedR += h.rMultiple; b.ifTP1R += h.rIfTP1;
+    } else if (h.result === 'expired' && !h.shadow) {
+      out.expired.n++; out.expired.markedToMarketR += h.rMultiple;
+    }
+  });
+  ['live', 'shadow'].forEach(k => { out[k].recordedR = +out[k].recordedR.toFixed(2); out[k].ifTP1R = +out[k].ifTP1R.toFixed(2); });
+  out.expired.markedToMarketR = +out.expired.markedToMarketR.toFixed(2);
+  return out;
 }
 
 async function refreshAsset(symbol, forceRefresh = false) {
