@@ -1,6 +1,10 @@
 // ============================================================
-// PULSE TRADE v4.8.20 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.21 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.21 (13/10): tope de exposición por lado del dólar y arreglo de la prueba de reactivación trabada. NO toca estrategias, entradas, SL/TP, umbrales ni pisos de confianza.
+//  1) CONFIG.USD_EXPOSURE_CAP + checkUsdExposureCap() en resolveCustomSignal: una señal NUEVA se bloquea si ya hay una abierta en el mismo símbolo y dirección (máx. 1) o si ya hay 2 abiertas del mismo lado del dólar (EURUSD, GBPUSD, XAUUSD; US500 afuera). Solo cuentan señales reales con menos de 12 h. Las bloqueadas quedan en /api/state -> diagnostics.usdCap. Evidencia: 12/10, 4 shorts contra el dólar = 2 apuestas; GBPUSD salió 2 veces en la misma vela y a la misma entrada por 2 estrategias.
+//  2) getStatsForConfidenceScore(): una combinación en prueba de reactivación ya no recibe en su puntaje de confianza el castigo de su propio historial viejo (evaluateProfitability ya lo ignoraba para ella). Caso real: XAUUSD kill_zone_ny salía con 58 contra 65 (-7 por el 4G/9P) y la prueba seguía en 0/5.
+//  3) Solo medición: cada señal guarda scoreFactors (los factores que armaron el puntaje) en el historial y en closed_signals, para revisar con 50+ reales qué factor se relaciona con ganar.
 // Cambios v4.8.20 (11/10): solo medición y cierre de plazos, en checkHistoryOutcomes. No toca estrategias, entradas, SL/TP ni parámetros.
 //  1) Doble cuenta TP1/TP2: cada cierre guarda tp1Touched, rTP1, rTP2 y rIfTP1 (lo que habría dado cerrando todo en TP1). Resumen en /api/state -> diagnostics.tpComparison. La app sigue registrando el resultado como antes (paga TP2).
 //  2) Vencidas a mercado: una señal vencida se valúa con el cierre de la última vela dentro de su plazo (antes 0R fijo). Sigue siendo 'expired': no entra en winrate/expectancy/circuit breaker.
@@ -704,6 +708,32 @@ const CONFIG = {
     enabled: true,
     maxSpreadPctOfStop: 0.25
   },
+  // NUEVO v4.8.21 (13/10): TOPE DE EXPOSICIÓN POR LADO DEL DÓLAR. Evidencia (12/10): 4 shorts
+  // contra el dólar (kill_zone_ny y session_breakout_vwap en GBPUSD y EURUSD) abiertos casi a la
+  // vez; los dos de kill_zone cerraron ganadores en la misma vela y los dos de breakout perdieron
+  // con menos de una hora de diferencia = 4 señales que se comportaron como 2 apuestas. Además
+  // GBPUSD salió dos veces en la misma vela y a la misma entrada (1,32243) por dos estrategias
+  // distintas, porque el cooldown y activeCustomSignals se arman por símbolo+estrategia y nada
+  // comparaba señales entre sí.
+  //   maxPerSymbolSide: máx. señales abiertas en el mismo símbolo y la misma dirección (1 = una
+  //     estrategia no puede duplicar la posición que ya abrió otra).
+  //   maxPerUsdSide: máx. señales abiertas que apuestan al mismo lado del dólar entre TODOS los
+  //     símbolos de usdLongWhenLong/usdShortWhenLong.
+  //   maxAgeMs: una señal solo cuenta como exposición abierta mientras tenga menos de esta edad.
+  //     Las estrategias son intradía (kill_zone vence a las 4 h); el vencimiento de 72 h del resto
+  //     es una cola de medición, no una posición que se siga sosteniendo.
+  // Lado del dólar: EURUSD y GBPUSD (long = corto en dólar), XAUUSD (el oro se mueve inverso al
+  // dólar, mismo criterio). US500 queda afuera: no es una apuesta direccional sobre el dólar.
+  // Las señales en modo sombra (tamaño 0) no cuentan ni se bloquean. Solo bloquea señales
+  // NUEVAS: no cierra ni toca ninguna ya abierta, ni cambia SL/TP/parámetros de las estrategias.
+  USD_EXPOSURE_CAP: {
+    enabled: true,
+    maxPerSymbolSide: 1,
+    maxPerUsdSide: 2,
+    maxAgeMs: 12 * 60 * 60 * 1000,
+    usdShortWhenLong: ['EURUSD', 'GBPUSD', 'XAUUSD'],
+    usdLongWhenLong: []
+  },
   // NUEVO (15/9, auditoría — "diworsification"): con 7-10 estrategias corriendo con
   // peso parejo, la ganancia real de las 2-3 que sí tienen edge (sobre todo
   // ny_open_kill_zone) se diluye con el resto, que empata o resta. Esto NO cambia el
@@ -1075,7 +1105,6 @@ if (!localStorage.getItem('pt_threshold_reset_v2')) {
   localStorage.setItem('pt_auto_threshold_v2', JSON.stringify(resetThreshold));
   localStorage.setItem('pt_threshold_reset_v1', 'true');
 }
-
 function getNow() { return new Date(); }
 
 // FIX (30/8): antes esta función calculaba la ventana en hora Argentina fija
@@ -2257,7 +2286,6 @@ function pctDiff(a, b) {
   if (a === null || a === undefined || !b) return 0;
   return ((a - b) / b) * 100;
 }
-
 function updatePriceUI(symbol, quote, asset) {
   state.livePrices = state.livePrices || {};
   state.livePrices[symbol] = {
@@ -2318,7 +2346,7 @@ function pushSignalHistory(signal) {
     id: Date.now(), symbol: signal.symbol, name: signal.asset.name, type: signal.type,
     entry: signal.entry, sl: signal.sl, tp1: signal.tp1, tp2: signal.tp2,
     slPips: signal.slPips, tp1Pips: signal.tp1Pips, tp2Pips: signal.tp2Pips,
-    decimals: signal.decimals, confidence: signal.confidence, result: 'pending', timestamp: signal.timestamp,
+    decimals: signal.decimals, confidence: signal.confidence, scoreFactors: signal.scoreFactors || [], result: 'pending', timestamp: signal.timestamp,
     entryCandleTime: signal.entryCandleTime != null ? signal.entryCandleTime : null, // FIX (9/10): ver checkHistoryOutcomes
     strategyKeys: signal.strategyKeys || [], rMultiple: null, regime: signal.regime || 'unknown',
     // FIX (15/9, auditoría): antes el fallback era 'smc', mezclando en las estadísticas
@@ -2486,6 +2514,22 @@ function seedLiveStatsFromClosedHistory() {
 // deterioro reciente". Eso incluye no dejar pasar a PROBATION (regla A) una combinación
 // que viene con 5+ pérdidas en sus últimas 8 operaciones reales, aunque tenga muestra
 // chica y confianza técnica alta.
+// NUEVO v4.8.21 (13/10): historial que usa el factor "historial reciente" del puntaje de
+// confianza (computeContextualScore, custom-strategies.js). Una combinación en prueba de
+// reactivación (state.reactivationTesting) se saca de ahí: su historial viejo es justo el que la
+// hizo apagar, y evaluateProfitability() ya lo ignora para ella (regla R, "o la prueba nunca
+// arranca"). Sin esto el puntaje lo volvía a aplicar y la prueba quedaba trabada: XAUUSD
+// kill_zone_ny (4G/9P, peso de muestra 0,46 => -7 puntos) salía con 58 contra el umbral de 65,
+// no operaba, y sin operar la prueba seguía en 0/5 indefinidamente. No cambia ningún umbral:
+// solo deja de contar contra la prueba el mismo historial que ya la dejó apagada.
+function getStatsForConfidenceScore(symbol) {
+  const live = state.liveStrategyStatsBySymbol && state.liveStrategyStatsBySymbol[symbol];
+  if (!live) return null;
+  const testing = state.reactivationTesting || {};
+  const out = {};
+  Object.keys(live).forEach(k => { if (!testing[`${symbol}_${k}`]) out[k] = live[k]; });
+  return out;
+}
 function evaluateProfitability(symbol, strategyKey, confidence) {
   const cfg = CONFIG.PROFITABILITY_ENGINE_V1;
   if (!cfg || !cfg.enabled) return { decision: 'TRADE', mode: 'DISABLED', sample: null, expectancyR: null, winRate: null, recentLosses: null, reason: 'Motor de Rentabilidad deshabilitado' };
@@ -3222,7 +3266,10 @@ function appendClosedSignal(entry) {
     result: entry.result, rMultiple: entry.rMultiple, timestamp: entry.timestamp,
     // NUEVO (auditoría 18/9 v2, punto A1): ver nota en resolveCustomSignal/frozen.
     provider: entry.provider || 'unknown', estimatedSpread: !!entry.estimatedSpread,
-    shadow: !!entry.shadow // NUEVO (20/9)
+    shadow: !!entry.shadow, // NUEVO (20/9)
+    // NUEVO v4.8.21 (13/10): solo medición — ver scoreFactors en resolveCustomSignal/frozen.
+    confidence: entry.confidence != null ? entry.confidence : null,
+    scoreFactors: entry.scoreFactors || []
   });
   localStorage.setItem(storageKey, JSON.stringify(dayList));
   let daysIndex;
@@ -3312,6 +3359,43 @@ function notifyNewSignal(signal) {
 }
 function toggleSound() {}
 function toggleStrictMode() { state.strictMode = !state.strictMode; }
+// NUEVO v4.8.21 (13/10): lado del dólar de una señal — ver CONFIG.USD_EXPOSURE_CAP. Devuelve
+// 'usd_short' (la señal gana si el dólar baja), 'usd_long', o null si el símbolo no es una
+// apuesta direccional sobre el dólar (US500).
+function getUsdSide(symbol, direction) {
+  const cap = CONFIG.USD_EXPOSURE_CAP;
+  if (!cap) return null;
+  const isLong = direction === 'long';
+  if ((cap.usdShortWhenLong || []).includes(symbol)) return isLong ? 'usd_short' : 'usd_long';
+  if ((cap.usdLongWhenLong || []).includes(symbol)) return isLong ? 'usd_long' : 'usd_short';
+  return null;
+}
+// Decide si una señal NUEVA de `symbol`/`direction` puede abrirse, mirando las señales reales
+// ya abiertas (state.activeCustomSignals). `ownKey` (symbol_strategy) se excluye: esa misma
+// combinación la reemplazaría la señal nueva. No toca estado: solo lee.
+function checkUsdExposureCap(symbol, direction, ownKey) {
+  const cap = CONFIG.USD_EXPOSURE_CAP;
+  if (!cap || !cap.enabled) return { blocked: false };
+  const now = Date.now();
+  const open = Object.entries(state.activeCustomSignals || {})
+    .filter(([k, s]) => k !== ownKey && s && !s.shadow && (now - (s.timestamp || 0)) <= cap.maxAgeMs)
+    .map(([k, s]) => ({ key: k, symbol: s.symbol, type: s.type, usdSide: getUsdSide(s.symbol, s.type) }));
+
+  const sameSymbolSide = open.filter(s => s.symbol === symbol && s.type === direction);
+  if (cap.maxPerSymbolSide != null && sameSymbolSide.length >= cap.maxPerSymbolSide) {
+    return { blocked: true, kind: 'symbol_side', open: sameSymbolSide.map(s => s.key),
+      reason: `ya hay ${sameSymbolSide.length} señal(es) ${direction === 'long' ? 'LONG' : 'SHORT'} abierta(s) en ${symbol} (${sameSymbolSide.map(s => s.key).join(', ')}) — máx. ${cap.maxPerSymbolSide} por símbolo y dirección` };
+  }
+  const usdSide = getUsdSide(symbol, direction);
+  if (usdSide && cap.maxPerUsdSide != null) {
+    const sameUsd = open.filter(s => s.usdSide === usdSide);
+    if (sameUsd.length >= cap.maxPerUsdSide) {
+      return { blocked: true, kind: 'usd_side', usdSide, open: sameUsd.map(s => s.key),
+        reason: `ya hay ${sameUsd.length} señales abiertas ${usdSide === 'usd_short' ? 'contra' : 'a favor del'} dólar (${sameUsd.map(s => s.key).join(', ')}) — máx. ${cap.maxPerUsdSide} por lado del dólar` };
+    }
+  }
+  return { blocked: false, usdSide };
+}
 function resolveCustomSignal(symbol, quote, customSig, asset, entryCandleTime = null) {
   const key = `${symbol}_${customSig.strategy}`;
   const existing = state.activeCustomSignals[key];
@@ -3389,13 +3473,34 @@ function resolveCustomSignal(symbol, quote, customSig, asset, entryCandleTime = 
       };
     }
   }
+  // NUEVO v4.8.21 (13/10): tope de exposición por lado del dólar — ver CONFIG.USD_EXPOSURE_CAP.
+  // Mismo patrón que los gates de arriba: la señal bloqueada no se cuenta como operación (no
+  // entra a activeCustomSignals/signalHistory, no dispara push, no marca cooldown) pero se manda
+  // a renderCustomSignal como informativa. Las señales en modo sombra (tamaño 0) no pasan por acá.
+  let usdCapBlockedDisplay = null;
+  if (isNewDirection && !inCooldown && meetsConfidenceThreshold && !riskGuardBlockedDisplay && !profitabilityBlockedDisplay &&
+      !(profitabilityDecision && profitabilityDecision.decision === 'SHADOW')) {
+    const capCheck = checkUsdExposureCap(symbol, customSig.direction, key);
+    if (capCheck.blocked) {
+      state.diagnostics = state.diagnostics || { candleAge: {}, quote: {}, costGate: {} };
+      state.diagnostics.usdCap = state.diagnostics.usdCap || {};
+      state.diagnostics.usdCap[symbol] = { strategy: customSig.strategy, direction: customSig.direction, kind: capCheck.kind, openSignals: capCheck.open, at: Date.now() };
+      usdCapBlockedDisplay = {
+        type: customSig.direction, symbol, usdCapBlocked: true, usdCapReason: capCheck.reason,
+        confidence: customSig.confidence,
+        strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
+        detectedAt: Date.now()
+      };
+      addLog(quote.source, `[${customSig.label}] señal ${customSig.direction === 'long' ? 'LONG' : 'SHORT'} detectada pero bloqueada por tope de exposición al dólar: ${capCheck.reason}`, symbol);
+    }
+  }
   // NUEVO (auditoría 20/9 v2): compuerta de costo — ver CONFIG.QUALITY_GATES. A
   // diferencia de los tres gates de arriba, no puede evaluarse antes de este punto:
   // depende de slPips, que solo existe una vez calculados entry/sl (y, en XAUUSD,
   // después del ensanche de holgura del SL) más abajo. Se declara acá para que
   // quede disponible en el return final, mismo patrón que los demás.
   let costGateBlockedDisplay = null;
-  if (isNewDirection && !inCooldown && meetsConfidenceThreshold && !riskGuardBlockedDisplay && !profitabilityBlockedDisplay) {
+  if (isNewDirection && !inCooldown && meetsConfidenceThreshold && !riskGuardBlockedDisplay && !profitabilityBlockedDisplay && !usdCapBlockedDisplay) {
     let entry = customSig.entry || quote.last;
     let sl = customSig.sl;
     let tp1 = customSig.tp1;
@@ -3476,6 +3581,12 @@ function resolveCustomSignal(symbol, quote, customSig, asset, entryCandleTime = 
       // traían confidence. Ahora viene calculado por computeContextualScore() dentro
       // de evaluateAll() (custom-strategies.js). Puramente informativo, ver nota ahí.
       rr1: formatRR(tp1), rr2: formatRR(tp2), confidence: (customSig.confidence != null ? customSig.confidence : null),
+      // NUEVO v4.8.21 (13/10): factores que armaron el puntaje (texto sin el prefijo "Score:"),
+      // solo medición. Desde el 17/9 todas las señales reales salen con 65 (50 base + 15 por ir a
+      // favor de la tendencia H1, los demás factores casi nunca se activan), así que el puntaje no
+      // distingue nada. Guardar los factores en el historial y en los cierres permite revisar con
+      // 50+ reales qué factor se relaciona con ganar, en vez de mirar un número que no varía.
+      scoreFactors: (customSig.details || []).filter(d => typeof d === 'string' && d.startsWith('Score:')).map(d => d.slice(6).trim()),
       strategyLabels: [customSig.label], strategyKeys: [customSig.strategy],
       // NUEVO (18/9, Motor de Rentabilidad V1): si la decisión fue PROBATION, el
       // multiplicador de riesgo original (STRATEGY_RISK_WEIGHT) se reduce además por
@@ -3531,7 +3642,7 @@ function resolveCustomSignal(symbol, quote, customSig, asset, entryCandleTime = 
     } // cierre if (!costGateBlockedDisplay)
   }
   const frozen = state.activeCustomSignals[key];
-  if (!frozen) return belowThresholdDisplay || riskGuardBlockedDisplay || profitabilityBlockedDisplay || costGateBlockedDisplay;
+  if (!frozen) return belowThresholdDisplay || riskGuardBlockedDisplay || profitabilityBlockedDisplay || usdCapBlockedDisplay || costGateBlockedDisplay;
   return evaluateCustomSignalOutcome(symbol, key, quote, frozen);
 }
 function evaluateCustomSignalOutcome(symbol, key, quote, frozen) {
@@ -3638,7 +3749,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.20',
+    engineVersion: '4.8.21',
     tpComparison: getTPComparison(),
     generatedAt: Date.now()
   };
@@ -3663,7 +3774,6 @@ function getTPComparison() {
   out.expired.markedToMarketR = +out.expired.markedToMarketR.toFixed(2);
   return out;
 }
-
 async function refreshAsset(symbol, forceRefresh = false) {
   const asset = ASSETS[symbol];
   renderMarketBanner(symbol); renderAssetHoursPill(symbol); renderApiError(symbol, null);
@@ -3777,7 +3887,7 @@ async function refreshAsset(symbol, forceRefresh = false) {
       // las de modo sombra, que cuentan como muestra LIVE por diseño), igual que el
       // circuit breaker.
        const newsContext = await NewsCalendar.getNearbyHighImpact(NEWS_CURRENCIES_BY_SYMBOL[symbol] || ['USD'], 60);
-      const rawSignals = CustomStrategies.evaluateAll(closedCandles, symbol, asset, closedHtfCandles, state.liveStrategyStatsBySymbol[symbol] || null, newsContext, CONFIG.MIN_CONFIDENCE_SCORE);
+      const rawSignals = CustomStrategies.evaluateAll(closedCandles, symbol, asset, closedHtfCandles, getStatsForConfidenceScore(symbol), newsContext, CONFIG.MIN_CONFIDENCE_SCORE);
       const disabledForSymbol = CONFIG.DISABLED_STRATEGIES_BY_SYMBOL[symbol] || [];
       const filteredSignals = rawSignals.filter(sig => {
         if (!CONFIG.ENABLED_STRATEGIES.includes(sig.strategy)) {
