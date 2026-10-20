@@ -1,6 +1,10 @@
 // ============================================================
-// PULSE TRADE v4.8.21 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.22 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.22 (19/10): prioridad por rentabilidad entre señales del mismo ciclo y bloqueo de señales opuestas. NO toca estrategias, entradas, SL/TP, umbrales ni pisos de confianza.
+//  1) CONFIG.SIGNAL_PRIORITY + rankSignalsByEdge(): cuando en un mismo ciclo de un símbolo salen varias señales, se procesan de la de mayor rentabilidad real a la de menor (antes: orden de llegada). Puntaje = totalR / (n + shrinkK) sobre operaciones reales cerradas de esa combinación símbolo+estrategia (el shrinkK evita que 2-3 operaciones afortunadas pasen por delante de una muestra grande); desempate por win rate y luego por muestra. Sin historial = 0. Se apaga con SIGNAL_PRIORITY.enabled: false.
+//  2) CONFIG.USD_EXPOSURE_CAP.blockOpposite + checkUsdExposureCap(): una señal nueva se bloquea si ya hay una real abierta en el mismo símbolo en dirección contraria (antes pasaba y dejaba compra y venta abiertas a la vez). Queda en diagnostics.usdCap con kind 'opposite_side'.
+//  Límite conocido: la prioridad solo compara señales del MISMO ciclo y símbolo. Una señal que llega después no reemplaza a una operación ya abierta, y los símbolos se evalúan de a uno.
 // Cambios v4.8.21 (13/10): tope de exposición por lado del dólar y arreglo de la prueba de reactivación trabada. NO toca estrategias, entradas, SL/TP, umbrales ni pisos de confianza.
 //  1) CONFIG.USD_EXPOSURE_CAP + checkUsdExposureCap() en resolveCustomSignal: una señal NUEVA se bloquea si ya hay una abierta en el mismo símbolo y dirección (máx. 1) o si ya hay 2 abiertas del mismo lado del dólar (EURUSD, GBPUSD, XAUUSD; US500 afuera). Solo cuentan señales reales con menos de 12 h. Las bloqueadas quedan en /api/state -> diagnostics.usdCap. Evidencia: 12/10, 4 shorts contra el dólar = 2 apuestas; GBPUSD salió 2 veces en la misma vela y a la misma entrada por 2 estrategias.
 //  2) getStatsForConfidenceScore(): una combinación en prueba de reactivación ya no recibe en su puntaje de confianza el castigo de su propio historial viejo (evaluateProfitability ya lo ignoraba para ella). Caso real: XAUUSD kill_zone_ny salía con 58 contra 65 (-7 por el 4G/9P) y la prueba seguía en 0/5.
@@ -726,9 +730,12 @@ const CONFIG = {
   // dólar, mismo criterio). US500 queda afuera: no es una apuesta direccional sobre el dólar.
   // Las señales en modo sombra (tamaño 0) no cuentan ni se bloquean. Solo bloquea señales
   // NUEVAS: no cierra ni toca ninguna ya abierta, ni cambia SL/TP/parámetros de las estrategias.
+  // NUEVO v4.8.22 (19/10): PRIORIDAD ENTRE SEÑALES DEL MISMO CICLO. Ver rankSignalsByEdge().
+  SIGNAL_PRIORITY: { enabled: true, shrinkK: 10 },
   USD_EXPOSURE_CAP: {
     enabled: true,
     maxPerSymbolSide: 1,
+    blockOpposite: true,   // v4.8.22: no abrir una señal contraria a una real ya abierta en el mismo símbolo
     maxPerUsdSide: 2,
     maxAgeMs: 12 * 60 * 60 * 1000,
     usdShortWhenLong: ['EURUSD', 'GBPUSD', 'XAUUSD'],
@@ -3370,6 +3377,23 @@ function getUsdSide(symbol, direction) {
   if ((cap.usdLongWhenLong || []).includes(symbol)) return isLong ? 'usd_long' : 'usd_short';
   return null;
 }
+// NUEVO v4.8.22 (19/10): ordena las señales de un mismo ciclo y símbolo de mayor a menor rentabilidad
+// real. Usa solo operaciones reales cerradas (state.liveStrategyStatsBySymbol). Puntaje = totalR / (n + shrinkK):
+// es la expectativa por operación "encogida" hacia 0, para que una muestra chica con suerte no pase por
+// delante de una muestra grande. Desempate: win rate y luego tamaño de muestra. No filtra ni modifica señales.
+function rankSignalsByEdge(symbol, signals) {
+  const cfg = CONFIG.SIGNAL_PRIORITY;
+  if (!cfg || !cfg.enabled || !Array.isArray(signals) || signals.length < 2) return signals;
+  const stats = (state.liveStrategyStatsBySymbol || {})[symbol] || {};
+  const scored = signals.map((sig, i) => {
+    const st = stats[sig.strategy] || {};
+    const wins = st.wins || 0, losses = st.losses || 0, totalR = st.totalR || 0;
+    const n = wins + losses;
+    return { sig, i, n, winRate: n ? wins / n : 0, score: n ? totalR / (n + cfg.shrinkK) : 0 };
+  });
+  scored.sort((a, b) => (b.score - a.score) || (b.winRate - a.winRate) || (b.n - a.n) || (a.i - b.i));
+  return scored.map(x => x.sig);
+}
 // Decide si una señal NUEVA de `symbol`/`direction` puede abrirse, mirando las señales reales
 // ya abiertas (state.activeCustomSignals). `ownKey` (symbol_strategy) se excluye: esa misma
 // combinación la reemplazaría la señal nueva. No toca estado: solo lee.
@@ -3381,6 +3405,14 @@ function checkUsdExposureCap(symbol, direction, ownKey) {
     .filter(([k, s]) => k !== ownKey && s && !s.shadow && (now - (s.timestamp || 0)) <= cap.maxAgeMs)
     .map(([k, s]) => ({ key: k, symbol: s.symbol, type: s.type, usdSide: getUsdSide(s.symbol, s.type) }));
 
+  // v4.8.22: señal contraria abierta en el mismo símbolo = conflicto, sin ventaja en ninguna: no se abre.
+  if (cap.blockOpposite) {
+    const opposite = open.filter(s => s.symbol === symbol && s.type !== direction);
+    if (opposite.length > 0) {
+      return { blocked: true, kind: 'opposite_side', open: opposite.map(s => s.key),
+        reason: `ya hay una señal ${direction === 'long' ? 'SHORT' : 'LONG'} abierta en ${symbol} (${opposite.map(s => s.key).join(', ')}) — no se abre una señal contraria en el mismo activo` };
+    }
+  }
   const sameSymbolSide = open.filter(s => s.symbol === symbol && s.type === direction);
   if (cap.maxPerSymbolSide != null && sameSymbolSide.length >= cap.maxPerSymbolSide) {
     return { blocked: true, kind: 'symbol_side', open: sameSymbolSide.map(s => s.key),
@@ -3749,7 +3781,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.21',
+    engineVersion: '4.8.22',
     tpComparison: getTPComparison(),
     generatedAt: Date.now()
   };
@@ -3901,7 +3933,9 @@ async function refreshAsset(symbol, forceRefresh = false) {
         return true;
       });
       const firedThisCycle = new Set();
-      filteredSignals.forEach(sig => {
+      const orderedSignals = rankSignalsByEdge(symbol, filteredSignals);
+      if (orderedSignals.length > 1) addLog(quote.source, `Prioridad por rentabilidad real: ${orderedSignals.map(x => x.strategy).join(' > ')}`, symbol);
+      orderedSignals.forEach(sig => {
         const entryCandleTime = closedCandles.length ? closedCandles[closedCandles.length - 1].time : null;
         const customDisplay = resolveCustomSignal(symbol, quote, sig, asset, entryCandleTime);
         renderCustomSignal(symbol, sig.strategy, customDisplay);
