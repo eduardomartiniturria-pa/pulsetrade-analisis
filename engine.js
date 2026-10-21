@@ -1,6 +1,7 @@
 // ============================================================
-// PULSE TRADE v4.8.22 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.23 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.23 (21/10): CONFIG.STRATEGY_RISK_WEIGHT igualado (kill_zone_ny 1.5 -> 1, session_breakout_vwap 0.5 -> 1). Solo cambia el tamano sugerido; NO toca estrategias, entradas, SL/TP, stats ni circuit breaker.
 // Cambios v4.8.22 (19/10): prioridad por rentabilidad entre señales del mismo ciclo y bloqueo de señales opuestas. NO toca estrategias, entradas, SL/TP, umbrales ni pisos de confianza.
 //  1) CONFIG.SIGNAL_PRIORITY + rankSignalsByEdge(): cuando en un mismo ciclo de un símbolo salen varias señales, se procesan de la de mayor rentabilidad real a la de menor (antes: orden de llegada). Puntaje = totalR / (n + shrinkK) sobre operaciones reales cerradas de esa combinación símbolo+estrategia (el shrinkK evita que 2-3 operaciones afortunadas pasen por delante de una muestra grande); desempate por win rate y luego por muestra. Sin historial = 0. Se apaga con SIGNAL_PRIORITY.enabled: false.
 //  2) CONFIG.USD_EXPOSURE_CAP.blockOpposite + checkUsdExposureCap(): una señal nueva se bloquea si ya hay una real abierta en el mismo símbolo en dirección contraria (antes pasaba y dejaba compra y venta abiertas a la vez). Queda en diagnostics.usdCap con kind 'opposite_side'.
@@ -758,10 +759,15 @@ const CONFIG = {
   // aplicó en ningún push ni en frozen.riskWeight desde que se implementó (15/9).
   // Corregido acá. Se sacan además las entradas de las 3 estrategias eliminadas del
   // código el 16/9 (bollinger_squeeze, ema_cross_scalping, pivots_breakout_reversal).
+  // v4.8.23 (21/10): kill_zone_ny pasa de 1.5 a 1 y session_breakout_vwap de 0.5 a 1. El 1.5x de
+  // kill_zone_ny salía del +11.17R en BTCUSD (cripto, ya retirada el 19/9); con los 4 activos de hoy
+  // (oro, euro, libra, S&P) kill_zone_ny está en ~0R (+1.2R en 46 ops) y session_breakout_vwap no es peor
+  // (+3.4R en 23 ops del historial). Igualar evita cargar más riesgo en la estrategia que hoy no
+  // muestra ventaja. Es solo el 'tamaño sugerido' (riskWeight): no cambia ninguna señal, SL/TP ni stat.
   STRATEGY_RISK_WEIGHT: {
-    kill_zone_ny: 1.5,
+    kill_zone_ny: 1,
     session_false_breakout: 1.3,
-    session_breakout_vwap: 0.5
+    session_breakout_vwap: 1
   },
   // v4.9 (sección 13, 27/8): piso mínimo de computeContextualScore() para que una señal
   // se muestre — decidido por el usuario en 55%, no propuesto por el motor. Antes el
@@ -1154,7 +1160,6 @@ function isLondonNYSession(nowMs = Date.now()) {
   return minutesNow >= (3 * 60) && minutesNow < (17 * 60);
 }
 const ACTIVE_SESSION_PROFILES = ['forex', 'gold']; // US500 ya restringido por su propio horario NYSE
-
 function getDynamicRefreshIntervalMs() {
   return isKillZoneWindow() ? CONFIG.DYNAMIC_REFRESH.killZoneIntervalMs : CONFIG.DYNAMIC_REFRESH.normalIntervalMs;
 }
@@ -1518,7 +1523,6 @@ function markProviderCooldown(providerName, errorMessage, symbol = null) {
   state.providerCooldownUntil = state.providerCooldownUntil || {};
   state.providerCooldownUntil[providerName] = Date.now() + ms;
 }
-
 function isProviderInCooldown(providerName) {
   const until = state.providerCooldownUntil && state.providerCooldownUntil[providerName];
   return !!until && Date.now() < until;
@@ -2443,7 +2447,6 @@ function updateLiveProfitabilityStats(entry) {
   if (stats.recentResults.length > keepWindow) stats.recentResults.length = keepWindow;
   localStorage.setItem('pt_live_strategy_stats_by_symbol', JSON.stringify(state.liveStrategyStatsBySymbol));
 }
-
 function getLiveProfitabilityStats(symbol, strategyKey) {
   const bucket = state.liveStrategyStatsBySymbol[symbol] && state.liveStrategyStatsBySymbol[symbol][strategyKey];
   return bucket || { wins: 0, losses: 0, totalR: 0, avgR: 0, recentResults: [] };
@@ -2996,7 +2999,6 @@ function checkProbationGraduation(key) {
     signal: { strategy: key, probationGraduated: true }
   }).catch(err => console.error('Error enviando push de graduación de probation:', err.message));
 }
-
 function reconcileStaleActiveCustomSignals(symbol) {
   // FIX (sesión hoy, complemento al de arriba): las 3 tarjetas encontradas
   // realmente rotas en producción (EURUSD bollinger_squeeze, XAUUSD
@@ -3781,7 +3783,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.22',
+    engineVersion: '4.8.23',
     tpComparison: getTPComparison(),
     generatedAt: Date.now()
   };
