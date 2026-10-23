@@ -1,6 +1,10 @@
 // ============================================================
-// PULSE TRADE v4.8.23 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.24 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.24 (23/10): tercera cuenta en tpComparison: "mitad en TP1 + SL a entrada para el resto". Solo medicion e indicacion en el push. NO toca estrategias, entradas, SL/TP, umbrales, stats, circuit breaker ni el R que registra la app (sigue pagando TP2).
+//  1) checkHistoryOutcomes(): ahora detecta si, despues de tocar TP1, el precio volvio a la entrada (breakeven) antes de TP2. Cada cierre guarda rHalfTP1 (R neto de spread: 50% cierra en TP1; el otro 50% sale en TP2, en la entrada si el precio volvio, o en TP1 si vencio con TP1 tocado) y beStopped. Criterio conservador: si en una misma vela se toca TP1 y la entrada, se asume que la entrada vino despues. Estrategias sin TP2: el resto tambien cierra en TP1 (no hay segundo objetivo).
+//  2) getTPComparison(): suma halfTP1R en live/shadow y halfExact/halfEstimated (cuantas operaciones tienen el dato exacto y cuantas son estimadas). Las cerradas en 4.8.20-4.8.23 no guardaron rHalfTP1: se estiman con lo que ya tienen (tp1Touched, rTP1, rTP2, grossRMultiple). Las perdidas con TP1 tocado valen 0.5*rTP1 (para perder tuvo que volver por la entrada); las ganadas en TP2 se estiman como 0.5*rTP1+0.5*rTP2, lo cual puede ser optimista si el precio piso la entrada entre TP1 y TP2 (sin velas guardadas no se puede saber).
+//  3) notifyNewSignal(): el push agrega la indicacion de gestion "1/2 en TP1 + SL a entrada". Solo texto informativo.
 // Cambios v4.8.23 (21/10): CONFIG.STRATEGY_RISK_WEIGHT igualado (kill_zone_ny 1.5 -> 1, session_breakout_vwap 0.5 -> 1). Solo cambia el tamano sugerido; NO toca estrategias, entradas, SL/TP, stats ni circuit breaker.
 // Cambios v4.8.22 (19/10): prioridad por rentabilidad entre señales del mismo ciclo y bloqueo de señales opuestas. NO toca estrategias, entradas, SL/TP, umbrales ni pisos de confianza.
 //  1) CONFIG.SIGNAL_PRIORITY + rankSignalsByEdge(): cuando en un mismo ciclo de un símbolo salen varias señales, se procesan de la de mayor rentabilidad real a la de menor (antes: orden de llegada). Puntaje = totalR / (n + shrinkK) sobre operaciones reales cerradas de esa combinación símbolo+estrategia (el shrinkK evita que 2-3 operaciones afortunadas pasen por delante de una muestra grande); desempate por win rate y luego por muestra. Sin historial = 0. Se apaga con SIGNAL_PRIORITY.enabled: false.
@@ -3050,6 +3054,7 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
     let outcome = null;
     let rHit = rTP1;
     let tp1AlreadyHit = false;
+    let beStopped = false; // v4.8.24: despues de TP1 el precio volvio a la entrada (SL a breakeven habria saltado)
     // FIX (9/10, auditoría de rentabilidad): antes se descartaban todas las velas con
     // apertura anterior a h.timestamp (momento en que el motor detecta la señal, unos
     // minutos DESPUÉS del cierre de la vela de entrada). Eso dejaba afuera la primera
@@ -3095,10 +3100,18 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
           const against = (isLong ? h.entry - c.low : c.high - h.entry) / riskDist;
           if (against > maeR) maeR = against;
         }
+        // v4.8.24: velas POSTERIORES a la que toco TP1: si vuelve a la entrada, el SL a breakeven salta
+        // (conservador: si en la misma vela toca la entrada y TP2, se asume la entrada primero).
+        const hitEntry = isLong ? c.low <= h.entry : c.high >= h.entry;
+        if (tp1AlreadyHit && !beStopped && hitEntry) beStopped = true;
         if (hitSL) { outcome = 'loss'; rHit = -1; closeCandleTime = c.time; break; }
         if (hasTp2) {
           if (hitTP2) { outcome = 'win'; rHit = rTP2; tp1AlreadyHit = true; closeCandleTime = c.time; break; }
-          if (hitTP1) tp1AlreadyHit = true; // sigue pendiente, esperando TP2 o SL
+          if (hitTP1) {
+            // v4.8.24: en la propia vela de TP1, si tambien toco la entrada se asume que fue DESPUES (conservador)
+            if (!tp1AlreadyHit && hitEntry) beStopped = true;
+            tp1AlreadyHit = true; // sigue pendiente, esperando TP2 o SL
+          }
         } else if (hitTP1) {
           outcome = 'win'; rHit = rTP1; closeCandleTime = c.time; break;
         }
@@ -3156,6 +3169,22 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
       const grossIfTP1 = tp1Touched ? rTP1 : rHit;
       h.tp1Touched = tp1Touched; h.rTP1 = rTP1; h.rTP2 = rTP2;
       h.rIfTP1 = +(grossIfTP1 - spreadCostR).toFixed(2);
+      // v4.8.24 (23/10): tercera cuenta, "mitad en TP1 + SL a entrada para el resto". Solo medicion.
+      // Sin TP1 tocado vale lo mismo que lo registrado. Con TP1 tocado: 50% cobra rTP1 y el otro 50%
+      // sale en TP2 (si llego antes de volver a la entrada), en 0R (si el precio volvio a la entrada o
+      // si perdio, porque para perder tuvo que cruzar la entrada), o en rTP1 (vencio con TP1 tocado,
+      // igual que el criterio ya registrado). Sin TP2 definido no hay segundo objetivo: cierra todo en TP1.
+      let grossHalf;
+      if (!tp1Touched) grossHalf = rHit;
+      else if (!hasTp2) grossHalf = rTP1;
+      else {
+        let rest;
+        if (beStopped || outcome === 'loss') rest = 0;
+        else rest = rHit; // win en TP2 -> rTP2; win por vencimiento con TP1 tocado -> rTP1
+        grossHalf = 0.5 * rTP1 + 0.5 * rest;
+      }
+      h.rHalfTP1 = +(grossHalf - spreadCostR).toFixed(2);
+      h.beStopped = !!(tp1Touched && hasTp2 && (beStopped || outcome === 'loss'));
       if (outcome === 'expired') { h.expiryMarked = expiryMarked; h.expiryMarkPrice = expiryMarkPrice; }
       h.closedAt = Date.now(); h.closeCandleTime = closeCandleTime; h.mfeR = +mfeR.toFixed(2); h.maeR = +maeR.toFixed(2);
       // FIX (30/8): esta función resuelve el historial mirando la mecha (high/low)
@@ -3359,7 +3388,7 @@ function notifyNewSignal(signal) {
   // NUEVO (15/9): tamaño sugerido visible en el push cuando no es el default (1) — ver
   // CONFIG.STRATEGY_RISK_WEIGHT. Puramente informativo, no ajusta nada solo.
   const weightPart = (signal.riskWeight && signal.riskWeight !== 1) ? ` · Tamaño sugerido ${signal.riskWeight}x` : '';
-  const body = `Entrada ${fmt(signal.entry, signal.decimals)} · SL ${fmt(signal.sl, signal.decimals)} · TP1 ${fmt(signal.tp1, signal.decimals)}${confPart}${weightPart}`;
+  const body = `Entrada ${fmt(signal.entry, signal.decimals)} · SL ${fmt(signal.sl, signal.decimals)} · TP1 ${fmt(signal.tp1, signal.decimals)}${confPart}${weightPart} · Gestión: 1/2 en TP1 + SL a entrada`;
   // v4.8.2: deja rastro en los logs de Render cada vez que se intenta un push REAL (las señales
   // en sombra/probation nunca llegan hasta acá) — permite distinguir "no se intentó enviar" de
   // "se intentó y el push falló".
@@ -3783,7 +3812,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.23',
+    engineVersion: '4.8.24',
     tpComparison: getTPComparison(),
     generatedAt: Date.now()
   };
@@ -3793,20 +3822,36 @@ function getDiagnostics() {
 // "shadow" = las que solo se registran. recordedR = como las registra la app (paga TP2);
 // ifTP1R = lo mismo si se hubiera cerrado todo en TP1. expired = vencidas valuadas a mercado.
 function getTPComparison() {
-  const bucket = () => ({ n: 0, recordedR: 0, ifTP1R: 0 });
-  const out = { since: '4.8.20', live: bucket(), shadow: bucket(), expired: { n: 0, markedToMarketR: 0 } };
+  const bucket = () => ({ n: 0, recordedR: 0, ifTP1R: 0, halfTP1R: 0 });
+  const out = { since: '4.8.20', live: bucket(), shadow: bucket(), halfExact: 0, halfEstimated: 0, expired: { n: 0, markedToMarketR: 0 } };
   (state.signalHistory || []).forEach(h => {
     if (h.rIfTP1 == null || h.rMultiple == null) return;
     if (h.result === 'win' || h.result === 'loss') {
       const b = h.shadow ? out.shadow : out.live;
-      b.n++; b.recordedR += h.rMultiple; b.ifTP1R += h.rIfTP1;
+      const half = getHalfTP1R(h);
+      b.n++; b.recordedR += h.rMultiple; b.ifTP1R += h.rIfTP1; b.halfTP1R += half.r;
+      if (half.exact) out.halfExact++; else out.halfEstimated++;
     } else if (h.result === 'expired' && !h.shadow) {
       out.expired.n++; out.expired.markedToMarketR += h.rMultiple;
     }
   });
-  ['live', 'shadow'].forEach(k => { out[k].recordedR = +out[k].recordedR.toFixed(2); out[k].ifTP1R = +out[k].ifTP1R.toFixed(2); });
+  ['live', 'shadow'].forEach(k => { out[k].recordedR = +out[k].recordedR.toFixed(2); out[k].ifTP1R = +out[k].ifTP1R.toFixed(2); out[k].halfTP1R = +out[k].halfTP1R.toFixed(2); });
   out.expired.markedToMarketR = +out.expired.markedToMarketR.toFixed(2);
   return out;
+}
+// v4.8.24 (23/10): R neto de "mitad en TP1 + SL a entrada". Exacto si la operacion se cerro con esta
+// version (h.rHalfTP1). Para las cerradas en 4.8.20-4.8.23 se estima con lo ya guardado: perdida con
+// TP1 tocado = 0.5*rTP1; ganada en TP2 = 0.5*rTP1+0.5*rTP2 (puede ser optimista: no hay velas para
+// saber si piso la entrada entre TP1 y TP2); ganada en TP1 = rTP1; sin TP1 tocado = lo registrado.
+function getHalfTP1R(h) {
+  if (h.rHalfTP1 != null) return { r: h.rHalfTP1, exact: true };
+  const spreadCostR = (h.grossRMultiple != null && h.rMultiple != null) ? (h.grossRMultiple - h.rMultiple) : 0;
+  let gross;
+  if (!h.tp1Touched || h.rTP1 == null) gross = h.grossRMultiple != null ? h.grossRMultiple : h.rMultiple;
+  else if (h.result === 'loss') gross = 0.5 * h.rTP1;
+  else if (h.rTP2 != null && h.grossRMultiple === h.rTP2 && h.rTP2 !== h.rTP1) gross = 0.5 * h.rTP1 + 0.5 * h.rTP2;
+  else gross = h.rTP1;
+  return { r: +(gross - spreadCostR).toFixed(2), exact: false };
 }
 async function refreshAsset(symbol, forceRefresh = false) {
   const asset = ASSETS[symbol];
