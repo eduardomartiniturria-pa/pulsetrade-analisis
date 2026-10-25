@@ -1,6 +1,10 @@
 // ============================================================
-// PULSE TRADE v4.8.24 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.25 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.25 (24/10): cuarta cuenta en tpComparison: "todo en +1R" (cerrar la operacion entera apenas el precio va +1R a favor). Solo medicion. NO toca estrategias, entradas, SL/TP, umbrales, stats, circuit breaker ni el R que registra la app (sigue pagando TP2).
+//  Motivo (datos reales del /api/state del 24/10, 16 operaciones reales): 11/16 llegaron a +1R a favor pero solo 6/16 llegaron a TP2; 5 de las 10 perdedoras habian ido entre +1.13R y +1.68R a favor antes del SL. Cerrando todo en +1R el calculo da +4.1R contra +0.1R registrado. Con n=16 no alcanza para decidir: esta version lo mide solo, por estrategia, hasta juntar muestra.
+//  1) checkHistoryOutcomes(): cada cierre nuevo guarda rIf1R (R neto de spread si mfeR >= 1: vale +1R; si no, vale lo registrado). Usa mfeR, que ya excluye la vela del SL (criterio conservador).
+//  2) getTPComparison(): suma if1R y reached1R (cuantas llegaron a +1R) en live/shadow, y byStrategy (solo reales, por estrategia: n, recordedR, ifTP1R, if1R, reached1R). Las cerradas desde 4.8.17 ya tienen mfeR guardado: se calculan EXACTAS (no estimadas) con getIf1R().
 // Cambios v4.8.24 (23/10): tercera cuenta en tpComparison: "mitad en TP1 + SL a entrada para el resto". Solo medicion e indicacion en el push. NO toca estrategias, entradas, SL/TP, umbrales, stats, circuit breaker ni el R que registra la app (sigue pagando TP2).
 //  1) checkHistoryOutcomes(): ahora detecta si, despues de tocar TP1, el precio volvio a la entrada (breakeven) antes de TP2. Cada cierre guarda rHalfTP1 (R neto de spread: 50% cierra en TP1; el otro 50% sale en TP2, en la entrada si el precio volvio, o en TP1 si vencio con TP1 tocado) y beStopped. Criterio conservador: si en una misma vela se toca TP1 y la entrada, se asume que la entrada vino despues. Estrategias sin TP2: el resto tambien cierra en TP1 (no hay segundo objetivo).
 //  2) getTPComparison(): suma halfTP1R en live/shadow y halfExact/halfEstimated (cuantas operaciones tienen el dato exacto y cuantas son estimadas). Las cerradas en 4.8.20-4.8.23 no guardaron rHalfTP1: se estiman con lo que ya tienen (tp1Touched, rTP1, rTP2, grossRMultiple). Las perdidas con TP1 tocado valen 0.5*rTP1 (para perder tuvo que volver por la entrada); las ganadas en TP2 se estiman como 0.5*rTP1+0.5*rTP2, lo cual puede ser optimista si el precio piso la entrada entre TP1 y TP2 (sin velas guardadas no se puede saber).
@@ -3187,6 +3191,9 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
       h.beStopped = !!(tp1Touched && hasTp2 && (beStopped || outcome === 'loss'));
       if (outcome === 'expired') { h.expiryMarked = expiryMarked; h.expiryMarkPrice = expiryMarkPrice; }
       h.closedAt = Date.now(); h.closeCandleTime = closeCandleTime; h.mfeR = +mfeR.toFixed(2); h.maeR = +maeR.toFixed(2);
+      // v4.8.25 (24/10): cuarta cuenta, "todo en +1R". Si el precio llego a +1R a favor antes del cierre, vale +1R
+      // (menos spread); si no, vale lo mismo que ya esta registrado. mfeR no suma la vela del SL. Solo medicion.
+      h.rIf1R = +((mfeR >= 1 ? 1 : rHit) - spreadCostR).toFixed(2);
       // FIX (30/8): esta función resuelve el historial mirando la mecha (high/low)
       // de las velas del proveedor de datos, pero el widget en vivo
       // (activeCustomSignals / evaluateCustomSignalOutcome) solo mira quote.last
@@ -3812,7 +3819,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.24',
+    engineVersion: '4.8.25',
     tpComparison: getTPComparison(),
     generatedAt: Date.now()
   };
@@ -3822,22 +3829,40 @@ function getDiagnostics() {
 // "shadow" = las que solo se registran. recordedR = como las registra la app (paga TP2);
 // ifTP1R = lo mismo si se hubiera cerrado todo en TP1. expired = vencidas valuadas a mercado.
 function getTPComparison() {
-  const bucket = () => ({ n: 0, recordedR: 0, ifTP1R: 0, halfTP1R: 0 });
-  const out = { since: '4.8.20', live: bucket(), shadow: bucket(), halfExact: 0, halfEstimated: 0, expired: { n: 0, markedToMarketR: 0 } };
+  const bucket = () => ({ n: 0, recordedR: 0, ifTP1R: 0, halfTP1R: 0, if1R: 0, reached1R: 0 });
+  const out = { since: '4.8.20', live: bucket(), shadow: bucket(), halfExact: 0, halfEstimated: 0, byStrategy: {}, expired: { n: 0, markedToMarketR: 0 } };
   (state.signalHistory || []).forEach(h => {
     if (h.rIfTP1 == null || h.rMultiple == null) return;
     if (h.result === 'win' || h.result === 'loss') {
       const b = h.shadow ? out.shadow : out.live;
       const half = getHalfTP1R(h);
-      b.n++; b.recordedR += h.rMultiple; b.ifTP1R += h.rIfTP1; b.halfTP1R += half.r;
+      const one = getIf1R(h);
+      b.n++; b.recordedR += h.rMultiple; b.ifTP1R += h.rIfTP1; b.halfTP1R += half.r; b.if1R += one.r; if (one.reached) b.reached1R++;
       if (half.exact) out.halfExact++; else out.halfEstimated++;
+      if (!h.shadow) {
+        const key = h.source || (h.strategyKeys && h.strategyKeys[0]) || 'desconocida';
+        const s = out.byStrategy[key] || (out.byStrategy[key] = { n: 0, recordedR: 0, ifTP1R: 0, if1R: 0, reached1R: 0 });
+        s.n++; s.recordedR += h.rMultiple; s.ifTP1R += h.rIfTP1; s.if1R += one.r; if (one.reached) s.reached1R++;
+      }
     } else if (h.result === 'expired' && !h.shadow) {
       out.expired.n++; out.expired.markedToMarketR += h.rMultiple;
     }
   });
-  ['live', 'shadow'].forEach(k => { out[k].recordedR = +out[k].recordedR.toFixed(2); out[k].ifTP1R = +out[k].ifTP1R.toFixed(2); out[k].halfTP1R = +out[k].halfTP1R.toFixed(2); });
+  const r2 = o => { ['recordedR', 'ifTP1R', 'halfTP1R', 'if1R'].forEach(k => { if (o[k] != null) o[k] = +o[k].toFixed(2); }); };
+  r2(out.live); r2(out.shadow); Object.values(out.byStrategy).forEach(r2);
   out.expired.markedToMarketR = +out.expired.markedToMarketR.toFixed(2);
   return out;
+}
+// v4.8.25 (24/10): R neto de "todo en +1R". Exacto si la operacion se cerro con esta version (h.rIf1R);
+// para las anteriores se calcula igual desde mfeR (guardado desde 4.8.17) y el spread ya descontado.
+// Si no hay mfeR (no deberia pasar con rIfTP1 presente) vale lo registrado.
+function getIf1R(h) {
+  const spreadCostR = (h.grossRMultiple != null && h.rMultiple != null) ? (h.grossRMultiple - h.rMultiple) : 0;
+  if (h.mfeR == null) return { r: h.rMultiple, reached: false };
+  const reached = h.mfeR >= 1;
+  if (h.rIf1R != null) return { r: h.rIf1R, reached };
+  const gross = reached ? 1 : (h.grossRMultiple != null ? h.grossRMultiple : h.rMultiple);
+  return { r: +(gross - spreadCostR).toFixed(2), reached };
 }
 // v4.8.24 (23/10): R neto de "mitad en TP1 + SL a entrada". Exacto si la operacion se cerro con esta
 // version (h.rHalfTP1). Para las cerradas en 4.8.20-4.8.23 se estima con lo ya guardado: perdida con
