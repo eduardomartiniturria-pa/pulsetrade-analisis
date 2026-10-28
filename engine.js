@@ -1,6 +1,10 @@
 // ============================================================
-// PULSE TRADE v4.8.25 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.26 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.26 (27/10): quinta cuenta y aviso de agotamiento (modulo nuevo exit-assist.js). Solo medicion/aviso en kill_zone_ny. NO toca estrategias, entradas, SL/TP, umbrales, stats, circuit breaker ni el R que registra la app (sigue pagando TP2).
+//  Motivo: operacion manual XAUUSD del 27/10 cortada por lectura de velas en el agotamiento (maximo ~+0.98R; el break-even a +1R nunca se habria armado).
+//  1) checkHistoryOutcomes(): cada cierre de kill_zone_ny guarda rTrail (R neto de spread con break-even a +1R y trailing bajo el minimo de cada vela cerrada, colchon 0.1R) y trailExit. Resumen en /api/state -> diagnostics.exitAssist (comparado contra el R registrado sobre el mismo subconjunto).
+//  2) Operaciones abiertas en ganancia (>= 0.5R): si la ultima vela cerrada muestra mecha en contra >= 50% del rango o reversion bajo la mitad del cuerpo previo, se marca exitHint (en el historial y en la señal activa). No cierra nada ni manda push.
 // Cambios v4.8.25 (24/10): cuarta cuenta en tpComparison: "todo en +1R" (cerrar la operacion entera apenas el precio va +1R a favor). Solo medicion. NO toca estrategias, entradas, SL/TP, umbrales, stats, circuit breaker ni el R que registra la app (sigue pagando TP2).
 //  Motivo (datos reales del /api/state del 24/10, 16 operaciones reales): 11/16 llegaron a +1R a favor pero solo 6/16 llegaron a TP2; 5 de las 10 perdedoras habian ido entre +1.13R y +1.68R a favor antes del SL. Cerrando todo en +1R el calculo da +4.1R contra +0.1R registrado. Con n=16 no alcanza para decidir: esta version lo mide solo, por estrategia, hasta juntar muestra.
 //  1) checkHistoryOutcomes(): cada cierre nuevo guarda rIf1R (R neto de spread si mfeR >= 1: vale +1R; si no, vale lo registrado). Usa mfeR, que ya excluye la vela del SL (criterio conservador).
@@ -492,6 +496,7 @@
 // ============================================================
 const { sendPushToAll } = require('./subscriptions');
 const CustomStrategies = require('./custom-strategies');
+const ExitAssist = require('./exit-assist'); // v4.8.26: solo medicion y aviso de agotamiento
 
 const CONFIG = {
   REFRESH_INTERVAL: 30000,
@@ -3155,6 +3160,7 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
         }
       }
     }
+    if (!outcome) ExitAssist.checkExhaustion(h, relevantCandles, state); // v4.8.26: aviso, no cierra nada
     if (outcome) {
       // NUEVO (Etapa 3 real, Punto 6 — spread/comisión): rHit hasta acá es el R "en
       // limpio" (solo distancia de precio). Se descuenta el costo estimado de spread
@@ -3194,6 +3200,8 @@ function checkHistoryOutcomes(symbol, currentPrice, candles) {
       // v4.8.25 (24/10): cuarta cuenta, "todo en +1R". Si el precio llego a +1R a favor antes del cierre, vale +1R
       // (menos spread); si no, vale lo mismo que ya esta registrado. mfeR no suma la vela del SL. Solo medicion.
       h.rIf1R = +((mfeR >= 1 ? 1 : rHit) - spreadCostR).toFixed(2);
+      // v4.8.26 (27/10): quinta cuenta, break-even + trailing (solo medicion, ver exit-assist.js).
+      ExitAssist.annotateClosed(h, relevantCandles, { isLong, riskDist, hasTp2, tp1Level, tp2Level, rTP1, rTP2, rHit, spreadCostR, closeCandleTime });
       // FIX (30/8): esta función resuelve el historial mirando la mecha (high/low)
       // de las velas del proveedor de datos, pero el widget en vivo
       // (activeCustomSignals / evaluateCustomSignalOutcome) solo mira quote.last
@@ -3819,8 +3827,9 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.25',
+    engineVersion: '4.8.26',
     tpComparison: getTPComparison(),
+    exitAssist: ExitAssist.summarize(state.signalHistory),
     generatedAt: Date.now()
   };
 }
