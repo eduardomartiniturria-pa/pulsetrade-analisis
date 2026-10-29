@@ -1,6 +1,10 @@
 // ============================================================
-// PULSE TRADE v4.8.26 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.27 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.27 (28/10): el Motor de Rentabilidad deja de APAGAR combinaciones por rachas y se corrige el tope de exposicion. NO toca estrategias, entradas, SL/TP, umbrales de confianza, circuit breaker (umbral 5 + reactivacion a los 7 dias), compuerta de costo ni exit-assist.
+//  1) Regla D ("5 de las ultimas 8 fueron perdidas") desactivada: CONFIG.PROFITABILITY_ENGINE_V1.recentDeteriorationEnabled = false. Motivo: con ~38% de aciertos, 5+ perdidas en 8 ocurre en el 60-65% de las ventanas aunque la estrategia no haya cambiado, y como una combinacion bloqueada no cierra operaciones la ventana (recentResults) nunca se movia: el bloqueo era PERMANENTE (hoy afectaba a EURUSD kill_zone_ny, EURUSD session_breakout_vwap y GBPUSD session_breakout_vwap). Para volver a activarla: recentDeteriorationEnabled = true.
+//  2) Reglas B y C (expectancy <= 0 / < 0.10R) solo se evaluan con CONFIG.PROFITABILITY_ENGINE_V1.expectancyGateMinSample = 100 operaciones LIVE (antes 12). Entre 12 y 99 la combinacion opera en PROBATION (riesgo x0.5, mismo piso de confianza 65%). Es la regla "no juzgar parametros con menos de 100 operaciones por combinacion". Con 12 operaciones el margen de error de la expectancy es de +-0.4R por operacion: no distingue ventaja de azar, y el bloqueo era permanente por la misma razon que la regla D.
+//  3) checkUsdExposureCap(): una senal abierta cuenta para el tope mientras siga viva segun su propia expiracion (kill_zone_ny 4 h, el resto 72 h), no solo 12 h. Antes una session_breakout_vwap de mas de 12 h dejaba de contar y se abria una segunda venta de XAUUSD (22-23/10: dos shorts de oro a la vez contra el maximo de 1 por simbolo y direccion). maxAgeMs queda como piso.
 // Cambios v4.8.26 (27/10): quinta cuenta y aviso de agotamiento (modulo nuevo exit-assist.js). Solo medicion/aviso en kill_zone_ny. NO toca estrategias, entradas, SL/TP, umbrales, stats, circuit breaker ni el R que registra la app (sigue pagando TP2).
 //  Motivo: operacion manual XAUUSD del 27/10 cortada por lectura de velas en el agotamiento (maximo ~+0.98R; el break-even a +1R nunca se habria armado).
 //  1) checkHistoryOutcomes(): cada cierre de kill_zone_ny guarda rTrail (R neto de spread con break-even a +1R y trailing bajo el minimo de cada vela cerrada, colchon 0.1R) y trailExit. Resumen en /api/state -> diagnostics.exitAssist (comparado contra el R registrado sobre el mismo subconjunto).
@@ -872,6 +876,11 @@ const CONFIG = {
     robustMinExpectancyR: 0.10,
     recentWindow: 8,
     maxRecentLosses: 5,
+    // v4.8.27 (28/10): regla D apagada (ver changelog). true = vuelve el comportamiento anterior.
+    recentDeteriorationEnabled: false,
+    // v4.8.27 (28/10): muestra LIVE minima para que las reglas B y C (expectancy) puedan bloquear. Entre
+    // minLiveSample y este valor la combinacion opera en PROBATION (riesgo reducido).
+    expectancyGateMinSample: 100,
     // FIX (28/9, decisión de Soy): 80% de confianza técnica era casi inalcanzable —
     // kill_zone_ny/session_breakout_vwap operan típicamente en el rango 55-75%. Con
     // ese piso, una combinación sin muestra LIVE (GBPUSD, EURUSD_session_breakout_vwap)
@@ -892,7 +901,6 @@ const CONFIG = {
     }
   }
 };
-
 class MarketData {
   constructor({ bid, ask, last, open, high, low, close, volume, timestamp, timeframe, marketStatus, spread, source, symbol, estimatedSpread = false }) {
     this.bid = bid; this.ask = ask; this.last = last; this.open = open; this.high = high;
@@ -1631,7 +1639,6 @@ const NewsCalendar = {
   _cacheAt: 0,
   _lastFailAt: 0,   // v4.8.5: momento del último fallo total (proxy y directo); 0 = sin fallo vigente
   _inflight: null,  // v4.8.5: promesa del fetch en curso, compartida entre símbolos simultáneos
-
   async _fetchJson(url) {
     const res = await fetchWithTimeout(url, CONFIG.REQUEST_TIMEOUT, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PulseTradePRO/1.0; +https://pulsetrade-analisis.onrender.com)' }
@@ -2556,7 +2563,6 @@ function getStatsForConfidenceScore(symbol) {
 function evaluateProfitability(symbol, strategyKey, confidence) {
   const cfg = CONFIG.PROFITABILITY_ENGINE_V1;
   if (!cfg || !cfg.enabled) return { decision: 'TRADE', mode: 'DISABLED', sample: null, expectancyR: null, winRate: null, recentLosses: null, reason: 'Motor de Rentabilidad deshabilitado' };
-
   const stats = getLiveProfitabilityStats(symbol, strategyKey);
   const sample = stats.wins + stats.losses;
   const winRate = sample > 0 ? +((stats.wins / sample) * 100).toFixed(1) : null;
@@ -2580,7 +2586,7 @@ function evaluateProfitability(symbol, strategyKey, confidence) {
   }
 
   // D. Deterioro reciente
-  if (recentSlice.length >= cfg.recentWindow && recentLosses >= cfg.maxRecentLosses) {
+  if (cfg.recentDeteriorationEnabled !== false && recentSlice.length >= cfg.recentWindow && recentLosses >= cfg.maxRecentLosses) {
     return { decision: 'NO_TRADE', mode: 'RECENT_DETERIORATION', ...base,
       reason: `${recentLosses} de las últimas ${recentSlice.length} operaciones LIVE fueron pérdidas (umbral ${cfg.maxRecentLosses})` };
   }
@@ -2603,6 +2609,18 @@ function evaluateProfitability(symbol, strategyKey, confidence) {
     }
     return { decision: 'NO_TRADE', mode: 'INSUFFICIENT_SAMPLE', ...base,
       reason: `muestra LIVE insuficiente (${sample}/${cfg.minLiveSample}) y confianza técnica ${confidence != null ? confidence + '%' : 'n/d'} < ${cfg.probationMinConfidence}% requerido para probation` };
+  }
+
+  // A2. v4.8.27: con menos de expectancyGateMinSample operaciones LIVE la expectancy no se juzga todavia
+  // (el margen de error con 12-99 operaciones es mayor que cualquier ventaja realista): sigue en PROBATION.
+  const gateSample = cfg.expectancyGateMinSample || cfg.minLiveSample;
+  if (sample < gateSample) {
+    if (confidence != null && confidence >= cfg.probationMinConfidence) {
+      return { decision: 'PROBATION', mode: 'BELOW_EXPECTANCY_GATE', ...base, riskMultiplier: cfg.probationRiskMultiplier,
+        reason: `muestra LIVE ${sample}/${gateSample} para juzgar la expectancy — confianza técnica ${confidence}% >= ${cfg.probationMinConfidence}%, opera con riesgo reducido x${cfg.probationRiskMultiplier}` };
+    }
+    return { decision: 'NO_TRADE', mode: 'INSUFFICIENT_SAMPLE', ...base,
+      reason: `muestra LIVE ${sample}/${gateSample} para juzgar la expectancy y confianza técnica ${confidence != null ? confidence + '%' : 'n/d'} < ${cfg.probationMinConfidence}% requerido para probation` };
   }
 
   // B. Expectativa LIVE no positiva
@@ -3448,9 +3466,14 @@ function checkUsdExposureCap(symbol, direction, ownKey) {
   if (!cap || !cap.enabled) return { blocked: false };
   const now = Date.now();
   const open = Object.entries(state.activeCustomSignals || {})
-    .filter(([k, s]) => k !== ownKey && s && !s.shadow && (now - (s.timestamp || 0)) <= cap.maxAgeMs)
+    // v4.8.27: una señal cuenta mientras siga viva según SU expiración (kill_zone_ny 4 h, el resto 72 h);
+    // cap.maxAgeMs queda como piso. Con 12 h fijas, una session_breakout_vwap de más de 12 h dejaba de contar.
+    .filter(([k, s]) => {
+      if (!k || !s || k === ownKey || s.shadow) return false;
+      const stratExp = (CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY && CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY[s.source]) || CONFIG.SIGNAL_EXPIRATION_MS || 0;
+      return (now - (s.timestamp || 0)) <= Math.max(cap.maxAgeMs || 0, stratExp);
+    })
     .map(([k, s]) => ({ key: k, symbol: s.symbol, type: s.type, usdSide: getUsdSide(s.symbol, s.type) }));
-
   // v4.8.22: señal contraria abierta en el mismo símbolo = conflicto, sin ventaja en ninguna: no se abre.
   if (cap.blockOpposite) {
     const opposite = open.filter(s => s.symbol === symbol && s.type !== direction);
@@ -3827,7 +3850,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.26',
+    engineVersion: '4.8.27',
     tpComparison: getTPComparison(),
     exitAssist: ExitAssist.summarize(state.signalHistory),
     generatedAt: Date.now()
