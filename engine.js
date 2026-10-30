@@ -1,6 +1,12 @@
 // ============================================================
-// PULSE TRADE v4.8.27 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.29 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.29 (30/10): kill_zone_ny vuelve a operar en EURUSD y GBPUSD (se saca de DISABLED_STRATEGIES_BY_SYMBOL; deja sin efecto el punto 4 de v4.8.28). Ahora opera en los 4 activos con tamano reducido (probation x0.5) y los topes de perdida diaria. NO toca nada mas.
+// Cambios v4.8.28 (29/10): se sacan las reglas que APAGABAN estrategias por rachas o por estadistica de muestra chica, sin ninguna logica de mercado detras. Se mantienen las reglas con logica real: compuerta de costo, tope de exposicion, topes de perdida diaria en R, horarios de mercado y tamano reducido (probation x0.5). NO toca estrategias, entradas, SL/TP ni exit-assist.
+//  1) CONFIG.AUTO_TUNE.maxThreshold 90 -> 65 y el umbral adaptativo se lee con tope (resolveCustomSignal). El auto-tune subia +2 el umbral de confianza cada vez que la expectancy de la combinacion era < 0.35R (siempre, con ~38% de aciertos) y solo bajaba con > 0.95R. Como TODAS las senales salen con 65% de confianza, cualquier umbral > 65 las descartaba sin registrarlas: GBPUSD session_breakout_vwap ya estaba en 67 (29/10) y el resto iba a quedar igual al llegar a 10 operaciones cerradas. Misma trampa sin salida que la regla D (v4.8.27).
+//  2) Circuit breaker (individual 5 / agregado 8 perdidas seguidas) y su reactivacion: CIRCUIT_BREAKER.enabled = false y CIRCUIT_BREAKER_REACTIVATION.enabled = false. Al arrancar se limpian autoDisabledStrategies, autoDisabledStrategiesAggregate y reactivationTesting (persistidos), asi que vuelven a operar las combinaciones que el breaker habia apagado (hoy: kill_zone_ny en los 4 activos desde el 27/10, por 8 perdidas seguidas). Para volver al comportamiento anterior: enabled = true.
+//  3) DAILY_RISK_GUARD.pauseAfterConsecutiveStopsPerSymbol 2 -> 0 (0 = sin pausa por stops seguidos). Se conservan el maximo de senales por sesion y los topes de perdida diaria (-2R por simbolo, -3R global), que limitan riesgo real.
+//  4) DISABLED_STRATEGIES_BY_SYMBOL: kill_zone_ny fuera de EURUSD y GBPUSD. NO es una regla automatica: es la decision de trading del 5/10 (en forex el edge del ORB esta en la apertura de Londres, no en NY; GBPUSD kill_zone_ny 1G/5P -4.0R, sin ventaja ni antes de costos). Para revertirla: borrar 'kill_zone_ny' de esas dos listas.
 // Cambios v4.8.27 (28/10): el Motor de Rentabilidad deja de APAGAR combinaciones por rachas y se corrige el tope de exposicion. NO toca estrategias, entradas, SL/TP, umbrales de confianza, circuit breaker (umbral 5 + reactivacion a los 7 dias), compuerta de costo ni exit-assist.
 //  1) Regla D ("5 de las ultimas 8 fueron perdidas") desactivada: CONFIG.PROFITABILITY_ENGINE_V1.recentDeteriorationEnabled = false. Motivo: con ~38% de aciertos, 5+ perdidas en 8 ocurre en el 60-65% de las ventanas aunque la estrategia no haya cambiado, y como una combinacion bloqueada no cierra operaciones la ventana (recentResults) nunca se movia: el bloqueo era PERMANENTE (hoy afectaba a EURUSD kill_zone_ny, EURUSD session_breakout_vwap y GBPUSD session_breakout_vwap). Para volver a activarla: recentDeteriorationEnabled = true.
 //  2) Reglas B y C (expectancy <= 0 / < 0.10R) solo se evaluan con CONFIG.PROFITABILITY_ENGINE_V1.expectancyGateMinSample = 100 operaciones LIVE (antes 12). Entre 12 y 99 la combinacion opera en PROBATION (riesgo x0.5, mismo piso de confianza 65%). Es la regla "no juzgar parametros con menos de 100 operaciones por combinacion". Con 12 operaciones el margen de error de la expectancy es de +-0.4R por operacion: no distingue ventaja de azar, y el bloqueo era permanente por la misma razon que la regla D.
@@ -596,7 +602,7 @@ const CONFIG = {
     targetExpectancyHigh: 0.95,
     step: 2,
     minThreshold: 65,
-    maxThreshold: 90,
+    maxThreshold: 65, // v4.8.28: era 90. Con 65 el umbral adaptativo nunca supera al base (CONFIDENCE_THRESHOLD)
     PATTERN_MIN_SAMPLE: 8,
     PATTERN_MAX_BONUS: 8
   },
@@ -647,7 +653,7 @@ const CONFIG = {
   // la lista manual "para siempre"), la complementa con desactivaciones automáticas
   // temporales que Soy revisa y decide si mantener.
   CIRCUIT_BREAKER: {
-    enabled: true,
+    enabled: false, // v4.8.28: apagado (ver changelog). true = vuelve el comportamiento anterior.
     // FIX (16/9, plan de rentabilidad): el umbral fijo de 3 (14/9) se reemplaza por dos
     // niveles según la calidad histórica real de cada combinación symbol+estrategia
     // (ver getCircuitBreakerThreshold()). Motivo confirmado con datos reales de
@@ -674,7 +680,7 @@ const CONFIG = {
   // registró (apagado AUTOMÁTICO del circuit breaker); una entrada puesta a mano por
   // Soy en DISABLED_STRATEGIES_BY_SYMBOL nunca pasa por acá.
   CIRCUIT_BREAKER_REACTIVATION: {
-    enabled: true,
+    enabled: false, // v4.8.28: sin breaker no hay nada que reactivar.
     cooldownMs: 7 * 24 * 60 * 60 * 1000, // 7 días
     testSampleSize: 5,
     testRiskMultiplier: 0.5
@@ -708,7 +714,7 @@ const CONFIG = {
   DAILY_RISK_GUARD: {
     enabled: true,
     maxSignalsPerSessionPerSymbol: 3,
-    pauseAfterConsecutiveStopsPerSymbol: 2,
+    pauseAfterConsecutiveStopsPerSymbol: 0, // v4.8.28: 0 = sin pausa por stops seguidos (era 2)
     dailyLossCapRPerSymbol: -2,
     dailyLossCapRGlobal: -3
   },
@@ -1069,6 +1075,20 @@ let state = {
 // cada combinación que sigue registrada en autoDisabledStrategies, sin tocar ni duplicar
 // las entradas manuales que ya estuvieran ahí.
 (() => {
+  // v4.8.28: con el circuit breaker apagado se levantan las desactivaciones automaticas que ya estaban
+  // guardadas (individuales, agregada y fases de prueba) para que esas combinaciones vuelvan a operar.
+  // No toca CONFIG.DISABLED_STRATEGIES_BY_SYMBOL (lista manual fija).
+  if (CONFIG.CIRCUIT_BREAKER && CONFIG.CIRCUIT_BREAKER.enabled === false) {
+    state.autoDisabledStrategies = {};
+    state.autoDisabledStrategiesAggregate = {};
+    state.reactivationTesting = {};
+    try {
+      localStorage.setItem('pt_auto_disabled_strategies', '{}');
+      localStorage.setItem('pt_auto_disabled_strategies_aggregate', '{}');
+      localStorage.setItem('pt_reactivation_testing', '{}');
+    } catch (e) {}
+    return;
+  }
   // FIX (30/9): las combinaciones en fase de prueba de reactivación NO se re-apagan acá
   // (antes sí, y la prueba quedaba trabada en 0 operaciones tras cada redeploy). Las
   // entradas de prueba muertas (símbolo retirado / estrategia fuera de ENABLED) se limpian.
@@ -3386,7 +3406,7 @@ function checkDailyRiskGuard(symbol) {
   }
 
   const symbolConsecLosses = countTrailingLosses(symbolToday);
-  if (symbolConsecLosses >= guard.pauseAfterConsecutiveStopsPerSymbol) {
+  if (guard.pauseAfterConsecutiveStopsPerSymbol > 0 && symbolConsecLosses >= guard.pauseAfterConsecutiveStopsPerSymbol) {
     return { blocked: true, reason: `${symbolConsecLosses} stops seguidos en ${symbol} hoy — pausado` };
   }
 
@@ -3521,7 +3541,8 @@ function resolveCustomSignal(symbol, quote, customSig, asset, entryCandleTime = 
   // todavía no tiene umbral propio calculado (pocas operaciones cerradas), cae
   // a CONFIG.CONFIDENCE_THRESHOLD igual que antes.
   const thresholdKey = `${symbol}_${customSig.strategy}`;
-  const confidenceThreshold = state.autoConfidenceThreshold[thresholdKey] || CONFIG.CONFIDENCE_THRESHOLD;
+  // v4.8.28: tope CONFIG.AUTO_TUNE.maxThreshold. Un umbral guardado antes del cambio (ej. 67) ya no descarta señales de 65%.
+  const confidenceThreshold = Math.min(state.autoConfidenceThreshold[thresholdKey] || CONFIG.CONFIDENCE_THRESHOLD, CONFIG.AUTO_TUNE.maxThreshold || CONFIG.CONFIDENCE_THRESHOLD);
   const meetsConfidenceThreshold = customSig.confidence == null || customSig.confidence >= confidenceThreshold;
   let belowThresholdDisplay = null;
   if (isNewDirection && !inCooldown && !meetsConfidenceThreshold) {
@@ -3850,7 +3871,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.27',
+    engineVersion: '4.8.29',
     tpComparison: getTPComparison(),
     exitAssist: ExitAssist.summarize(state.signalHistory),
     generatedAt: Date.now()
