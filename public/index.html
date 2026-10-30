@@ -105,6 +105,14 @@
   .period-item-wr.positive{color:#4ade80}
   .period-item-wr.negative{color:#f87171}
   .period-item-sub{font-size:0.72rem;color:#64748b;margin-top:2px}
+  /* (30/10) Cada día/semana/mes es una pestaña desplegable: cerrada por defecto, el detalle va adentro */
+  .period-item-chev{display:inline-block;width:14px;margin-right:6px;color:#64748b;font-size:0.65rem;transition:transform .15s}
+  .period-item.open .period-item-chev{transform:rotate(90deg);color:#38bdf8}
+  .period-item-summary{font-size:0.72rem;font-weight:700;color:#64748b}
+  .period-item-summary.positive{color:#4ade80}
+  .period-item-summary.negative{color:#f87171}
+  .period-item-body{display:none;margin-top:10px;cursor:default}
+  .period-item.open .period-item-body{display:block}
   .period-detail{background:#151d2b;border-radius:12px;border:1px solid #232f42;padding:12px 14px;margin-top:6px}
   .period-detail-title{font-size:0.8rem;font-weight:700;color:#38bdf8;margin-bottom:8px}
   .period-strategy-row{display:flex;justify-content:space-between;padding:4px 0;font-size:0.75rem;border-top:1px solid #1e293b}
@@ -173,7 +181,6 @@
   <div class="period-tab" data-period="month">Mes</div>
 </div>
 <div class="period-list" id="periodList"></div>
-<div id="periodDetail"></div>
 
 <div class="last-updated" id="status">Cargando...</div>
 
@@ -622,15 +629,12 @@ function renderPeriodAssetBlock(sym, assetSummary) {
   </div>`;
 }
 
-// Estado del último summary cargado.
-let currentPeriodSummary = null;
-
-function renderPeriodDetail() {
-  const el = document.getElementById('periodDetail');
-  const summary = currentPeriodSummary;
+// (30/10) Antes renderPeriodDetail() escribía el resumen en un único #periodDetail al final de TODA la
+// lista (quedaba lejos de lo que se tocaba). Ahora esta función solo DEVUELVE el HTML del período y cada
+// día/semana/mes lo muestra dentro de su propia pestaña desplegable (ver togglePeriodItem).
+function buildPeriodDetailHtml(summary) {
   if (!summary || !summary.total) {
-    el.innerHTML = '<div class="period-detail"><div class="period-empty">Sin señales cerradas en este período.</div></div>';
-    return;
+    return '<div class="period-detail"><div class="period-empty">Sin señales cerradas en este período.</div></div>';
   }
   const bySymbol = summary.bySymbol || {};
   // Todos los activos con al menos 1 operación cerrada en el período, ordenados por
@@ -646,7 +650,7 @@ function renderPeriodDetail() {
   const rClass = (summary.totalR ?? 0) >= 0 ? 'positive' : 'negative';
   const rText = summary.totalR !== null && summary.totalR !== undefined
     ? `${summary.totalR > 0 ? '+' : ''}${summary.totalR}R` : '—';
-  el.innerHTML = `<div class="period-detail">
+  return `<div class="period-detail">
     <div class="pie-block">
       ${pieChartSvg(summary.wins, summary.losses)}
       <div>
@@ -663,14 +667,43 @@ function renderPeriodDetail() {
   </div>`;
 }
 
-async function selectPeriodItem(period, anchorDate) {
-  currentPeriodSummary = await fetchPeriodSummary(period, anchorDate);
-  renderPeriodDetail();
+// Abre/cierra una pestaña (día, semana o mes). El detalle se pide al servidor la primera vez que se abre
+// y queda guardado en esa pestaña; en el encabezado se muestra el resumen (operaciones, G/P y R).
+async function togglePeriodItem(item, period, anchorDate) {
+  const body = item.querySelector('.period-item-body');
+  const willOpen = !item.classList.contains('open');
+  if (willOpen) item.classList.add('open'); else item.classList.remove('open');
+  if (!willOpen || item.dataset.loaded === '1') return;
+  body.innerHTML = '<div class="period-empty">Cargando…</div>';
+  try {
+    const summary = await fetchPeriodSummary(period, anchorDate);
+    body.innerHTML = buildPeriodDetailHtml(summary);
+    item.dataset.loaded = '1';
+    const sumEl = item.querySelector('.period-item-summary');
+    if (sumEl) {
+      if (summary && summary.total) {
+        const r = summary.totalR;
+        const rTxt = (r !== null && r !== undefined) ? ` · ${r > 0 ? '+' : ''}${r}R` : '';
+        sumEl.textContent = `${summary.total} op. · ${summary.wins}G/${summary.losses}P${rTxt}`;
+        sumEl.className = 'period-item-summary ' + ((r ?? 0) >= 0 ? 'positive' : 'negative');
+      } else {
+        sumEl.textContent = 'sin operaciones';
+      }
+    }
+  } catch (e) {
+    body.innerHTML = '<div class="period-empty">No se pudo cargar este período. Cerrá y volvé a abrir la pestaña para reintentar.</div>';
+  }
+}
+
+function mkEl(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
 }
 
 function renderPeriodList() {
   const listEl = document.getElementById('periodList');
-  document.getElementById('periodDetail').innerHTML = '';
   if (!closedDays.length) {
     listEl.innerHTML = '<div class="period-empty">Todavía no hay señales cerradas registradas para el historial por período.</div>';
     return;
@@ -698,18 +731,25 @@ function renderPeriodList() {
     });
   }
 
-  listEl.innerHTML = groups.map((g, i) => `<div class="period-item" data-idx="${i}">
-    <div class="period-item-top">
-      <span class="period-item-label">${g.label}</span>
-    </div>
-  </div>`).join('');
-
-  Array.from(listEl.children).forEach((child, i) => {
-    child.addEventListener('click', () => selectPeriodItem(currentPeriod, groups[i].anchorDate));
+  const period = currentPeriod;
+  listEl.innerHTML = '';
+  groups.forEach(g => {
+    const item = mkEl('div', 'period-item');
+    const top = mkEl('div', 'period-item-top');
+    const label = mkEl('span', 'period-item-label');
+    label.appendChild(mkEl('span', 'period-item-chev', '▶'));
+    label.appendChild(document.createTextNode(g.label));
+    top.appendChild(label);
+    top.appendChild(mkEl('span', 'period-item-summary'));
+    item.appendChild(top);
+    item.appendChild(mkEl('div', 'period-item-body'));
+    // solo el encabezado abre/cierra: tocar adentro del detalle no lo cierra
+    top.addEventListener('click', () => togglePeriodItem(item, period, g.anchorDate));
+    listEl.appendChild(item);
   });
 
-  // Auto-selecciona el más reciente para no dejar la lista vacía de contexto.
-  if (groups.length) selectPeriodItem(currentPeriod, groups[0].anchorDate);
+  // Solo el más reciente arranca abierto; el resto, cerrado.
+  if (listEl.firstChild) togglePeriodItem(listEl.firstChild, period, groups[0].anchorDate);
 }
 
 function setupPeriodTabs() {
