@@ -1,4 +1,16 @@
 // ============================================================
+// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.20 (4/11, computeContextualScore: sin castigo por historial)
+// ============================================================
+// Cambios v4.20 (4/11): único cambio, en computeContextualScore. Se saca el castigo por historial
+// desfavorable (-hasta 15 puntos con >=10 operaciones y <=35% de aciertos). Motivo: todas las señales
+// salen con 65 (50 base + 15 por H1) y el piso es 65, así que cualquier resta las descartaba sin
+// registrarlas. Una combinación descartada no cierra operaciones, no suma muestra y el castigo nunca
+// se revertía (misma trampa sin salida que las reglas sacadas en engine.js v4.8.27/v4.8.28). Evidencia
+// del /api/state del 4/11: EURUSD session_breakout_vwap (3G/7L) salió con 59 contra 65 (-6 = 15 x 10/25);
+// XAUUSD kill_zone_ny (4G/9L) da 58 (-7). El bonus por historial favorable NO se toca. No cambia
+// estrategias, entradas, SL/TP, filtros ni exports. Para volver al comportamiento anterior: poner
+// HISTORY_PENALTY_ENABLED = true (constante junto a computeContextualScore).
+// ============================================================
 // ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.19 (9/10, kill_zone_ny: ventana de ruptura hasta 11:00 NY)
 // ============================================================
 // Cambios v4.19 (9/10): único cambio, en detectKillZoneNY. La ruptura solo es válida si la vela
@@ -1577,6 +1589,10 @@ function detectEthMomentumBreakout(candles, htfCandles) {
 //      señales que nacen en medio de un pico de volatilidad tipo noticia).
 //   4. Historial reciente de esa combinación símbolo+estrategia (wins/losses de
 //      state.strategyStatsBySymbol, si hay al menos 5 operaciones cerradas).
+//      v4.20 (4/11): solo suma el bonus por historial favorable; el castigo por historial
+//      desfavorable está apagado (HISTORY_PENALTY_ENABLED = false).
+// v4.20 (4/11): castigo por historial desfavorable APAGADO (ver encabezado). El bonus favorable sigue activo.
+const HISTORY_PENALTY_ENABLED = false;
 function computeContextualScore({ direction, entry, sl, tp1, candles, htfCandles, strategyKey, symbolStats, newsContext }) {
   let score = 50;
   const details = [];
@@ -1633,7 +1649,7 @@ function computeContextualScore({ direction, entry, sl, tp1, candles, htfCandles
         const bonus = Math.round(10 * sampleWeight);
         score += bonus;
         details.push(`Score: historial reciente favorable (${s.wins}G/${s.losses}P, peso muestra ${sampleWeight.toFixed(2)})`);
-      } else if (wr <= 0.35) {
+      } else if (HISTORY_PENALTY_ENABLED && wr <= 0.35) {
         const penalty = Math.round(15 * sampleWeight);
         score -= penalty;
         details.push(`Score: historial reciente desfavorable (${s.wins}G/${s.losses}P, peso muestra ${sampleWeight.toFixed(2)})`);
@@ -1965,4 +1981,3 @@ module.exports = {
 //     implementa Open Market NY como estrategia real, se hace de cero con
 //     su propio nombre — no reflotando funciones huérfanas.
 // ============================================================
-
