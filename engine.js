@@ -1,6 +1,10 @@
 // ============================================================
-// PULSE TRADE v4.8.32 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.33 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.33 (6/11): BACKTEST EN R DENTRO DE LA APP (modulo nuevo backtest-report.js). NO toca estrategias, entradas, SL/TP, umbrales ni lo que opera en vivo.
+//  1) Al arrancar (a los 4 min, y luego cada 6 h solo si el reporte tiene mas de 24 h o es de otra version) baja de Twelve Data ~7 meses de velas M15 y H1 (EURUSD, GBPUSD, XAUUSD: 3 paginas de 5000 M15; US500: 1 pagina) y corre las estrategias vela por vela con el mismo contexto H1, spread, ensanche del oro, buffer de TP y compuerta de costo que el motor en vivo. Unos 16 pedidos a Twelve Data por corrida, con 9 s entre pedidos.
+//  2) El resultado se publica en /api/state -> diagnostics.backtestReport (y diagnostics.backtestReportStatus mientras corre): R neto por estrategia, por simbolo, con 3 salidas (como paga la app / todo en +1R / todo en TP1), variante "actual" contra "previo" sobre los MISMOS datos, y corte 60/40 para ver si lo que anda en la primera parte se sostiene en la segunda.
+//  3) Seguridad: si backtest-report.js falta o falla, el motor sigue igual (el require esta protegido). El calculo cede el control cada ~200 ventanas y se frena si Twelve Data entra en cooldown. Para no correrlo: variable de entorno BACKTEST_REPORT_DISABLED=1. Para forzarlo en el arranque: BACKTEST_REPORT_FORCE=1.
 // Cambios v4.8.32 (5/11): se registra la estrategia nueva 'london_open_retest' (Apertura de Londres, EURUSD/GBPUSD/XAUUSD; ver custom-strategies.js v4.23): ENABLED_STRATEGIES, vencimiento de 4 h (como kill_zone_ny), tamano sugerido 1 y chequeo de sincronia del flag en assertStrategyFlagsSync(). Arranca sin muestra LIVE, asi que el Motor de Rentabilidad la opera en PROBATION (riesgo x0.5, confianza minima 65). NO toca nada mas.
 // Cambios v4.8.31 (5/11): kill_zone_ny SALE de la sombra (SHADOW_MODE.strategies = []) y vuelve a operar en los 4 activos, ahora con la entrada en el retesteo del nivel roto (custom-strategies.js v4.22). Sombra no arreglaba nada: solo evitaba medir con plata. El mecanismo de sombra por estrategia queda disponible. NO toca nada mas.
 // Cambios v4.8.30 (5/11): dos cambios, ambos a partir de los datos del /api/state del 4/11. NO toca entradas, SL, umbrales, compuerta de costo ni exit-assist.
@@ -512,6 +516,9 @@
 const { sendPushToAll } = require('./subscriptions');
 const CustomStrategies = require('./custom-strategies');
 const ExitAssist = require('./exit-assist'); // v4.8.26: solo medicion y aviso de agotamiento
+// v4.8.33 (6/11): backtest en R. Si el archivo falta o no carga, el motor sigue sin backtest (no se cae).
+let BacktestReport = null;
+try { BacktestReport = require('./backtest-report'); } catch (e) { console.warn('[backtest-report] no se pudo cargar:', e.message); }
 
 const CONFIG = {
   REFRESH_INTERVAL: 30000,
@@ -1060,6 +1067,10 @@ let state = {
   probationGraduated: (() => { try { return JSON.parse(localStorage.getItem('pt_probation_graduated') || '{}'); } catch (e) { return {}; } })(),
   backtestCustomStats: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_custom_stats') || '{}'); } catch (e) { return {}; } })(),
   backtestRunning: false,
+  // v4.8.33: reporte de backtest en R (ver runBacktestReport). Se conserva entre reinicios si hay localStorage persistente.
+  backtestReport: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_report_v1') || 'null'); } catch (e) { return null; } })(),
+  backtestReportStatus: 'pendiente',
+  backtestReportRunning: false,
   soundEnabled: localStorage.getItem('pt_sound_enabled') !== 'false',
   persistKeys: localStorage.getItem('pt_persist_keys') === 'true',
   strictMode: localStorage.getItem('pt_strict_mode') === 'true',
@@ -2162,6 +2173,41 @@ const BacktestEngine = {
       time: new Date(v.datetime).getTime(), open: parseFloat(v.open), high: parseFloat(v.high),
       low: parseFloat(v.low), close: parseFloat(v.close), volume: v.volume ? parseFloat(v.volume) : 0
     }));
+  },
+  // v4.8.33 (6/11): descarga paginada para el reporte de backtest. Pide `pages` paginas de `perPage` velas
+  // (5000 es el maximo de Twelve Data por pedido), cada una terminando antes de donde empezo la anterior.
+  // Devuelve velas en orden cronologico, sin duplicados, con el mismo priceMultiplier que el motor en vivo.
+  async fetchCandlesPaged(symbol, interval, perPage, pages) {
+    if (!state.apiKeys.twelveData) return null;
+    const asset = ASSETS[symbol];
+    const tfMap = { '15m': '15min', '1h': '1h' };
+    const headers = { 'Authorization': `apikey ${state.apiKeys.twelveData}` };
+    const mult = asset.priceMultiplier || 1;
+    const parse = str => Date.parse(String(str).replace(' ', 'T') + 'Z');
+    let all = [];
+    let endDate = null;
+    for (let p = 0; p < pages; p++) {
+      if (isProviderInCooldown('twelveData')) throw new Error('Twelve Data en cooldown');
+      let url = `${CONFIG.ENDPOINTS.TWELVEDATA}/time_series?symbol=${asset.symbols.twelveData}&interval=${tfMap[interval] || '15min'}&outputsize=${perPage}&timezone=UTC`;
+      if (endDate) url += `&end_date=${encodeURIComponent(endDate)}`;
+      const res = await fetchWithTimeout(url, 40000, { headers }, 'twelveData');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (data.status === 'error' || !data.values || !data.values.length) {
+        if (p === 0) throw new Error(data.message || 'Sin datos históricos');
+        break;
+      }
+      all = all.concat(data.values.map(v => ({
+        time: parse(v.datetime), open: parseFloat(v.open) * mult, high: parseFloat(v.high) * mult,
+        low: parseFloat(v.low) * mult, close: parseFloat(v.close) * mult, volume: v.volume ? parseFloat(v.volume) : 0
+      })));
+      if (data.values.length < perPage) break;
+      const oldest = parse(data.values[data.values.length - 1].datetime);
+      endDate = new Date(oldest - 1000).toISOString().slice(0, 19).replace('T', ' ');
+      await sleep(9000); // respeta el limite por minuto del plan gratis (8/min)
+    }
+    const seen = new Set();
+    return all.filter(c => isFinite(c.time) && isFinite(c.close) && !seen.has(c.time) && seen.add(c.time)).sort((a, b) => a.time - b.time);
   },
   async simulateCustom(candles, symbol, asset) {
     const cfg = CONFIG.BACKTEST;
@@ -3889,9 +3935,11 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.32',
+    engineVersion: '4.8.33',
     tpComparison: getTPComparison(),
     exitAssist: ExitAssist.summarize(state.signalHistory),
+    backtestReport: state.backtestReport || null,
+    backtestReportStatus: state.backtestReportStatus || 'pendiente',
     generatedAt: Date.now()
   };
 }
@@ -4129,9 +4177,64 @@ async function autoRefreshTick() {
   }
 }
 
+// v4.8.33 (6/11): backtest en R corrido dentro de la app (ver backtest-report.js y el changelog 4.8.33).
+async function runBacktestReport(force = false) {
+  if (!BacktestReport || state.backtestReportRunning) return;
+  const prev = state.backtestReport;
+  if (!force && prev && prev.status === 'ok' && prev.engineVersion === '4.8.33' && Date.now() - (prev.generatedAt || 0) < 24 * 60 * 60 * 1000) return;
+  if (!state.apiKeys || !state.apiKeys.twelveData) { state.backtestReportStatus = 'sin clave de Twelve Data'; return; }
+  state.backtestReportRunning = true;
+  state.backtestReportStatus = 'iniciando';
+  try {
+    const deps = {
+      engineVersion: '4.8.33',
+      symbols: CONFIG.BACKTEST.SYMBOLS.filter(s => ASSETS[s]),
+      assets: ASSETS,
+      enabled: CONFIG.ENABLED_STRATEGIES,
+      disabledBySymbol: CONFIG.DISABLED_STRATEGIES_BY_SYMBOL,
+      evaluateAll: (...a) => CustomStrategies.evaluateAll(...a),
+      withFlags: (flags, fn) => CustomStrategies.withBacktestFlags(flags, fn),
+      yieldFn: () => sleep(4),
+      progress: msg => { state.backtestReportStatus = msg; },
+      shouldAbort: () => isProviderInCooldown('twelveData'),
+      fetchM15: sym => BacktestEngine.fetchCandlesPaged(sym, '15m', 5000, sym === 'US500' ? 1 : 3),
+      fetchH1: sym => BacktestEngine.fetchCandlesPaged(sym, '1h', 5000, 1),
+      variants: [
+        { name: 'actual', flags: {}, description: 'Codigo tal como esta en vivo (kill_zone_ny con retesteo, session_breakout_vwap con salida unica en +1R, london_open_retest).' },
+        { name: 'previo', flags: { kzRetest: false, sbvExitR: null }, description: 'kill_zone_ny con entrada a mercado en la vela de ruptura y session_breakout_vwap con TP1 1.5R / TP2 2R (london_open_retest igual).' }
+      ],
+      config: {
+        spreadPips: CONFIG.ESTIMATED_SPREAD_PIPS_BY_SYMBOL,
+        tpBufferPips: CONFIG.TP_CONFIRMATION_BUFFER_PIPS_BY_SYMBOL,
+        costGateMax: (CONFIG.QUALITY_GATES && CONFIG.QUALITY_GATES.enabled) ? CONFIG.QUALITY_GATES.maxSpreadPctOfStop : null,
+        minConfidence: 55,
+        confThreshold: CONFIG.CONFIDENCE_THRESHOLD,
+        expirationMs: CONFIG.SIGNAL_EXPIRATION_MS_BY_STRATEGY,
+        defaultExpirationMs: CONFIG.SIGNAL_EXPIRATION_MS
+      }
+    };
+    const report = await BacktestReport.run(deps);
+    state.backtestReport = report;
+    state.backtestReportStatus = report.status;
+    try { localStorage.setItem('pt_backtest_report_v1', JSON.stringify(report)); } catch (e) {}
+    console.log(`[backtest-report] terminado: ${report.status}`);
+  } catch (e) {
+    state.backtestReportStatus = 'error: ' + e.message;
+    console.warn('[backtest-report] error:', e.message);
+  } finally {
+    state.backtestReportRunning = false;
+  }
+}
+
 function startAutoRefreshLoop() {
   if (autoRefreshTimer) return;
   autoRefreshTick();
+  // v4.8.33: el backtest arranca a los 4 min (despues del primer ciclo en vivo) y se revisa cada 6 h.
+  if (BacktestReport && !process.env.BACKTEST_REPORT_DISABLED) {
+    const go = force => runBacktestReport(force).catch(e => console.warn('[backtest-report] error:', e.message));
+    setTimeout(() => go(!!process.env.BACKTEST_REPORT_FORCE), 4 * 60 * 1000);
+    setInterval(() => go(false), 6 * 60 * 60 * 1000);
+  }
 }
 
 function stopAutoRefreshLoop() {
@@ -4416,5 +4519,6 @@ module.exports = {
   state, CONFIG, ASSETS, refreshAllData, refreshAsset, BacktestEngine,
   startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isKillZoneWindow,
   getDiagnostics,
-  getMarketStatus
+  getMarketStatus,
+  runBacktestReport // v4.8.33: para pruebas y para dispararlo desde afuera si hace falta
 };
