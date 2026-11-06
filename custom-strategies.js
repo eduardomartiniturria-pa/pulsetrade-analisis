@@ -1,4 +1,66 @@
 // ============================================================
+// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.23 (5/11, estrategia nueva: london_open_retest)
+// ============================================================
+// Cambios v4.23 (5/11): estrategia NUEVA 'london_open_retest' (Apertura de Londres) para EURUSD, GBPUSD y XAUUSD.
+// Motivo: el plan de rentabilidad dejo la app con 3 estrategias y casi todo el flujo en dos setups (supply_demand
+// casi no dispara: 1 operacion en vivo). El propio codigo ya documentaba (decision del 5/10) que en forex el edge
+// de la ruptura de apertura esta en Londres y no en Nueva York; kill_zone_ny se saco de forex por eso. Esta
+// estrategia llena ese hueco con la MISMA mecanica corregida en la v4.22 (entrada en el retesteo, no a mercado).
+// Decisiones de diseno (criterio de trader, sin datos propios todavia):
+//  - Rango de apertura = 8:00-8:30 hora de Londres (2 velas M15; con 15 min el rango es ruido). Se calcula en
+//    Europe/London, asi sigue el horario de verano britanico sin offsets fijos. Si el rango mide mas de
+//    LO_MAX_RANGE_ATR (3) x ATR, el movimiento del dia ya ocurrio y no se opera.
+//  - Ruptura valida: la primera vela que cierra fuera del rango, abre antes de las 9:30 Londres, y pasa los
+//    filtros: no va contra la tendencia H1 (getH1Bias), cierra del lado correcto del VWAP anclado a las 8:00
+//    de Londres (no al dia de NY, que arrancaria 3 h antes de la apertura) y tiene cuerpo real (>= 0.6 ATR y
+//    >= 0.6 del rango de la vela).
+//  - Entrada y SL: igual que kill_zone_ny v4.22 (retesteo del nivel, ruptura falsa si cierra dentro del rango,
+//    SL pasado el nivel/mecha + 0.35 ATR, riesgo entre 0.5 y 1.5 ATR).
+//  - Objetivo UNICO en 1.5R (tp2 = null, cierra todo): con retesteo y stop corto el 1.5R es alcanzable y la
+//    app no paga solo en un TP2 lejano.
+//  - Convive con session_breakout_vwap (que tambien opera la mañana de Londres): el tope de exposicion de
+//    engine.js (max 1 abierta por simbolo y direccion) evita duplicar la misma apuesta.
+//  - Para apagarla: LONDON_OPEN_RETEST_ENABLED = false en este archivo Y sacar 'london_open_retest' de
+//    CONFIG.ENABLED_STRATEGIES en engine.js (assertStrategyFlagsSync exige que coincidan).
+// ============================================================
+// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.22 (5/11, kill_zone_ny: entrada en el retesteo del nivel roto)
+// ============================================================
+// Cambios v4.22 (5/11): unico cambio, en detectKillZoneNY. La entrada pasa de "a mercado en el cierre de la
+// vela de ruptura" a "en el retesteo del nivel roto". Diagnostico (datos del 4/11, 37 operaciones en vivo,
+// 12G/25P, -5.24R): solo 3 de 10 operaciones medidas llegaron a +1R. Causa estructural: se entraba al final del
+// tirón (caso XAUUSD del 27/10: entrada ~85 pips por encima del nivel roto, SL de 247 pips), asi que el SL
+// quedaba lejos (punto medio del rango) y los objetivos (1.5R/2R) quedaban a cientos de pips: el precio tenia que
+// recorrer mucho mas para dar lo mismo, y cualquier rebote lo sacaba. Ademas, entrar en la vela de ruptura no
+// filtra las rupturas falsas.
+//  Regla nueva (KZ_RETEST_ENTRY_ENABLED = true):
+//   1) La ruptura valida es la misma de siempre (cierre fuera del rango 9:30-9:45 NY, filtros H1, VWAP, cuerpo
+//      minimo y vela que abre antes de las 10:45 NY). Ya NO dispara en esa vela.
+//   2) Si una vela posterior CIERRA de vuelta dentro del rango, la ruptura fue falsa: no hay señal ese dia.
+//   3) La señal sale en la PRIMERA vela posterior que toca el nivel roto (tolerancia KZ_RETEST_TOUCH_ATR x ATR),
+//      cierra del lado correcto del nivel y del VWAP, dentro de las KZ_RETEST_MAX_CANDLES velas siguientes.
+//   4) Entrada = cierre de la vela de retesteo. SL = debajo (compra) / encima (venta) de lo mas extremo entre el
+//      nivel y la mecha del retesteo, + KZ_RETEST_SL_ATR x ATR. Riesgo minimo KZ_RETEST_MIN_RISK_ATR x ATR; si el
+//      riesgo supera KZ_RETEST_MAX_RISK_ATR x ATR no se opera (la entrada ya no esta cerca del nivel).
+//   5) TP1 1.5R / TP2 2R: sin cambios. Mide el resultado exit-assist/tpComparison como hasta ahora.
+//  Costo: salen menos señales (solo las rupturas que vuelven a probar el nivel y lo sostienen). Para volver a la
+//  entrada anterior: KZ_RETEST_ENTRY_ENABLED = false.
+// ============================================================
+// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.21 (5/11, session_breakout_vwap: salida unica en +1R)
+// ============================================================
+// Cambios v4.21 (5/11): unico cambio funcional, en evaluateAll. session_breakout_vwap en modo 'breakout'
+// pasa de TP1 1.5R / TP2 2R (la app pagaba TP2) a OBJETIVO UNICO en +1R (tp1 = entrada +- 1R, tp2 = null,
+// cierra y paga en +1R). Motivo (/api/state del 4/11, 13 operaciones reales): 9 de 13 llegaron a +1R a
+// favor (69%) pero solo llegaban a TP2 las que corrian mas; registrado +0.93R contra +3.93R si se hubiera
+// cerrado todo en +1R (ya neto de spread, medido con mfeR exacto). Muestra chica (n = 13): se aplica
+// porque la cuenta es del propio tpComparison y no toca la entrada ni el SL; se revisa con ~40 operaciones.
+//  - El puntaje de confianza se calcula ANTES con el tp1 original (1.5R): con tp1 en 1R computeContextualScore
+//    restaria 10 por "RR ajustado" y las señales saldrian con 55 contra el umbral de 65 (se descartarian todas).
+//  - El modo 'vwap_reversion' NO cambia (su objetivo es el VWAP y ya tiene tp2 = null).
+//  - engine.js (ensanche de SL del oro) conserva el RR de tp1, asi que en XAUUSD el objetivo sigue en +1R del SL ya ensanchado.
+//  - HISTORY_PENALTY_ENABLED (v4.20) queda en false: el historial viejo de session_breakout_vwap se midio con la
+//    salida en TP2 y ya no describe a la estrategia con la salida nueva.
+//  - Para volver a la salida anterior: SBV_BREAKOUT_EXIT_R = null.
+// ============================================================
 // ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.20 (4/11, computeContextualScore: sin castigo por historial)
 // ============================================================
 // Cambios v4.20 (4/11): único cambio, en computeContextualScore. Se saca el castigo por historial
@@ -235,6 +297,20 @@ function calculateMACDSeries(candles, fast = 12, slow = 26, signalPeriod = 9) {
 // Se usa el timezone real 'America/New_York' en vez de un offset fijo
 // (ej. "ARG = NY + 1h"), porque ese offset cambia con el horario de
 // verano de EE.UU. (EDT/EST) y un valor fijo queda mal la mitad del año.
+
+function getLondonTimeParts(ms) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/London', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: 'numeric', minute: 'numeric', hour12: false
+  }).formatToParts(new Date(ms));
+  const get = t => parts.find(p => p.type === t).value;
+  return {
+    weekday: get('weekday'),
+    dateKey: `${get('year')}-${get('month')}-${get('day')}`,
+    hour: parseInt(get('hour'), 10) % 24,
+    minute: parseInt(get('minute'), 10)
+  };
+}
 
 function getNYTimeParts(ms) {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -473,6 +549,13 @@ const KZ_MIN_BODY_RATIO_RANGE = 0.6;
 // Sigue valiendo v4.17: una ruptura rechazada por VWAP/H1/cuerpo NO gasta la oportunidad
 // DENTRO de esta ventana. No cambia rango de referencia, filtros, SL ni TP.
 const KZ_MAX_BREAKOUT_OPEN_MIN = 10 * 60 + 45;
+// v4.22 (5/11): entrada en el retesteo del nivel roto (ver changelog de la v4.22). Ajustables.
+const KZ_RETEST_ENTRY_ENABLED = true;
+const KZ_RETEST_MAX_CANDLES = 8;       // el retesteo debe ocurrir dentro de las 8 velas siguientes a la ruptura (2 h en M15)
+const KZ_RETEST_TOUCH_ATR = 0.15;      // la vela debe llegar a menos de 0.15 x ATR del nivel (o cruzarlo)
+const KZ_RETEST_SL_ATR = 0.35;         // colchon del SL pasado el nivel / la mecha del retesteo
+const KZ_RETEST_MIN_RISK_ATR = 0.5;    // piso de riesgo (evita stops de ruido)
+const KZ_RETEST_MAX_RISK_ATR = 1.5;    // techo de riesgo (si lo supera, la entrada quedo lejos del nivel: no se opera)
 
 function detectSessionBreakoutVwap(candles, htfCandles = null) {
   const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, mode: null };
@@ -702,7 +785,7 @@ function detectKillZoneNY(candles, htfCandles = null) {
   // pobres sin filtro de calidad de vela.
   const vwapSeries = calculateVWAPSeries(candles).vwap;
   const firstConfirmIdxInCandles = candles.length - confirmCandles.length;
-  let breakoutCandle = null, direction = null;
+  let breakoutCandle = null, direction = null, breakoutIdx = -1;
   for (let i = 0; i < confirmCandles.length; i++) {
     const c = confirmCandles[i];
     const cNY = getNYTimeParts(c.time);
@@ -724,10 +807,49 @@ function detectKillZoneNY(candles, htfCandles = null) {
     const bodyOkAtr = !(cAtr > 0) || bodySize >= cAtr * KZ_MIN_BODY_RATIO_ATR;
     const bodyOkRange = !(candleRange > 0) || (bodySize / candleRange) >= KZ_MIN_BODY_RATIO_RANGE;
     if (!bodyOkAtr || !bodyOkRange) continue; // ruptura débil (mecha, sin cuerpo real): no gasta la oportunidad
-    breakoutCandle = c; direction = dir;
+    breakoutCandle = c; direction = dir; breakoutIdx = i;
     break;
   }
   if (!breakoutCandle) return result; // sin ruptura confirmada (y válida) todavía
+
+  // v4.22 (5/11): ENTRADA EN EL RETESTEO del nivel roto (ver changelog de la v4.22).
+  if (KZ_RETEST_ENTRY_ENABLED) {
+    const atrR = calculateATR(candles) || 0;
+    if (!(atrR > 0)) return result;
+    const isBull = direction === 'bull';
+    const level = isBull ? rangeHigh : rangeLow;
+    const touchTol = atrR * KZ_RETEST_TOUCH_ATR;
+    const lastSearchIdx = Math.min(confirmCandles.length - 1, breakoutIdx + KZ_RETEST_MAX_CANDLES);
+    let retestIdx = -1;
+    for (let j = breakoutIdx + 1; j <= lastSearchIdx; j++) {
+      const c = confirmCandles[j];
+      const backInside = isBull ? c.close <= level : c.close >= level;
+      if (backInside) return result; // ruptura falsa: volvió a cerrar dentro del rango, no se opera
+      const touched = isBull ? c.low <= level + touchTol : c.high >= level - touchTol;
+      if (touched) { retestIdx = j; break; }
+    }
+    if (retestIdx === -1) return result;                     // todavía no volvió al nivel (o ya pasó la ventana)
+    const retest = confirmCandles[retestIdx];
+    if (retest !== last) return result;                      // el retesteo ya pasó antes, no repetir señal
+    const vwapAtRetest = vwapSeries[firstConfirmIdxInCandles + retestIdx];
+    if (vwapAtRetest != null && (isBull ? retest.close <= vwapAtRetest : retest.close >= vwapAtRetest)) return result; // perdió el VWAP
+    const entryR = retest.close;
+    const base = isBull ? Math.min(retest.low, level) : Math.max(retest.high, level);
+    let slR = isBull ? base - atrR * KZ_RETEST_SL_ATR : base + atrR * KZ_RETEST_SL_ATR;
+    let riskR = Math.abs(entryR - slR);
+    if (riskR < atrR * KZ_RETEST_MIN_RISK_ATR) {
+      riskR = atrR * KZ_RETEST_MIN_RISK_ATR;
+      slR = isBull ? entryR - riskR : entryR + riskR;
+    }
+    if (riskR > atrR * KZ_RETEST_MAX_RISK_ATR) return result; // entrada lejos del nivel: no vale la pena
+    result.bullish = isBull; result.bearish = !isBull;
+    result.entry = entryR; result.sl = slR; result.mode = 'retest_confirmation';
+    result.tp1 = isBull ? entryR + riskR * 1.5 : entryR - riskR * 1.5;
+    result.tp2 = isBull ? entryR + riskR * 2 : entryR - riskR * 2;
+    result.details.push(`Ruptura del ${isBull ? 'máximo' : 'mínimo'} de la vela 9:30-9:45 NY y retesteo sostenido del nivel (${level.toFixed(5)})`);
+    return result;
+  }
+
   if (breakoutCandle !== last) return result; // la ruptura ya pasó antes, no repetir señal
 
   // FIX (5/10, auditoría de rentabilidad): el SL quedaba exactamente en rangeLow/rangeHigh
@@ -768,6 +890,134 @@ function detectKillZoneNY(candles, htfCandles = null) {
 }
 
 // ---------------------------------------------------------
+// ESTRATEGIA: APERTURA DE LONDRES CON RETESTEO (london_open_retest) — v4.23, 5/11
+// ---------------------------------------------------------
+// Ver el detalle de decisiones en el changelog de la v4.23 (cabecera del archivo).
+const LONDON_OPEN_RETEST_ENABLED = true;
+const LONDON_OPEN_RETEST_SYMBOLS = ['EURUSD', 'GBPUSD', 'XAUUSD'];
+const LO_RANGE_START_MIN = 8 * 60;            // 8:00 Londres
+const LO_RANGE_END_MIN = 8 * 60 + 30;         // 8:30 Londres
+const LO_MAX_BREAKOUT_OPEN_MIN = 9 * 60 + 30; // la vela de ruptura debe abrir antes de las 9:30 Londres
+const LO_MAX_RANGE_ATR = 3;                   // rango de apertura mayor a 3 x ATR: no se opera
+const LO_MIN_BODY_ATR = 0.6;
+const LO_MIN_BODY_RANGE = 0.6;
+const LO_RETEST_MAX_CANDLES = 8;
+const LO_RETEST_TOUCH_ATR = 0.15;
+const LO_RETEST_SL_ATR = 0.35;
+const LO_MIN_RISK_ATR = 0.5;
+const LO_MAX_RISK_ATR = 1.5;
+const LO_TP1_R = 1.5;
+
+function detectLondonOpenRetest(candles, htfCandles = null) {
+  const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, mode: null };
+  if (!candles || candles.length < 30) return result;
+
+  const h1Bias = getH1Bias(htfCandles);
+  const last = candles[candles.length - 1];
+  const lastLN = getLondonTimeParts(last.time);
+  if (lastLN.weekday === 'Sat' || lastLN.weekday === 'Sun') return result;
+  const nowMin = lastLN.hour * 60 + lastLN.minute;
+  if (nowMin < LO_RANGE_END_MIN) return result; // el rango de apertura todavia no cerro
+
+  // Velas del dia dentro de 8:00-8:30 Londres
+  let ws = -1, we = -1;
+  for (let i = candles.length - 1; i >= 0 && i >= candles.length - 200; i--) {
+    const p = getLondonTimeParts(candles[i].time);
+    if (p.dateKey !== lastLN.dateKey) break;
+    const m = p.hour * 60 + p.minute;
+    if (m >= LO_RANGE_START_MIN && m < LO_RANGE_END_MIN) {
+      if (we === -1) we = i;
+      ws = i;
+    } else if (m < LO_RANGE_START_MIN) {
+      break;
+    }
+  }
+  if (ws === -1 || we === -1 || we - ws < 1) return result; // rango incompleto (faltan velas)
+  const firstP = getLondonTimeParts(candles[ws].time);
+  if (firstP.hour * 60 + firstP.minute !== LO_RANGE_START_MIN) return result;
+
+  const atr = calculateATR(candles) || 0;
+  if (!(atr > 0)) return result;
+
+  const rangeCandles = candles.slice(ws, we + 1);
+  const rangeHigh = Math.max(...rangeCandles.map(c => c.high));
+  const rangeLow = Math.min(...rangeCandles.map(c => c.low));
+  if ((rangeHigh - rangeLow) > atr * LO_MAX_RANGE_ATR) return result; // rango ya demasiado extendido
+
+  // VWAP anclado a las 8:00 Londres (volumen real si existe; si no, promedio del precio tipico)
+  const vw = new Array(candles.length).fill(null);
+  let cumPV = 0, cumV = 0, cumTP = 0, cnt = 0;
+  for (let i = ws; i < candles.length; i++) {
+    const c = candles[i];
+    const tp = (c.high + c.low + c.close) / 3;
+    const v = c.volume || 0;
+    cumPV += tp * v; cumV += v; cumTP += tp; cnt++;
+    vw[i] = cumV > 0 ? cumPV / cumV : cumTP / cnt;
+  }
+
+  // Ruptura valida: primera vela posterior al rango que cierra fuera y pasa los filtros
+  let breakoutIdx = -1, direction = null;
+  for (let i = we + 1; i < candles.length; i++) {
+    const c = candles[i];
+    const cLN = getLondonTimeParts(c.time);
+    if (cLN.dateKey !== lastLN.dateKey) break;
+    if (cLN.hour * 60 + cLN.minute > LO_MAX_BREAKOUT_OPEN_MIN) break;
+    let dir = null;
+    if (c.close > rangeHigh) dir = 'bull';
+    else if (c.close < rangeLow) dir = 'bear';
+    if (!dir) continue;
+    if (h1Bias.bias === 'short' && dir === 'bull') continue;
+    if (h1Bias.bias === 'long' && dir === 'bear') continue;
+    if (vw[i] != null) {
+      if (dir === 'bull' && c.close <= vw[i]) continue;
+      if (dir === 'bear' && c.close >= vw[i]) continue;
+    }
+    const cAtr = calculateATR(candles.slice(0, i + 1)) || 0;
+    const body = Math.abs(c.close - c.open);
+    const rng = c.high - c.low;
+    if (cAtr > 0 && body < cAtr * LO_MIN_BODY_ATR) continue;
+    if (rng > 0 && (body / rng) < LO_MIN_BODY_RANGE) continue;
+    breakoutIdx = i; direction = dir;
+    break;
+  }
+  if (breakoutIdx === -1) return result;
+
+  const isBull = direction === 'bull';
+  const level = isBull ? rangeHigh : rangeLow;
+  const touchTol = atr * LO_RETEST_TOUCH_ATR;
+  const lastSearchIdx = Math.min(candles.length - 1, breakoutIdx + LO_RETEST_MAX_CANDLES);
+  let retestIdx = -1;
+  for (let j = breakoutIdx + 1; j <= lastSearchIdx; j++) {
+    const c = candles[j];
+    const backInside = isBull ? c.close <= level : c.close >= level;
+    if (backInside) return result; // ruptura falsa
+    const touched = isBull ? c.low <= level + touchTol : c.high >= level - touchTol;
+    if (touched) { retestIdx = j; break; }
+  }
+  if (retestIdx === -1) return result;
+  if (retestIdx !== candles.length - 1) return result; // el retesteo ya paso: no repetir
+  const retest = candles[retestIdx];
+  if (vw[retestIdx] != null && (isBull ? retest.close <= vw[retestIdx] : retest.close >= vw[retestIdx])) return result;
+
+  const entry = retest.close;
+  const base = isBull ? Math.min(retest.low, level) : Math.max(retest.high, level);
+  let sl = isBull ? base - atr * LO_RETEST_SL_ATR : base + atr * LO_RETEST_SL_ATR;
+  let risk = Math.abs(entry - sl);
+  if (risk < atr * LO_MIN_RISK_ATR) {
+    risk = atr * LO_MIN_RISK_ATR;
+    sl = isBull ? entry - risk : entry + risk;
+  }
+  if (risk > atr * LO_MAX_RISK_ATR) return result;
+
+  result.bullish = isBull; result.bearish = !isBull;
+  result.entry = entry; result.sl = sl; result.mode = 'london_retest';
+  result.tp1 = isBull ? entry + risk * LO_TP1_R : entry - risk * LO_TP1_R;
+  result.tp2 = null; // objetivo unico: cierra todo en TP1
+  result.details.push(`Ruptura del ${isBull ? 'máximo' : 'mínimo'} del rango 8:00-8:30 de Londres y retesteo sostenido del nivel (${level.toFixed(5)})`);
+  return result;
+}
+
+// ---------------------------------------------------------
 // ESTRATEGIA: SESSION FALSE BREAKOUT / MEAN REVERSION (estilo Andrea Unger)
 // ---------------------------------------------------------
 // Agregada 10/9 a pedido de Soy, a partir de un video que atribuye una
@@ -801,7 +1051,6 @@ function detectKillZoneNY(candles, htfCandles = null) {
 // cuando el precio cierre más allá del rango siguiente, con la misma
 // lógica. Encadenar el reverse automático requeriría tocar
 // checkHistoryOutcomes() en engine.js, fuera del alcance de esta entrega.
-
 function detectSessionFalseBreakout(candles, asset) {
   const result = { bullish: false, bearish: false, details: [], entry: null, sl: null, tp1: null, tp2: null, mode: null };
   if (!candles || candles.length < 30) return result;
@@ -1593,6 +1842,9 @@ function detectEthMomentumBreakout(candles, htfCandles) {
 //      desfavorable está apagado (HISTORY_PENALTY_ENABLED = false).
 // v4.20 (4/11): castigo por historial desfavorable APAGADO (ver encabezado). El bonus favorable sigue activo.
 const HISTORY_PENALTY_ENABLED = false;
+// NUEVO v4.21 (5/11): objetivo unico de session_breakout_vwap (modo 'breakout') en multiplos de R.
+// null = salida anterior (TP1 1.5R / TP2 2R). Se aplica en evaluateAll DESPUES de calcular el puntaje.
+const SBV_BREAKOUT_EXIT_R = 1;
 function computeContextualScore({ direction, entry, sl, tp1, candles, htfCandles, strategyKey, symbolStats, newsContext }) {
   let score = 50;
   const details = [];
@@ -1704,6 +1956,18 @@ const DEFAULT_MIN_CONFIDENCE_SCORE = 55;
 
 function evaluateAll(candles, symbol, asset, htfCandles = null, symbolStats = null, newsContext = null, minConfidenceScore = null) {
   const signals = [];
+
+  // v4.23 (5/11): Apertura de Londres con retesteo (EURUSD, GBPUSD, XAUUSD).
+  if (LONDON_OPEN_RETEST_ENABLED && LONDON_OPEN_RETEST_SYMBOLS.includes(symbol)) {
+    const lo = safeRun('london_open_retest', detectLondonOpenRetest, candles, htfCandles);
+    if (lo.bullish || lo.bearish) {
+      signals.push({
+        strategy: 'london_open_retest', label: 'Apertura de Londres (8:00)',
+        direction: lo.bullish ? 'long' : 'short', entry: lo.entry, sl: lo.sl, tp1: lo.tp1, tp2: lo.tp2,
+        details: lo.details, mode: lo.mode, independent: true
+      });
+    }
+  }
 
   if (KILL_ZONE_NY_SYMBOLS.includes(symbol)) {
     const kz = safeRun('kill_zone_ny', detectKillZoneNY, candles, htfCandles);
@@ -1828,6 +2092,17 @@ if (ETH_VWAP_SCALP_ENABLED && symbol === 'ETHUSD') {
     });
     sig.confidence = score;
     sig.details = (sig.details || []).concat(scoreDetails);
+    // v4.21 (5/11): salida unica en +1R para session_breakout_vwap en modo breakout. Va DESPUES del
+    // puntaje a proposito (ver el changelog: con tp1 en 1R el puntaje restaria 10 por RR ajustado).
+    if (SBV_BREAKOUT_EXIT_R && sig.strategy === 'session_breakout_vwap' && sig.mode === 'breakout' &&
+        sig.entry != null && sig.sl != null) {
+      const riskDist = Math.abs(sig.entry - sig.sl);
+      if (riskDist > 0) {
+        sig.tp1 = sig.direction === 'long' ? sig.entry + riskDist * SBV_BREAKOUT_EXIT_R : sig.entry - riskDist * SBV_BREAKOUT_EXIT_R;
+        sig.tp2 = null;
+        sig.details = (sig.details || []).concat([`Salida: objetivo único en +${SBV_BREAKOUT_EXIT_R}R (cierra todo)`]);
+      }
+    }
   });
 
   // Sección 13 (27/8): piso mínimo de confianza — decidido por el usuario, no
@@ -1881,7 +2156,11 @@ module.exports = {
   // en engine.js (26/9) hubiera comparado contra undefined y tirado el servidor abajo
   // al arrancar.
   SESSION_BREAKOUT_VWAP_ENABLED,
-  SESSION_BREAKOUT_VWAP_SYMBOLS
+  SESSION_BREAKOUT_VWAP_SYMBOLS,
+  // NUEVO v4.23 (5/11): london_open_retest — el flag se exporta para assertStrategyFlagsSync() de engine.js.
+  detectLondonOpenRetest,
+  LONDON_OPEN_RETEST_ENABLED,
+  LONDON_OPEN_RETEST_SYMBOLS
 };
 
 
