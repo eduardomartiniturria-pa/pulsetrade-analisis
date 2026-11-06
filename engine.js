@@ -1,6 +1,10 @@
 // ============================================================
-// PULSE TRADE v4.8.33 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.34 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.34 (6/11): solo protege el cupo y los horarios del backtest en R (v4.8.33). NO toca estrategias ni nada que opere en vivo.
+//  1) El backtest NO arranca si a Twelve Data le quedan menos de BACKTEST_MIN_FREE_CREDITS (150) pedidos del dia: en dias de uso alto (el motor llego a 801/800 el 5/10) no debe empujar al motor en vivo contra el tope. Reintenta cada 30 min.
+//  2) El backtest NO arranca durante las ventanas de apertura donde se generan las señales (Londres 8:00-10:30 y Nueva York 9:30-12:30, hora de Nueva York, lunes a viernes): comparte el limite de 8 pedidos por minuto con el motor y podria demorar una señal. Reintenta cada 30 min.
+//  3) Ritmo de descarga 9 s -> 12 s entre pedidos (5 por minuto, deja 3 por minuto al motor en vivo). Una corrida tarda ~3 min y gasta ~14-16 pedidos; como el reporte solo se rehace si tiene mas de 24 h o es de otra version, son ~16 pedidos por dia como maximo (2% del cupo).
 // Cambios v4.8.33 (6/11): BACKTEST EN R DENTRO DE LA APP (modulo nuevo backtest-report.js). NO toca estrategias, entradas, SL/TP, umbrales ni lo que opera en vivo.
 //  1) Al arrancar (a los 4 min, y luego cada 6 h solo si el reporte tiene mas de 24 h o es de otra version) baja de Twelve Data ~7 meses de velas M15 y H1 (EURUSD, GBPUSD, XAUUSD: 3 paginas de 5000 M15; US500: 1 pagina) y corre las estrategias vela por vela con el mismo contexto H1, spread, ensanche del oro, buffer de TP y compuerta de costo que el motor en vivo. Unos 16 pedidos a Twelve Data por corrida, con 9 s entre pedidos.
 //  2) El resultado se publica en /api/state -> diagnostics.backtestReport (y diagnostics.backtestReportStatus mientras corre): R neto por estrategia, por simbolo, con 3 salidas (como paga la app / todo en +1R / todo en TP1), variante "actual" contra "previo" sobre los MISMOS datos, y corte 60/40 para ver si lo que anda en la primera parte se sostiene en la segunda.
@@ -2204,7 +2208,7 @@ const BacktestEngine = {
       if (data.values.length < perPage) break;
       const oldest = parse(data.values[data.values.length - 1].datetime);
       endDate = new Date(oldest - 1000).toISOString().slice(0, 19).replace('T', ' ');
-      await sleep(9000); // respeta el limite por minuto del plan gratis (8/min)
+      await sleep(12000); // v4.8.34: 5 pedidos/min (el plan gratis permite 8/min); deja 3/min para el motor en vivo
     }
     const seen = new Set();
     return all.filter(c => isFinite(c.time) && isFinite(c.close) && !seen.has(c.time) && seen.add(c.time)).sort((a, b) => a.time - b.time);
@@ -3935,7 +3939,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.33',
+    engineVersion: '4.8.34',
     tpComparison: getTPComparison(),
     exitAssist: ExitAssist.summarize(state.signalHistory),
     backtestReport: state.backtestReport || null,
@@ -4178,16 +4182,48 @@ async function autoRefreshTick() {
 }
 
 // v4.8.33 (6/11): backtest en R corrido dentro de la app (ver backtest-report.js y el changelog 4.8.33).
+// v4.8.34 (6/11): guardas del backtest en R. Ver changelog.
+const BACKTEST_MIN_FREE_CREDITS = 150;
+let backtestRetryTimer = null;
+function scheduleBacktestRetry() {
+  if (backtestRetryTimer) return;
+  backtestRetryTimer = setTimeout(() => {
+    backtestRetryTimer = null;
+    runBacktestReport(false).catch(e => console.warn('[backtest-report] error:', e.message));
+  }, 30 * 60 * 1000);
+}
+// Ventanas donde el motor genera las señales de apertura (hora de Nueva York, lun-vie): Londres 3:00-5:30 y NY 9:30-12:30.
+function isBacktestBlockedWindow(nowMs = Date.now()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false
+  }).formatToParts(new Date(nowMs));
+  const weekday = parts.find(p => p.type === 'weekday').value;
+  if (weekday === 'Sat' || weekday === 'Sun') return false;
+  const m = (parseInt(parts.find(p => p.type === 'hour').value, 10) % 24) * 60 + parseInt(parts.find(p => p.type === 'minute').value, 10);
+  return (m >= 3 * 60 && m < 5 * 60 + 30) || (m >= 9 * 60 + 30 && m < 12 * 60 + 30);
+}
 async function runBacktestReport(force = false) {
   if (!BacktestReport || state.backtestReportRunning) return;
   const prev = state.backtestReport;
-  if (!force && prev && prev.status === 'ok' && prev.engineVersion === '4.8.33' && Date.now() - (prev.generatedAt || 0) < 24 * 60 * 60 * 1000) return;
+  if (!force && prev && prev.status === 'ok' && prev.engineVersion === '4.8.34' && Date.now() - (prev.generatedAt || 0) < 24 * 60 * 60 * 1000) return;
   if (!state.apiKeys || !state.apiKeys.twelveData) { state.backtestReportStatus = 'sin clave de Twelve Data'; return; }
+  if (!force) {
+    const u = RequestTracker.getUsage('twelveData');
+    const remaining = u.limit ? (u.limit - u.used) : Infinity;
+    if (remaining < BACKTEST_MIN_FREE_CREDITS) {
+      state.backtestReportStatus = `esperando cupo de Twelve Data (quedan ${remaining} pedidos hoy)`;
+      scheduleBacktestRetry(); return;
+    }
+    if (isBacktestBlockedWindow()) {
+      state.backtestReportStatus = 'esperando: ventana de apertura de Londres/NY (no compite con las señales en vivo)';
+      scheduleBacktestRetry(); return;
+    }
+  }
   state.backtestReportRunning = true;
   state.backtestReportStatus = 'iniciando';
   try {
     const deps = {
-      engineVersion: '4.8.33',
+      engineVersion: '4.8.34',
       symbols: CONFIG.BACKTEST.SYMBOLS.filter(s => ASSETS[s]),
       assets: ASSETS,
       enabled: CONFIG.ENABLED_STRATEGIES,
