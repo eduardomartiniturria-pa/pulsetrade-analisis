@@ -1,6 +1,11 @@
 // ============================================================
-// PULSE TRADE v4.8.29 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.32 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.32 (5/11): se registra la estrategia nueva 'london_open_retest' (Apertura de Londres, EURUSD/GBPUSD/XAUUSD; ver custom-strategies.js v4.23): ENABLED_STRATEGIES, vencimiento de 4 h (como kill_zone_ny), tamano sugerido 1 y chequeo de sincronia del flag en assertStrategyFlagsSync(). Arranca sin muestra LIVE, asi que el Motor de Rentabilidad la opera en PROBATION (riesgo x0.5, confianza minima 65). NO toca nada mas.
+// Cambios v4.8.31 (5/11): kill_zone_ny SALE de la sombra (SHADOW_MODE.strategies = []) y vuelve a operar en los 4 activos, ahora con la entrada en el retesteo del nivel roto (custom-strategies.js v4.22). Sombra no arreglaba nada: solo evitaba medir con plata. El mecanismo de sombra por estrategia queda disponible. NO toca nada mas.
+// Cambios v4.8.30 (5/11): dos cambios, ambos a partir de los datos del /api/state del 4/11. NO toca entradas, SL, umbrales, compuerta de costo ni exit-assist.
+//  1) kill_zone_ny pasa a MODO SOMBRA por estrategia (CONFIG.SHADOW_MODE.strategies = ['kill_zone_ny'], en los 4 activos). Se sigue detectando y trackeando hasta SL/TP igual que antes, pero SIN push y con tamano sugerido 0: no cuenta para el tope diario de perdida, ni para el tope de exposicion, ni ocupa el lugar de una señal real de otra estrategia. Motivo: 12G/25P, -5.24R en vivo; solo 3 de 10 operaciones medidas llegaron a +1R, asi que ni mover la salida la rescata. Sigue sumando muestra y su resultado queda en diagnostics.tpComparison.shadow. Para volver a operarla con dinero real: SHADOW_MODE.strategies = [].
+//  2) notifyNewSignal(): el texto de gestion del push ya no dice siempre "1/2 en TP1 + SL a entrada". Las señales con objetivo unico (sin TP2: session_breakout_vwap desde custom-strategies.js v4.21, y su modo vwap_reversion) dicen "cerrar todo en TP1".
 // Cambios v4.8.29 (30/10): kill_zone_ny vuelve a operar en EURUSD y GBPUSD (se saca de DISABLED_STRATEGIES_BY_SYMBOL; deja sin efecto el punto 4 de v4.8.28). Ahora opera en los 4 activos con tamano reducido (probation x0.5) y los topes de perdida diaria. NO toca nada mas.
 // Cambios v4.8.28 (29/10): se sacan las reglas que APAGABAN estrategias por rachas o por estadistica de muestra chica, sin ninguna logica de mercado detras. Se mantienen las reglas con logica real: compuerta de costo, tope de exposicion, topes de perdida diaria en R, horarios de mercado y tamano reducido (probation x0.5). NO toca estrategias, entradas, SL/TP ni exit-assist.
 //  1) CONFIG.AUTO_TUNE.maxThreshold 90 -> 65 y el umbral adaptativo se lee con tope (resolveCustomSignal). El auto-tune subia +2 el umbral de confianza cada vez que la expectancy de la combinacion era < 0.35R (siempre, con ~38% de aciertos) y solo bajaba con > 0.95R. Como TODAS las senales salen con 65% de confianza, cualquier umbral > 65 las descartaba sin registrarlas: GBPUSD session_breakout_vwap ya estaba en 67 (29/10) y el resto iba a quedar igual al llegar a 10 operaciones cerradas. Misma trampa sin salida que la regla D (v4.8.27).
@@ -538,7 +543,8 @@ const CONFIG = {
   SIGNAL_COOLDOWN_MS: 15 * 60 * 1000,
   SIGNAL_EXPIRATION_MS: 72 * 60 * 60 * 1000,
   SIGNAL_EXPIRATION_MS_BY_STRATEGY: {
-    kill_zone_ny: 4 * 60 * 60 * 1000
+    kill_zone_ny: 4 * 60 * 60 * 1000,
+    london_open_retest: 4 * 60 * 60 * 1000 // v4.8.32: estrategia intradia de la apertura de Londres
   },
   // FIX (7.3, sesión 25/8, cierre): killZoneIntervalMs pasó de 60s a 4min. Con datos
   // reales de CONFIG (cupo twelveData 800/día, 3 llamadas por ciclo por símbolo
@@ -643,7 +649,8 @@ const CONFIG = {
   ENABLED_STRATEGIES: [
     'kill_zone_ny',          // los 4 activos
     'supply_demand',         // los 4 activos
-    'session_breakout_vwap'  // EURUSD/XAUUSD/GBPUSD — ver SESSION_BREAKOUT_VWAP_SYMBOLS en custom-strategies.js
+    'session_breakout_vwap', // EURUSD/XAUUSD/GBPUSD — ver SESSION_BREAKOUT_VWAP_SYMBOLS en custom-strategies.js
+    'london_open_retest'     // v4.8.32: EURUSD/GBPUSD/XAUUSD — ver LONDON_OPEN_RETEST_SYMBOLS en custom-strategies.js
   ],
   // v4.6: LISTA NEGRA POR ACTIVO - Desactiva estrategias específicas que fallan en un activo
   // v4.7: CIRCUIT BREAKER - auto-desactiva una estrategia en un activo tras N pérdidas
@@ -790,7 +797,8 @@ const CONFIG = {
   STRATEGY_RISK_WEIGHT: {
     kill_zone_ny: 1,
     session_false_breakout: 1.3,
-    session_breakout_vwap: 1
+    session_breakout_vwap: 1,
+    london_open_retest: 1
   },
   // v4.9 (sección 13, 27/8): piso mínimo de computeContextualScore() para que una señal
   // se muestre — decidido por el usuario en 55%, no propuesto por el motor. Antes el
@@ -848,7 +856,11 @@ const CONFIG = {
   // que XAUUSD/EURUSD: señal real, push, riskWeight normal, desde ya.
   SHADOW_MODE: {
     enabled: true,
-    symbols: []
+    symbols: [],
+    // NUEVO v4.8.30 (5/11): estrategias que corren SIEMPRE en sombra (sin push, tamano 0, fuera de
+    // los topes de riesgo diario y de exposicion), en los 4 activos y sin importar la muestra LIVE.
+    // Se registran y trackean hasta SL/TP igual que una real. [] = ninguna.
+    strategies: []   // v4.8.31: vacia (kill_zone_ny vuelve a operar). Ej.: ['kill_zone_ny'] = sombra
   },
   // NUEVO (16/9, plan de rentabilidad, punto 5): modo probation/sombra para
   // estrategias nuevas — corren y guardan historial normalmente, pero sin
@@ -922,7 +934,6 @@ class MarketData {
     return true;
   }
 }
-
 class OHLCVData {
   constructor(candles) { this.candles = candles || []; this.isValid = candles && candles.length >= 30; }
 }
@@ -2318,7 +2329,6 @@ const BacktestEngine = {
     }
   }
 };
-
 function renderBacktestStatus() {}
 function fmt(value, decimals) {
   if (value === null || value === undefined || isNaN(value)) return '--';
@@ -2591,6 +2601,15 @@ function evaluateProfitability(symbol, strategyKey, confidence) {
   const recentSlice = stats.recentResults.slice(0, cfg.recentWindow);
   const recentLosses = recentSlice.filter(r => r.result === 'loss').length;
   const base = { sample, expectancyR, winRate, recentLosses };
+
+  // S0. v4.8.30: SOMBRA POR ESTRATEGIA (CONFIG.SHADOW_MODE.strategies). Va primero a propósito:
+  // la estrategia no opera con dinero real en ningún activo, y no se debe cortar su registro
+  // por ninguna otra regla (sigue sumando muestra para poder re-evaluarla con datos).
+  const shadowStratCfg = CONFIG.SHADOW_MODE;
+  if (shadowStratCfg && shadowStratCfg.enabled && (shadowStratCfg.strategies || []).includes(strategyKey)) {
+    return { decision: 'SHADOW', mode: 'SHADOW_STRATEGY', ...base,
+      reason: `modo sombra por estrategia: ${strategyKey} se registra sin push ni riesgo real (${sample} operaciones LIVE hasta ahora)` };
+  }
 
   // R. PRUEBA DE REACTIVACIÓN (v4.8.13): la combinación cumplió el cooldown del circuit breaker y
   // está juntando 5 operaciones nuevas con riesgo reducido. Su historial LIVE viejo (el que la
@@ -3023,7 +3042,6 @@ function seedStrategyStatsFromBacktest(resultsBySymbol) {
   localStorage.setItem('pt_strategy_stats_by_symbol', JSON.stringify(state.strategyStatsBySymbol));
   localStorage.setItem('pt_consecutive_losses', JSON.stringify(state.consecutiveLosses));
 }
-
 // NUEVO (16/9, plan de rentabilidad, punto 5): si key está en
 // CONFIG.PROBATION_STRATEGIES y todavía no se graduó, revisa si ya juntó
 // CONFIG.PROBATION.minSampleToGraduate señales resueltas (sumadas entre los 4
@@ -3441,7 +3459,7 @@ function notifyNewSignal(signal) {
   // NUEVO (15/9): tamaño sugerido visible en el push cuando no es el default (1) — ver
   // CONFIG.STRATEGY_RISK_WEIGHT. Puramente informativo, no ajusta nada solo.
   const weightPart = (signal.riskWeight && signal.riskWeight !== 1) ? ` · Tamaño sugerido ${signal.riskWeight}x` : '';
-  const body = `Entrada ${fmt(signal.entry, signal.decimals)} · SL ${fmt(signal.sl, signal.decimals)} · TP1 ${fmt(signal.tp1, signal.decimals)}${confPart}${weightPart} · Gestión: 1/2 en TP1 + SL a entrada`;
+  const body = `Entrada ${fmt(signal.entry, signal.decimals)} · SL ${fmt(signal.sl, signal.decimals)} · TP1 ${fmt(signal.tp1, signal.decimals)}${confPart}${weightPart} · Gestión: ${signal.tp2 != null ? '1/2 en TP1 + SL a entrada' : 'cerrar todo en TP1'}`;
   // v4.8.2: deja rastro en los logs de Render cada vez que se intenta un push REAL (las señales
   // en sombra/probation nunca llegan hasta acá) — permite distinguir "no se intentó enviar" de
   // "se intentó y el push falló".
@@ -3871,7 +3889,7 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.29',
+    engineVersion: '4.8.32',
     tpComparison: getTPComparison(),
     exitAssist: ExitAssist.summarize(state.signalHistory),
     generatedAt: Date.now()
@@ -4200,7 +4218,9 @@ function assertStrategyFlagsSync() {
     // ACTIVA que depende de un flag booleano en custom-strategies.js. Sin este check,
     // apagar SESSION_BREAKOUT_VWAP_ENABLED de un lado sin sacar 'session_breakout_vwap'
     // de ENABLED_STRATEGIES (o viceversa) quedaba desincronizado en silencio.
-    { flag: 'SESSION_BREAKOUT_VWAP_ENABLED', key: 'session_breakout_vwap', value: CustomStrategies.SESSION_BREAKOUT_VWAP_ENABLED }
+    { flag: 'SESSION_BREAKOUT_VWAP_ENABLED', key: 'session_breakout_vwap', value: CustomStrategies.SESSION_BREAKOUT_VWAP_ENABLED },
+    // NUEVO v4.8.32 (5/11): london_open_retest.
+    { flag: 'LONDON_OPEN_RETEST_ENABLED', key: 'london_open_retest', value: CustomStrategies.LONDON_OPEN_RETEST_ENABLED }
   ];
   checks.forEach(({ flag, key, value }) => {
     const inWhitelist = CONFIG.ENABLED_STRATEGIES.includes(key);
