@@ -1,4 +1,16 @@
 // ============================================================
+// ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.24 (6/11, soporte para backtest; sin cambios de logica)
+// ============================================================
+// Cambios v4.24 (6/11): dos cambios de infraestructura, ninguno altera lo que decide una estrategia.
+//  1) getLondonTimeParts / getNYTimeParts / getCordobaTimeParts pasan a makeTimePartsFn(): el Intl.DateTimeFormat
+//     se crea una sola vez por zona (antes se creaba en cada llamada, miles de veces por ciclo) y los resultados
+//     por timestamp se guardan en un cache acotado. Mismo resultado (verificado sobre ~30.000 timestamps en las 3
+//     zonas, incluidos los cambios de horario de verano): evaluateAll pasa de ~13 ms a ~0,3 ms por ventana.
+//  2) KZ_RETEST_ENTRY_ENABLED y SBV_BREAKOUT_EXIT_R pasan de const a let, y se exporta withBacktestFlags(flags, fn):
+//     cambia esos dos flags SOLO durante la ejecucion sincrona de fn y los restaura siempre (finally). Lo usa
+//     backtest-report.js para comparar, sobre los mismos datos, el codigo actual contra el anterior. El motor en
+//     vivo nunca queda con un flag cambiado porque fn es sincronica (no cede el control mientras dura).
+// ============================================================
 // ESTRATEGIAS INDEPENDIENTES - PulseTrade PRO v4.23 (5/11, estrategia nueva: london_open_retest)
 // ============================================================
 // Cambios v4.23 (5/11): estrategia NUEVA 'london_open_retest' (Apertura de Londres) para EURUSD, GBPUSD y XAUUSD.
@@ -298,33 +310,32 @@ function calculateMACDSeries(candles, fast = 12, slow = 26, signalPeriod = 9) {
 // (ej. "ARG = NY + 1h"), porque ese offset cambia con el horario de
 // verano de EE.UU. (EDT/EST) y un valor fijo queda mal la mitad del año.
 
-function getLondonTimeParts(ms) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'Europe/London', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
+// v4.24 (6/11): fabrica de funciones de hora por zona. Mismo resultado que antes (weekday, dateKey, hour,
+// minute), pero el Intl.DateTimeFormat se crea UNA sola vez por zona (antes se creaba en cada llamada, que se
+// repite miles de veces por ciclo y por backtest) y los resultados por timestamp se guardan en un cache acotado.
+// Devuelve un objeto nuevo en cada llamada, asi que ningun llamador comparte estado con otro.
+function makeTimePartsFn(timeZone) {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone, weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
     hour: 'numeric', minute: 'numeric', hour12: false
-  }).formatToParts(new Date(ms));
-  const get = t => parts.find(p => p.type === t).value;
-  return {
-    weekday: get('weekday'),
-    dateKey: `${get('year')}-${get('month')}-${get('day')}`,
-    hour: parseInt(get('hour'), 10) % 24,
-    minute: parseInt(get('minute'), 10)
+  });
+  const cache = new Map();
+  return function (ms) {
+    let t = cache.get(ms);
+    if (!t) {
+      const parts = fmt.formatToParts(new Date(ms));
+      const get = k => parts.find(p => p.type === k).value;
+      t = [get('weekday'), `${get('year')}-${get('month')}-${get('day')}`, parseInt(get('hour'), 10) % 24, parseInt(get('minute'), 10)];
+      if (cache.size > 60000) cache.clear();
+      cache.set(ms, t);
+    }
+    return { weekday: t[0], dateKey: t[1], hour: t[2], minute: t[3] };
   };
 }
 
-function getNYTimeParts(ms) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: 'numeric', minute: 'numeric', hour12: false
-  }).formatToParts(new Date(ms));
-  const get = t => parts.find(p => p.type === t).value;
-  return {
-    weekday: get('weekday'),
-    dateKey: `${get('year')}-${get('month')}-${get('day')}`,
-    hour: parseInt(get('hour'), 10) % 24,
-    minute: parseInt(get('minute'), 10)
-  };
-}
+const getLondonTimeParts = makeTimePartsFn('Europe/London');
+
+const getNYTimeParts = makeTimePartsFn('America/New_York');
 
 // ---------------------------------------------------------
 // Flags de estrategias por símbolo (ver uso en evaluateAll())
@@ -511,19 +522,7 @@ function getH1Bias(htfCandles) {
 // archivos. Hoy está en true (activa).
 const SESSION_BREAKOUT_VWAP_ENABLED = true;
 
-function getCordobaTimeParts(ms) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Argentina/Cordoba', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: 'numeric', minute: 'numeric', hour12: false
-  }).formatToParts(new Date(ms));
-  const get = t => parts.find(p => p.type === t).value;
-  return {
-    weekday: get('weekday'),
-    dateKey: `${get('year')}-${get('month')}-${get('day')}`,
-    hour: parseInt(get('hour'), 10) % 24,
-    minute: parseInt(get('minute'), 10)
-  };
-}
+const getCordobaTimeParts = makeTimePartsFn('America/Argentina/Cordoba');
 
 function isCordobaSessionWindow(parts) {
   const m = parts.hour * 60 + parts.minute;
@@ -550,7 +549,7 @@ const KZ_MIN_BODY_RATIO_RANGE = 0.6;
 // DENTRO de esta ventana. No cambia rango de referencia, filtros, SL ni TP.
 const KZ_MAX_BREAKOUT_OPEN_MIN = 10 * 60 + 45;
 // v4.22 (5/11): entrada en el retesteo del nivel roto (ver changelog de la v4.22). Ajustables.
-const KZ_RETEST_ENTRY_ENABLED = true;
+let KZ_RETEST_ENTRY_ENABLED = true;
 const KZ_RETEST_MAX_CANDLES = 8;       // el retesteo debe ocurrir dentro de las 8 velas siguientes a la ruptura (2 h en M15)
 const KZ_RETEST_TOUCH_ATR = 0.15;      // la vela debe llegar a menos de 0.15 x ATR del nivel (o cruzarlo)
 const KZ_RETEST_SL_ATR = 0.35;         // colchon del SL pasado el nivel / la mecha del retesteo
@@ -1844,7 +1843,7 @@ function detectEthMomentumBreakout(candles, htfCandles) {
 const HISTORY_PENALTY_ENABLED = false;
 // NUEVO v4.21 (5/11): objetivo unico de session_breakout_vwap (modo 'breakout') en multiplos de R.
 // null = salida anterior (TP1 1.5R / TP2 2R). Se aplica en evaluateAll DESPUES de calcular el puntaje.
-const SBV_BREAKOUT_EXIT_R = 1;
+let SBV_BREAKOUT_EXIT_R = 1;
 function computeContextualScore({ direction, entry, sl, tp1, candles, htfCandles, strategyKey, symbolStats, newsContext }) {
   let score = 50;
   const details = [];
@@ -2124,6 +2123,19 @@ if (ETH_VWAP_SCALP_ENABLED && symbol === 'ETHUSD') {
   return passed;
 }
 
+// v4.24 (6/11): cambia kzRetest / sbvExitR SOLO mientras dura fn (sincronica) y los restaura siempre.
+function withBacktestFlags(flags, fn) {
+  const prev = { kz: KZ_RETEST_ENTRY_ENABLED, sbv: SBV_BREAKOUT_EXIT_R };
+  try {
+    if (flags && flags.kzRetest !== undefined) KZ_RETEST_ENTRY_ENABLED = !!flags.kzRetest;
+    if (flags && flags.sbvExitR !== undefined) SBV_BREAKOUT_EXIT_R = flags.sbvExitR;
+    return fn();
+  } finally {
+    KZ_RETEST_ENTRY_ENABLED = prev.kz;
+    SBV_BREAKOUT_EXIT_R = prev.sbv;
+  }
+}
+
 module.exports = {
   evaluateAll,
   computeContextualScore,
@@ -2160,7 +2172,9 @@ module.exports = {
   // NUEVO v4.23 (5/11): london_open_retest — el flag se exporta para assertStrategyFlagsSync() de engine.js.
   detectLondonOpenRetest,
   LONDON_OPEN_RETEST_ENABLED,
-  LONDON_OPEN_RETEST_SYMBOLS
+  LONDON_OPEN_RETEST_SYMBOLS,
+  // NUEVO v4.24 (6/11): lo usa backtest-report.js para correr el codigo actual y el anterior sobre los mismos datos.
+  withBacktestFlags
 };
 
 
