@@ -1,6 +1,24 @@
 // ============================================================
-// PULSE TRADE v4.8.34 - MOTOR DE SEÑALES PROFESIONAL
+// PULSE TRADE v4.8.37 - MOTOR DE SEÑALES PROFESIONAL
 // ============================================================
+// Cambios v4.8.37 (7/11): TABLERO DIARIO DE TENDENCIA + AVISO AL CELULAR (trend-backtest.js v2). NO genera señales de la app ni toca estrategias, entradas, SL/TP, umbrales ni nada que opere en vivo: es un aviso aparte para operar a mano en MT5 el sistema de tendencia (canal 55/20, solo compras, stop 2.5 ATR sobre velas diarias) en XAUUSD, US500, BTCUSD y ETHUSD.
+//  1) Todos los dias a las 00:35 UTC (21:35 Cordoba, vela diaria cerrada) baja 500 velas diarias de cada uno (4 pedidos de Twelve Data) y publica en /api/state -> diagnostics.trendBoard: cierre, ATR, nivel de ruptura, nivel de salida, stop sugerido y estado del sistema por activo.
+//  2) Manda push (una sola vez por evento, con memoria entre reinicios) cuando el sistema pide ENTRAR (ruptura de 55 dias: comprar mañana a la apertura), SALIR (cierre bajo el minimo de 20 dias) o cuando se toco el STOP del sistema.
+//  3) BTCUSD y ETHUSD NO vuelven al ciclo en vivo: solo se bajan las velas diarias para este tablero y para el backtest de tendencia (TREND_EXTRA_ASSETS). El desfase de precio contra Exness no importa a escala diaria. El spread de ambos es una estimacion (ajustar con el real de tu cuenta).
+//  4) El backtest de tendencia (v4.8.36) ahora tambien mide BTCUSD y ETHUSD (grupoCripto en el reporte).
+//  5) Guardas: una vez por dia, no corre con menos de 20 pedidos libres de Twelve Data, ni en las ventanas de apertura, ni mientras corren los backtests. Si falla, el motor sigue igual. Para apagarlo: variable TREND_BOARD_DISABLED en Render.
+// Cambios v4.8.36 (7/11): BACKTEST DE TENDENCIA EN VELAS DIARIAS (modulo nuevo trend-backtest.js). SOLO MEDICION: no genera señales ni toca estrategias, entradas, SL/TP, umbrales ni nada que opere en vivo.
+//  Motivo: la evidencia externa (seguimiento de tendencia en horizontes largos, donde el spread pesa ~1-2% del stop en vez de ~16%) es lo unico con respaldo de decadas; antes de escribir una estrategia en vivo se prueba con ~20 años de velas diarias.
+//  1) A los 9 min del arranque (despues del backtest en R) y luego cada 6 h solo si el reporte tiene mas de 24 h o es de otra version, baja 5000 velas diarias por activo (XAUUSD, US500, EURUSD, GBPUSD = 4 pedidos de Twelve Data, 12 s entre pedidos) y simula canal de Donchian 55/20 y 20/10, solo compras y compras+ventas, stop 2.5 ATR.
+//  2) El resultado se publica en /api/state -> diagnostics.trendBacktest (y diagnostics.trendBacktestStatus mientras corre): R neto por variante, por activo, con corte 60/40, por año, contra comprar-y-mantener y tiempo en mercado.
+//  3) Guardas: no corre con menos de 40 pedidos libres de Twelve Data, ni en las ventanas de apertura (Londres/NY), ni mientras corre el backtest en R. Si trend-backtest.js falta o falla, el motor sigue igual (require protegido). Para apagarlo: variable TREND_BACKTEST_DISABLED en Render.
+//  4) fetchCandlesPaged() acepta el marco diario ('1d' -> '1day') y fechas sin hora (las velas diarias de Twelve Data vienen como AAAA-MM-DD). Los marcos '15m' y '1h' no cambian.
+// Cambios v4.8.35 (7/11): EURUSD y GBPUSD se PAUSAN del ciclo en vivo (CONFIG.PAUSED_SYMBOLS). NO toca estrategias, entradas, SL/TP, umbrales, compuerta de costo ni el backtest.
+//  Motivo (backtest en R de 356 operaciones y 67 en vivo): session_breakout_vwap en EURUSD rinde -0.20R por operacion (96 operaciones) y tambien pierde en vivo; kill_zone_ny en GBPUSD pierde en vivo y no tiene respaldo en el backtest. Ademas el spread (1.5-2 pips) pesa ~16% de stops de 8-13 pips, y cada activo en vivo gasta ~3 pedidos de Twelve Data por ciclo (cupo gratuito de 800/dia).
+//  1) refreshAllData(): un activo pausado ya no se consulta, SALVO que tenga una operacion abierta (pending en el historial o señal activa): en ese caso se sigue pidiendo quote y velas del TF base solo para que SL/TP/vencimiento la cierren bien. Cuando se cierra la ultima, el activo deja de consumir cupo.
+//  2) refreshAsset(): un activo pausado no pide velas H1, no evalua estrategias y no genera señales nuevas; solo trackea lo abierto.
+//  3) El backtest en R sigue midiendo EURUSD y GBPUSD (CONFIG.BACKTEST.SYMBOLS intacto). ASSETS intacto: el historial y las estadisticas se conservan.
+//  Para reactivarlos: vaciar CONFIG.PAUSED_SYMBOLS (PAUSED_SYMBOLS: []).
 // Cambios v4.8.34 (6/11): solo protege el cupo y los horarios del backtest en R (v4.8.33). NO toca estrategias ni nada que opere en vivo.
 //  1) El backtest NO arranca si a Twelve Data le quedan menos de BACKTEST_MIN_FREE_CREDITS (150) pedidos del dia: en dias de uso alto (el motor llego a 801/800 el 5/10) no debe empujar al motor en vivo contra el tope. Reintenta cada 30 min.
 //  2) El backtest NO arranca durante las ventanas de apertura donde se generan las señales (Londres 8:00-10:30 y Nueva York 9:30-12:30, hora de Nueva York, lunes a viernes): comparte el limite de 8 pedidos por minuto con el motor y podria demorar una señal. Reintenta cada 30 min.
@@ -523,6 +541,16 @@ const ExitAssist = require('./exit-assist'); // v4.8.26: solo medicion y aviso d
 // v4.8.33 (6/11): backtest en R. Si el archivo falta o no carga, el motor sigue sin backtest (no se cae).
 let BacktestReport = null;
 try { BacktestReport = require('./backtest-report'); } catch (e) { console.warn('[backtest-report] no se pudo cargar:', e.message); }
+// v4.8.36: backtest de tendencia en velas diarias (solo medicion).
+let TrendBacktest = null;
+try { TrendBacktest = require('./trend-backtest'); } catch (e) { console.warn('[trend-backtest] no se pudo cargar:', e.message); }
+// v4.8.37: activos que NO estan en el ciclo en vivo y solo se usan para el tablero y el backtest de tendencia en velas diarias.
+const TREND_EXTRA_ASSETS = {
+  BTCUSD: { name: 'BTC/USD', symbols: { twelveData: 'BTC/USD' }, decimals: 2, pipSize: 1 },
+  ETHUSD: { name: 'ETH/USD', symbols: { twelveData: 'ETH/USD' }, decimals: 2, pipSize: 0.1 }
+};
+const TREND_EXTRA_SPREAD_PIPS = { BTCUSD: 30, ETHUSD: 15 }; // ESTIMADO (~US$30 en BTC, ~US$1.5 en ETH): ajustar con el spread real de la cuenta
+const TREND_BOARD_SYMBOLS = ['XAUUSD', 'US500', 'BTCUSD', 'ETHUSD'];
 
 const CONFIG = {
   REFRESH_INTERVAL: 30000,
@@ -623,6 +651,8 @@ const CONFIG = {
     PATTERN_MIN_SAMPLE: 8,
     PATTERN_MAX_BONUS: 8
   },
+  // v4.8.35: activos pausados del ciclo en vivo (ver changelog). Siguen en ASSETS y en el backtest.
+  PAUSED_SYMBOLS: ['EURUSD', 'GBPUSD'],
   BACKTEST: {
     SYMBOLS: ['XAUUSD', 'EURUSD', 'US500', 'GBPUSD'],
     CANDLE_LIMIT: 1000,
@@ -1075,6 +1105,15 @@ let state = {
   backtestReport: (() => { try { return JSON.parse(localStorage.getItem('pt_backtest_report_v1') || 'null'); } catch (e) { return null; } })(),
   backtestReportStatus: 'pendiente',
   backtestReportRunning: false,
+  // v4.8.36: backtest de tendencia en velas diarias (ver runTrendBacktest). Se conserva entre reinicios.
+  trendBacktest: (() => { try { return JSON.parse(localStorage.getItem('pt_trend_backtest_v1') || 'null'); } catch (e) { return null; } })(),
+  trendBacktestStatus: 'pendiente',
+  trendBacktestRunning: false,
+  // v4.8.37: tablero diario de tendencia y memoria de avisos ya enviados.
+  trendBoard: (() => { try { return JSON.parse(localStorage.getItem('pt_trend_board_v1') || 'null'); } catch (e) { return null; } })(),
+  trendBoardStatus: 'pendiente',
+  trendBoardRunning: false,
+  trendAlertsSent: (() => { try { return JSON.parse(localStorage.getItem('pt_trend_alerts_v1') || '{}') || {}; } catch (e) { return {}; } })(),
   soundEnabled: localStorage.getItem('pt_sound_enabled') !== 'false',
   persistKeys: localStorage.getItem('pt_persist_keys') === 'true',
   strictMode: localStorage.getItem('pt_strict_mode') === 'true',
@@ -2183,11 +2222,11 @@ const BacktestEngine = {
   // Devuelve velas en orden cronologico, sin duplicados, con el mismo priceMultiplier que el motor en vivo.
   async fetchCandlesPaged(symbol, interval, perPage, pages) {
     if (!state.apiKeys.twelveData) return null;
-    const asset = ASSETS[symbol];
-    const tfMap = { '15m': '15min', '1h': '1h' };
+    const asset = ASSETS[symbol] || TREND_EXTRA_ASSETS[symbol]; // v4.8.37: BTC/ETH solo para el marco diario de tendencia
+    const tfMap = { '15m': '15min', '1h': '1h', '1d': '1day' }; // v4.8.36: marco diario
     const headers = { 'Authorization': `apikey ${state.apiKeys.twelveData}` };
     const mult = asset.priceMultiplier || 1;
-    const parse = str => Date.parse(String(str).replace(' ', 'T') + 'Z');
+    const parse = str => { const x = String(str).replace(' ', 'T'); return Date.parse(x.length === 10 ? x + 'T00:00:00Z' : x + 'Z'); }; // v4.8.36: las velas diarias vienen como AAAA-MM-DD
     let all = [];
     let endDate = null;
     for (let p = 0; p < pages; p++) {
@@ -3939,11 +3978,15 @@ function getDiagnostics() {
     ...(state.diagnostics || { candleAge: {}, quote: {}, costGate: {} }),
     providerUsage: usage,
     env: { TWELVEDATA_DAILY_LIMIT: process.env.TWELVEDATA_DAILY_LIMIT === undefined ? '(sin definir -> 800 por defecto)' : process.env.TWELVEDATA_DAILY_LIMIT, twelveDataKeyPresent: !!(state.apiKeys && state.apiKeys.twelveData) },
-    engineVersion: '4.8.34',
+    engineVersion: '4.8.37',
     tpComparison: getTPComparison(),
     exitAssist: ExitAssist.summarize(state.signalHistory),
     backtestReport: state.backtestReport || null,
     backtestReportStatus: state.backtestReportStatus || 'pendiente',
+    trendBacktest: state.trendBacktest || null,
+    trendBacktestStatus: state.trendBacktestStatus || 'pendiente',
+    trendBoard: state.trendBoard || null,
+    trendBoardStatus: state.trendBoardStatus || 'pendiente',
     generatedAt: Date.now()
   };
 }
@@ -4052,7 +4095,8 @@ async function refreshAsset(symbol, forceRefresh = false) {
     recordCandleAgeDiagnostic(symbol, ohlcv.candles, state.currentTF); // E0 (solo lectura)
     const htfTF = CONFIG.HTF_MAP[state.currentTF] || null;
     let htfCandles = null;
-    if (htfTF) {
+    const symbolPaused = isSymbolPaused(symbol); // v4.8.35
+    if (htfTF && !symbolPaused) { // v4.8.35: un activo pausado no necesita velas H1 (solo trackea SL/TP de lo abierto)
       try { // v4.8.8 (S2, auditoría punto E): se piden 100 velas H1 en vez de 60. La EMA50 del filtro de tendencia
       // apenas converge con 60 y con T1 se descarta la vela abierta (quedan 59). Twelve Data cobra por pedido,
       // no por cantidad de velas. Efecto secundario: supply_demand arma sus zonas sobre estas velas H1, así que
@@ -4068,6 +4112,11 @@ async function refreshAsset(symbol, forceRefresh = false) {
     state.htfDiagnostics = state.htfDiagnostics || {};
     state.htfDiagnostics[symbol] = { tf: htfTF, count: htfCandles ? htfCandles.length : 0, at: Date.now() };
     checkHistoryOutcomes(symbol, quote.last, ohlcv.candles);
+    if (symbolPaused) { // v4.8.35: pausado => solo trackeo de lo abierto, sin evaluar estrategias ni generar señales
+      addLog('schedule', 'activo pausado: se trackea la operacion abierta, sin señales nuevas', symbol);
+      refreshActiveCustomSignalsDisplay(symbol, quote, new Set());
+      return;
+    }
     // v4.8.7 (T1): las estrategias se evalúan solo sobre velas CERRADAS. Las velas completas
     // (con la abierta) siguen alimentando SL/TP, quote, feed stale y diagnósticos.
     const closedCandles = getClosedCandles(ohlcv.candles, state.currentTF);
@@ -4151,12 +4200,32 @@ async function refreshAsset(symbol, forceRefresh = false) {
     }
   }
 }
+// v4.8.35: activos pausados del ciclo en vivo.
+function isSymbolPaused(symbol) {
+  return !!(CONFIG.PAUSED_SYMBOLS && CONFIG.PAUSED_SYMBOLS.includes(symbol));
+}
+// v4.8.35: ¿el activo tiene una operacion abierta que todavia hay que trackear hasta SL/TP/vencimiento?
+function hasOpenSignals(symbol) {
+  const pending = (state.signalHistory || []).some(h => h && h.symbol === symbol && h.result === 'pending');
+  if (pending) return true;
+  return Object.keys(state.activeCustomSignals || {}).some(k => k.slice(0, k.indexOf('_')) === symbol);
+}
 async function refreshAllData(forceRefresh = false) {
   renderTradingHoursBar();
   checkReactivationEligibility(); // 27/9: 1 vez por ciclo completo, antes de evaluar cualquier símbolo
   if (forceRefresh) setLoading(true, 'Consultando proveedores de datos...');
   try {
     for (const symbol of Object.keys(ASSETS)) {
+      // v4.8.35: activo pausado sin operaciones abiertas => no se consulta (ahorra cupo). Con operacion abierta
+      // se sigue consultando solo para cerrarla bien (refreshAsset no genera señales nuevas para pausados).
+      if (isSymbolPaused(symbol) && !hasOpenSignals(symbol)) {
+        const reason = 'activo pausado (sin consultas ni señales nuevas)';
+        state.marketStatus = state.marketStatus || {};
+        state.marketStatus[symbol] = { symbol, open: false, signalsAllowed: false, phase: 'paused', reason, resumesAtUtc: null, estimated: false, feedStale: false, feedAgeMin: null, signalBlockReason: reason };
+        markMarketClosedDisplays(symbol, reason);
+        renderSignal(symbol, { type: 'market-closed', reason });
+        continue;
+      }
       await refreshAsset(symbol, forceRefresh);
       await sleep(8000);
     }
@@ -4205,7 +4274,7 @@ function isBacktestBlockedWindow(nowMs = Date.now()) {
 async function runBacktestReport(force = false) {
   if (!BacktestReport || state.backtestReportRunning) return;
   const prev = state.backtestReport;
-  if (!force && prev && prev.status === 'ok' && prev.engineVersion === '4.8.34' && Date.now() - (prev.generatedAt || 0) < 24 * 60 * 60 * 1000) return;
+  if (!force && prev && prev.status === 'ok' && prev.engineVersion === '4.8.37' && Date.now() - (prev.generatedAt || 0) < 24 * 60 * 60 * 1000) return;
   if (!state.apiKeys || !state.apiKeys.twelveData) { state.backtestReportStatus = 'sin clave de Twelve Data'; return; }
   if (!force) {
     const u = RequestTracker.getUsage('twelveData');
@@ -4223,7 +4292,7 @@ async function runBacktestReport(force = false) {
   state.backtestReportStatus = 'iniciando';
   try {
     const deps = {
-      engineVersion: '4.8.34',
+      engineVersion: '4.8.37',
       symbols: CONFIG.BACKTEST.SYMBOLS.filter(s => ASSETS[s]),
       assets: ASSETS,
       enabled: CONFIG.ENABLED_STRATEGIES,
@@ -4262,6 +4331,124 @@ async function runBacktestReport(force = false) {
   }
 }
 
+// v4.8.36: backtest de tendencia en velas diarias (solo medicion; ver trend-backtest.js).
+let trendBacktestRetryTimer = null;
+function scheduleTrendBacktestRetry() {
+  if (trendBacktestRetryTimer) return;
+  trendBacktestRetryTimer = setTimeout(() => {
+    trendBacktestRetryTimer = null;
+    runTrendBacktest(false).catch(e => console.warn('[trend-backtest] error:', e.message));
+  }, 30 * 60 * 1000);
+}
+async function runTrendBacktest(force = false) {
+  if (!TrendBacktest || state.trendBacktestRunning) return;
+  const prev = state.trendBacktest;
+  if (!force && prev && prev.status === 'ok' && prev.engineVersion === '4.8.37' && Date.now() - (prev.generatedAt || 0) < 24 * 60 * 60 * 1000) return;
+  if (!state.apiKeys || !state.apiKeys.twelveData) { state.trendBacktestStatus = 'sin clave de Twelve Data'; return; }
+  if (!force) {
+    const u = RequestTracker.getUsage('twelveData');
+    const remaining = u.limit ? (u.limit - u.used) : Infinity;
+    if (remaining < 50) { state.trendBacktestStatus = `esperando cupo de Twelve Data (quedan ${remaining} pedidos hoy)`; scheduleTrendBacktestRetry(); return; }
+    if (isBacktestBlockedWindow()) { state.trendBacktestStatus = 'esperando: ventana de apertura de Londres/NY (no compite con las señales en vivo)'; scheduleTrendBacktestRetry(); return; }
+    if (state.backtestReportRunning || state.trendBoardRunning) { state.trendBacktestStatus = 'esperando: corre el backtest en R'; scheduleTrendBacktestRetry(); return; }
+  }
+  state.trendBacktestRunning = true;
+  state.trendBacktestStatus = 'iniciando';
+  try {
+    const report = await TrendBacktest.run({
+      engineVersion: '4.8.37',
+      symbols: CONFIG.BACKTEST.SYMBOLS.filter(s => ASSETS[s]).concat(Object.keys(TREND_EXTRA_ASSETS)),
+      assets: Object.assign({}, ASSETS, TREND_EXTRA_ASSETS),
+      spreadPips: Object.assign({}, CONFIG.ESTIMATED_SPREAD_PIPS_BY_SYMBOL, TREND_EXTRA_SPREAD_PIPS),
+      fetchD1: sym => BacktestEngine.fetchCandlesPaged(sym, '1d', 5000, 1),
+      sleep,
+      yieldFn: () => sleep(4),
+      progress: msg => { state.trendBacktestStatus = msg; },
+      shouldAbort: () => isProviderInCooldown('twelveData')
+    });
+    state.trendBacktest = report;
+    state.trendBacktestStatus = report.status;
+    try { localStorage.setItem('pt_trend_backtest_v1', JSON.stringify(report)); } catch (e) {}
+    console.log(`[trend-backtest] terminado: ${report.status}`);
+  } catch (e) {
+    state.trendBacktestStatus = 'error: ' + e.message;
+    console.warn('[trend-backtest] error:', e.message);
+  } finally {
+    state.trendBacktestRunning = false;
+  }
+}
+
+// v4.8.37: tablero diario de tendencia + aviso al celular (ver trend-backtest.js v2 y el changelog 4.8.37).
+function notifyTrendEvents(board) {
+  state.trendAlertsSent = state.trendAlertsSent || {};
+  Object.keys(board.symbols || {}).forEach(sym => {
+    const b = board.symbols[sym];
+    if (!b || !b.evento) return;
+    if (Date.now() - b.barTime > 40 * 60 * 60 * 1000) return; // solo eventos de la ultima vela diaria
+    const key = `${sym}:${b.evento}:${b.barTime}`;
+    if (state.trendAlertsSent[key]) return;
+    const a = ASSETS[sym] || TREND_EXTRA_ASSETS[sym] || {};
+    const name = a.name || sym;
+    const d = a.decimals != null ? a.decimals : 2;
+    let title, body;
+    if (b.evento === 'ENTRADA') {
+      title = `📈 Tendencia ${name}: ruptura de 55 días`;
+      body = `El sistema pide COMPRAR mañana a la apertura. Cierre ${fmt(b.cierre, d)} · Stop sugerido ${fmt(b.stopSugerido, d)} (${b.stopDistanciaPct}% abajo) · Salida si cierra bajo ${fmt(b.salidaSiCierraBajo, d)}. Arriesgá como máximo 1% de la cuenta.`;
+    } else if (b.evento === 'SALIDA') {
+      title = `📉 Tendencia ${name}: salida`;
+      body = `Cerró bajo el mínimo de 20 días (cierre ${fmt(b.cierre, d)}). Si estás comprado, salí mañana a la apertura.`;
+    } else {
+      title = `⛔ Tendencia ${name}: stop del sistema tocado`;
+      body = `El precio tocó el stop del sistema. Sin posición hasta una nueva ruptura de 55 días.`;
+    }
+    state.trendAlertsSent[key] = Date.now();
+    const keys = Object.keys(state.trendAlertsSent);
+    if (keys.length > 200) keys.sort((x, y) => state.trendAlertsSent[x] - state.trendAlertsSent[y]).slice(0, keys.length - 200).forEach(k => delete state.trendAlertsSent[k]);
+    try { localStorage.setItem('pt_trend_alerts_v1', JSON.stringify(state.trendAlertsSent)); } catch (e) {}
+    console.log(`[push] tendencia ${sym} ${b.evento}`);
+    sendPushToAll({ title, body, symbol: sym }).catch(err => console.error('Error enviando push de tendencia:', err.message));
+  });
+}
+async function runTrendBoard(force = false) {
+  if (!TrendBacktest || state.trendBoardRunning) return;
+  if (!state.apiKeys || !state.apiKeys.twelveData) { state.trendBoardStatus = 'sin clave de Twelve Data'; return; }
+  const now = new Date();
+  const todayUtc = now.toISOString().slice(0, 10);
+  if (!force) {
+    if (state.trendBoard && state.trendBoard.dayRun === todayUtc) return; // una vez por dia (UTC)
+    if (now.getUTCHours() * 60 + now.getUTCMinutes() < 35) return;        // esperar a las 00:35 UTC: vela diaria cerrada
+    const u = RequestTracker.getUsage('twelveData');
+    const remaining = u.limit ? (u.limit - u.used) : Infinity;
+    if (remaining < 20) { state.trendBoardStatus = `esperando cupo de Twelve Data (quedan ${remaining} pedidos hoy)`; return; }
+    if (isBacktestBlockedWindow()) { state.trendBoardStatus = 'esperando: ventana de apertura de Londres/NY'; return; }
+    if (state.backtestReportRunning || state.trendBacktestRunning) { state.trendBoardStatus = 'esperando: corre un backtest'; return; }
+  }
+  state.trendBoardRunning = true;
+  state.trendBoardStatus = 'iniciando';
+  try {
+    const board = await TrendBacktest.runBoard({
+      engineVersion: '4.8.37',
+      symbols: TREND_BOARD_SYMBOLS,
+      assets: Object.assign({}, ASSETS, TREND_EXTRA_ASSETS),
+      spreadPips: Object.assign({}, CONFIG.ESTIMATED_SPREAD_PIPS_BY_SYMBOL, TREND_EXTRA_SPREAD_PIPS),
+      fetchD1: sym => BacktestEngine.fetchCandlesPaged(sym, '1d', 500, 1),
+      sleep,
+      shouldAbort: () => isProviderInCooldown('twelveData')
+    });
+    board.dayRun = todayUtc;
+    state.trendBoard = board;
+    state.trendBoardStatus = 'ok';
+    try { localStorage.setItem('pt_trend_board_v1', JSON.stringify(board)); } catch (e) {}
+    notifyTrendEvents(board);
+    console.log(`[trend-board] listo: ${Object.keys(board.symbols).length} activos`);
+  } catch (e) {
+    state.trendBoardStatus = 'error: ' + e.message;
+    console.warn('[trend-board] error:', e.message);
+  } finally {
+    state.trendBoardRunning = false;
+  }
+}
+
 function startAutoRefreshLoop() {
   if (autoRefreshTimer) return;
   autoRefreshTick();
@@ -4270,6 +4457,18 @@ function startAutoRefreshLoop() {
     const go = force => runBacktestReport(force).catch(e => console.warn('[backtest-report] error:', e.message));
     setTimeout(() => go(!!process.env.BACKTEST_REPORT_FORCE), 4 * 60 * 1000);
     setInterval(() => go(false), 6 * 60 * 60 * 1000);
+  }
+  // v4.8.36: el backtest de tendencia arranca a los 9 min (despues del backtest en R) y se revisa cada 6 h.
+  if (TrendBacktest && !process.env.TREND_BACKTEST_DISABLED) {
+    const goT = force => runTrendBacktest(force).catch(e => console.warn('[trend-backtest] error:', e.message));
+    setTimeout(() => goT(!!process.env.TREND_BACKTEST_FORCE), 9 * 60 * 1000);
+    setInterval(() => goT(false), 6 * 60 * 60 * 1000);
+  }
+  // v4.8.37: tablero diario de tendencia. Primer intento a los 11 min del arranque (si no hay uno del dia) y revision cada 30 min.
+  if (TrendBacktest && !process.env.TREND_BOARD_DISABLED) {
+    const goB = force => runTrendBoard(force).catch(e => console.warn('[trend-board] error:', e.message));
+    setTimeout(() => goB(false), 11 * 60 * 1000);
+    setInterval(() => goB(false), 30 * 60 * 1000);
   }
 }
 
@@ -4556,5 +4755,7 @@ module.exports = {
   startAutoRefreshLoop, stopAutoRefreshLoop, getDynamicRefreshIntervalMs, isKillZoneWindow,
   getDiagnostics,
   getMarketStatus,
-  runBacktestReport // v4.8.33: para pruebas y para dispararlo desde afuera si hace falta
+  runBacktestReport, // v4.8.33: para pruebas y para dispararlo desde afuera si hace falta
+  runTrendBacktest, // v4.8.36
+  runTrendBoard // v4.8.37
 };
